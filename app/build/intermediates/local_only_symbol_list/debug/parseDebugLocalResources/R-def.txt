@@ -1,0 +1,11 @@
+R_DEF: Internal format may change without notice
+local
+drawable ic_launcher_background
+drawable ic_launcher_foreground
+mipmap ic_launcher
+string app_name
+string fgs_channel_name
+string fgs_notification_text
+style Theme.Meshline
+xml backup_rules
+xml data_extraction_rules

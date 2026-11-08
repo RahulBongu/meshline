@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Meshline</string>
+    <string name="fgs_channel_name">Mesh relay</string>
+    <string name="fgs_notification_text">Meshline is relaying nearby messages. Tap to open.</string>
+</resources>

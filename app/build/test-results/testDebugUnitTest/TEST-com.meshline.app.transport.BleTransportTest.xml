@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.meshline.app.transport.BleTransportTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-11-08T14:24:48.427Z" hostname="ASUS-VIVOBOOK" time="0.212">
+  <properties/>
+  <testcase name="MTU 23 payload 20 splits a 500 char public message and reassembles it" classname="com.meshline.app.transport.BleTransportTest" time="0.149"/>
+  <testcase name="duplicate link exactly one side keeps central" classname="com.meshline.app.transport.BleTransportTest" time="0.002"/>
+  <testcase name="chunk reassembly times out and frees memory" classname="com.meshline.app.transport.BleTransportTest" time="0.003"/>
+  <testcase name="advertise-supported flag defaults true and logs intent" classname="com.meshline.app.transport.BleTransportTest" time="0.002"/>
+  <testcase name="unauthenticated sender cannot exhaust chunk reassembly memory" classname="com.meshline.app.transport.BleTransportTest" time="0.056"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

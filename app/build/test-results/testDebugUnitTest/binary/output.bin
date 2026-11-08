@@ -1,0 +1,42 @@
+)(1FC seed=1 delivered=29/29 linkTx=225 relayFwd=7
+)(1FC seed=2 delivered=29/29 linkTx=225 relayFwd=7
+)(1FC seed=3 delivered=29/29 linkTx=225 relayFwd=7
+)(1FC seed=4 delivered=29/29 linkTx=225 relayFwd=7
+)(1FC seed=5 delivered=29/29 linkTx=225 relayFwd=7
+)(1FC seed=6 delivered=29/29 linkTx=253 relayFwd=8
+)(1FC seed=7 delivered=29/29 linkTx=253 relayFwd=8
+)(1FC seed=8 delivered=29/29 linkTx=225 relayFwd=7
+)(1FC seed=9 delivered=29/29 linkTx=197 relayFwd=6
+)(2FC seed=10 delivered=29/29 linkTx=169 relayFwd=5
+)(2FC seed=11 delivered=29/29 linkTx=197 relayFwd=6
+)(2FC seed=12 delivered=29/29 linkTx=169 relayFwd=5
+)(2FC seed=13 delivered=29/29 linkTx=197 relayFwd=6
+)(2FC seed=14 delivered=29/29 linkTx=197 relayFwd=6
+)(2FC seed=15 delivered=29/29 linkTx=197 relayFwd=6
+)(2FC seed=16 delivered=29/29 linkTx=197 relayFwd=6
+)(2FC seed=17 delivered=29/29 linkTx=197 relayFwd=6
+)(2FC seed=18 delivered=29/29 linkTx=197 relayFwd=6
+)(2FC seed=19 delivered=29/29 linkTx=225 relayFwd=7
+)(2FC seed=20 delivered=29/29 linkTx=197 relayFwd=6
+)(8FC meanDelivery=1.000 meanTx=210 maxTx=253 relayMean=6
+)*FR6 seed=1 origin=1 delivered=29/29 linkTx=108 relayFwd=17 avgDeg=7.0
+)*ER6 seed=2 origin=1 delivered=29/29 linkTx=99 relayFwd=16 avgDeg=6.7
+)*FR6 seed=3 origin=8 delivered=29/29 linkTx=104 relayFwd=16 avgDeg=6.8
+)*ER6 seed=4 origin=0 delivered=29/29 linkTx=91 relayFwd=14 avgDeg=6.9
+)*ER6 seed=5 origin=8 delivered=29/29 linkTx=99 relayFwd=16 avgDeg=6.8
+)*FR6 seed=6 origin=5 delivered=29/29 linkTx=107 relayFwd=16 avgDeg=7.3
+)*ER6 seed=7 origin=7 delivered=29/29 linkTx=97 relayFwd=16 avgDeg=6.7
+)*ER6 seed=8 origin=1 delivered=29/29 linkTx=87 relayFwd=14 avgDeg=6.8
+)*FR6 seed=9 origin=19 delivered=29/29 linkTx=86 relayFwd=13 avgDeg=7.1
+)*FR6 seed=10 origin=0 delivered=28/29 linkTx=69 relayFwd=11 avgDeg=7.1
+)*FR6 seed=11 origin=9 delivered=28/29 linkTx=71 relayFwd=10 avgDeg=7.1
+)*FR6 seed=12 origin=0 delivered=29/29 linkTx=73 relayFwd=11 avgDeg=6.9
+)*GR6 seed=13 origin=19 delivered=29/29 linkTx=85 relayFwd=14 avgDeg=6.6
+)*FR6 seed=14 origin=5 delivered=29/29 linkTx=79 relayFwd=12 avgDeg=7.1
+)*GR6 seed=15 origin=12 delivered=29/29 linkTx=93 relayFwd=15 avgDeg=6.8
+)*FR6 seed=16 origin=1 delivered=29/29 linkTx=76 relayFwd=12 avgDeg=6.8
+)*FR6 seed=17 origin=5 delivered=29/29 linkTx=83 relayFwd=13 avgDeg=6.9
+)*FR6 seed=18 origin=9 delivered=29/29 linkTx=93 relayFwd=14 avgDeg=7.1
+)*FR6 seed=19 origin=5 delivered=29/29 linkTx=91 relayFwd=15 avgDeg=6.7
+)*FR6 seed=20 origin=6 delivered=29/29 linkTx=88 relayFwd=14 avgDeg=6.7
+)*8R6 meanDelivery=0.997 meanTx=89 maxTx=108 relayMean=14

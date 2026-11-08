@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Meshline</string>
+    <string name="fgs_channel_name">Mesh relay</string>
+    <string name="fgs_notification_text">Meshline is relaying nearby messages. Tap to open.</string>
+    <style name="Theme.Meshline" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0A0F0A</item>
+        <item name="android:statusBarColor">#0A0F0A</item>
+        <item name="android:navigationBarColor">#0A0F0A</item>
+    </style>
+</resources>
