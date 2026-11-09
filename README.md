@@ -34,8 +34,10 @@ working crypto.
 | **A** | Project setup, `PROTOCOL.md`, `PacketCodec` + unit tests + test vectors | ✅ **Done** |
 | **B** | `MeshRouter` + in-memory mesh simulator (loss/latency/duplicate, 30-node flood test) + Noise design gate | ✅ **Done** (signing input TTL-invariant; dedupe stores highest TTL; signature-first ordering; per-connection rate limits; 20-seed storm measurements) |
 | **C** | Real BLE transport (dual-role GATT, announce, public chat 2+ phones) + frozen UUIDs | ✅ **Done** (`transport/BleTransport.kt`, `BleUuids.kt`, `service/BleMeshService.kt`) — needs physical phones to validate (see below) |
-| D | Noise handshake, private chat, encrypted storage, panic wipe | Contract only (`security/`, `storage/`) — design in `NOISE_DESIGN.md` (approved with amendments) |
-| E | Foreground service polish, permissions flow, power modes, UI polish, merged-manifest audit | Stub (`service/MeshlineService.kt`, placeholder Compose screen) |
+| **D1** | Identity, profile, QR, contacts (Keystore-backed identity) | Draft (Step 0 docs done; awaiting review) |
+| **D2** | Noise + private chat + encrypted storage + panic wipe | Draft (see `NOISE_DESIGN.md`) |
+| **E** | Group chat (see `GROUPS_DESIGN.md`) | Draft (design only) |
+| **F** | Foreground-service polish, permission flow, power modes, UI polish, merged-manifest audit | *(was Phase E; renumbered when groups moved in)* |
 
 ## Architecture (kept separate and unit-testable)
 
@@ -68,17 +70,17 @@ so Phase C keeps the layering.
 ### JVM commands
 
 ```powershell
-$env:JAVA_HOME = "C:\Users\rahul\.gradle\jdks\eclipse_adoptium-17-amd64-windows.2" # JDK 17
+$env:JAVA_HOME = "$env:USERPROFILE\.gradle\jdks\jdk-17" # JDK 17 (your local path, never commit)
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
-cd Projects\meshline
-.\gradlew.bat :app:testDebugUnitTest          # 33 tests green at time of writing
+cd meshline
+.\gradlew.bat :app:testDebugUnitTest          # test suite (see below for counts)
 .\gradlew.bat :app:assembleDebug              # app-debug.apk
 .\gradlew.bat :app:lintDebug                  # clean
 ```
 
-Expected: `PacketCodecTest` 21, `MeshRouterTest` 10, `MeshSimulatorTest` 2 — 33 total,
-0 failures. No INTERNET permission on the **merged manifest** or in
-`aapt dump permissions app-debug.apk`.
+Expected (as of Step 0): `PacketCodecTest` 21, `MeshRouterTest` 10, `MeshSimulatorTest` 2,
+`BleTransportTest` 5 — 38 tests, 0 failures. No INTERNET permission on the **merged
+manifest** or in `aapt dump permissions app-debug.apk`.
 
 ## Protocol in one page (full spec: [`PROTOCOL.md`](PROTOCOL.md))
 
@@ -146,10 +148,16 @@ Android 8.0+, both with Bluetooth LE and location services on. Install the same
    (no peers expected). Then grant and repeat step 2.
 8. **Kill/relaunch.** Force-stop the app on phone B, relaunch, and confirm
    neighbours reappear within ~10 s (fresh ANNOUNCE on reconnect).
-9. **Report back:** phone models + Android versions, distance, whether
-   discovery beat 10 s, which hop counts you saw, and any Logcat tags
-   `BleTransport` / `BleMeshService` errors (especially GATT 133 or permission
-   denials). That data closes the Phase C AC and seeds Phase E battery tuning.
+9. **Battery (Phase F gate, screen-off, 30 min, 2 phones).** On each phone:
+   record battery % (`Settings → Battery`) with the mesh idle in the foreground
+   service, lock the screen for 30 minutes, unlock and record % again.
+   Compute **% per hour** (and mAh if available: `adb shell dumpsys battery`
+   before/after). Do this twice: (a) no traffic, (b) one public message every
+   5 min. Report both numbers — duty-cycle maths is not battery drain.
+10. **Report back:** phone models + Android versions, distance, whether
+    discovery beat 10 s, which hop counts you saw, and any Logcat tags
+    `BleTransport` / `BleMeshService` errors (especially GATT 133 or permission
+    denials). That data closes the Phase C AC and seeds Phase E battery tuning.
 
 **Logcat (per phone, replace `<serial>` with `adb devices` output):**
 ```powershell

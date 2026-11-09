@@ -1,0 +1,24 @@
+# Android / Gradle build outputs - never commit
+.gradle/
+build/
+app/build/
+local.properties
+
+# Keystores & signing secrets - never commit
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Local APKs / bundles (built locally only)
+*.apk
+*.aab
+
+# Misc local files
+*.log

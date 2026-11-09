@@ -1,0 +1,67 @@
+{
+  "status": "draft",
+  "note": "DRAFT D1/E vectors (Step 0). NOT loaded by PacketCodecTest yet — they pin the new PROTOCOL.md §6.1 avatarIndex, §6.6 QR and §6.7 group-tag definitions for D1/E implementation (code follows in D1/E). Do not treat as golden until the D1/E codec lands; the five Phase A vectors in test-vectors.json remain the executable truth.",
+  "announceDraft": {
+    "status": "draft",
+    "change": "ANNOUNCE gains trailing avatarIndex(1). Old decoders MUST reject (length mismatch); new decoders MUST treat unknown index as neutral default, never reject.",
+    "avatarTable": [
+      { "index": 0, "fruit": "apple" },
+      { "index": 1, "fruit": "green apple" },
+      { "index": 2, "fruit": "pear" },
+      { "index": 3, "fruit": "orange" },
+      { "index": 4, "fruit": "lemon" },
+      { "index": 5, "fruit": "banana" },
+      { "index": 6, "fruit": "watermelon" },
+      { "index": 7, "fruit": "grapes" },
+      { "index": 8, "fruit": "strawberry" },
+      { "index": 9, "fruit": "melon" },
+      { "index": 10, "fruit": "cherries" },
+      { "index": 11, "fruit": "peach" },
+      { "index": 12, "fruit": "pineapple" },
+      { "index": 13, "fruit": "kiwi" },
+      { "index": 14, "fruit": "tomato" },
+      { "index": 15, "fruit": "avocado" }
+    ],
+    "deferred": [
+      { "index": 16, "fruit": "mango", "requires": "androidx.emoji2 bundled font" },
+      { "index": 17, "fruit": "coconut", "requires": "androidx.emoji2 bundled font" },
+      { "index": 18, "fruit": "blueberries", "requires": "androidx.emoji2 bundled font" }
+    ]
+  },
+  "qrDraft": {
+    "status": "draft",
+    "prefix": "meshline://c/",
+    "payloadLayout": "version(1)=1 | ed25519Pk(32) | x25519Pk(32) | avatarIndex(1) | nickLen(1) | nickname UTF-8 <=24B | checksum(4)=SHA256(prefix bytes)[0..4), base64url no padding",
+    "exampleNickname": "Rahul",
+    "exampleAvatarIndex": 8,
+    "strictParserRejects": ["wrong version", "wrong lengths", "bad checksum", "unsanitised nickname", "trailing bytes"],
+    "displayIdentity": "<fruit> <nickname> - <4-hex fingerprint (first 4 hex chars)> e.g. strawberry Rahul - 7F3A"
+  },
+  "groupDraft": {
+    "status": "draft",
+    "newTypes": [
+      { "code": "0x09", "name": "GROUP_MESSAGE", "recipientId": "8-byte group tag HKDF(epochKey)", "signed": true, "mustBeCurrentRosterMember": true },
+      { "code": "0x0A", "name": "GROUP_CONTROL", "recipientId": "group tag", "signed": true }
+    ],
+    "groupMessagePayload": "epoch(2 BE) | nonce(8) | AEAD ciphertext (ChaCha20-Poly1305 over epoch key, AD = groupTag(8) || epoch(2 BE) || senderId(8))",
+    "groupControlPayload": "epoch(2 BE) | kind(1) 1=leave 2=rename 3=roster-update | nameLen(1) | name | roster entries (32B pubkeys)",
+    "inviteChannel": "PRIVATE_MESSAGE only (Noise). Payload: groupId(16) name<=32 icon epoch(2) key(32) roster. Admin outbox retries until 24h; relay S&F is 12h.",
+    "tagRule": "tag = HKDF-SHA256(epochKey, info='meshline-group-tag', 8). Check tag before any decryption; changes each epoch.",
+    "epochRule": "Every membership change starts a new epoch + new key. 500-char limit. Late messages allowed within bounded buffer.",
+    "groupMessageExampleByteByByte": {
+      "note": "Assembled byte-by-byte from PROTOCOL.md §6.7 (header 32B, flags 0x03 = HAS_RECIPIENT+HAS_SIGNATURE, payload = epoch|nonce|ct, signature placeholder 0x00..0x3F). This is the vector Phase E tests MUST load verbatim once GROUP_MESSAGE is coded. Signature must be a current roster member; AEAD AD = groupTag || epoch || senderId (18B).",
+      "version": 1,
+      "type": "GROUP_MESSAGE",
+      "ttl": 7,
+      "flags": "0x03",
+      "timestampMs": 1700000030000,
+      "senderIdHex": "0102030405060708",
+      "groupTagHex": "AABBCCDD11223344",
+      "payloadHex": "00010102030405060708DEADBEEF",
+      "signatureHex": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F303132333435363738393A3B3C3D3E3F",
+      "signingInputHex": "010900030000018BCFE5DD300000000E0102030405060708AABBCCDD1122334400010102030405060708DEADBEEF",
+      "aadHex": "AABBCCDD1122334400010102030405060708",
+      "expectedHex": "010907030000018BCFE5DD300000000E0102030405060708AABBCCDD1122334400010102030405060708DEADBEEF000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F303132333435363738393A3B3C3D3E3F"
+    }
+  }
+}

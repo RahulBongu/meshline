@@ -1,10 +1,13 @@
 # Meshline Protocol — v1
 
-> Status: **Draft v1 for Phase C.** (Phase B: signing input TTL-invariant §3.1;
+> Status: **Draft v1 for Phase D1/E (Step 0 amendments).** (Phase B: signing input TTL-invariant §3.1;
 > TTL unauthenticated + highest-TTL dedupe; signature-first router ordering;
 > per-connection rate limits. Phase C: BLE service/characteristic UUIDs are
-> frozen — see §9. Fixed 32-byte header unchanged. Noise handshake design is
-> gated in `NOISE_DESIGN.md` and is not part of the wire spec yet.) This
+> frozen — see §9. Fixed 32-byte header unchanged. Phase D1/E drafts (§6.1 avatarIndex,
+> §6.6 QR, §6.7 groups) are specified here but **not yet coded** (Step 0 is docs only).)
+> **Re-plan:** D1 identity/profile/QR/contacts, D2 Noise/private chat/storage/panic wipe,
+> E group chat, F foreground/service polish. Noise handshake design is still gated in
+> `NOISE_DESIGN.md`; group design is in `GROUPS_DESIGN.md`. This
 > document is the single source of truth for the
 > wire format. `PacketCodec` implements exactly what is written here; the JSON test
 > vectors in `app/src/test/resources/test-vectors.json` are generated from the codec
@@ -82,8 +85,10 @@ offset  size  field          notes
 | `0x06` | `FRAGMENT`      | One BLE chunk of a larger packet (§5). Codec handles it; the app layer never sees fragments, only reassembled packets. |
 | `0x07` | `LEAVE`         | Graceful "I'm going offline". Best-effort; peers also time out announcements. |
 | `0x08` | `HANDSHAKE`     | Noise handshake message carried over the mesh. Payload: one Noise handshake message (§6.5). |
+| `0x09` | `GROUP_MESSAGE` | *(draft E)* Signed + encrypted group ciphertext. Payload: §6.7. `recipientId` = 8-byte group tag. `HAS_SIGNATURE` set; signature must be a current roster member. |
+| `0x0A` | `GROUP_CONTROL` | *(draft E)* Signed group control (leave/rename/roster). Payload: §6.7. `recipientId` = group tag. |
 | `0x00` | *(unknown)*     | Reserved / invalid on decode. |
-| `0x09..0xFF` | *(unknown)* | Invalid on decode → drop silently (forward-compatible: unknown types MUST NOT crash the app, only be ignored). |
+| `0x0B..0xFF` | *(unknown)* | Invalid on decode → drop silently (forward-compatible: unknown types MUST NOT crash the app, only be ignored). Old nodes drop `GROUP_MESSAGE`/`GROUP_CONTROL` as unknown (§6.7). |
 
 Unknown type codes are a **soft error**: the packet is dropped, never relayed,
 never delivered, and the receiver stays alive. Version != 1 is a **hard error**:
@@ -235,7 +240,43 @@ nicknameLen(1)  nickname UTF-8 (1..32 chars, sanitised, no control chars)
 ed25519Pk(32)  sender's signing public key
 x25519Pk(32)   sender's key-agreement public key
 capabilities(1) bit0 = relayEnabled, bit1 = supportsNoise, bit2 = supportsChannels
+avatarIndex(1)  index into the AVATAR TABLE (§6.1.1, draft D1). 0xFF = neutral default.
+intervalUnits(1)  sender's current announce interval in 10 s units (draft D1;
+                  3 = 30 s, 6 = 60 s, 12 = 120 s). Inside the signed payload.
 ```
+**Avatar is cosmetic, not an identity.** The avatarIndex is a display hint only; it
+never affects senderId, fingerprint or verification. Receivers MUST ignore values
+outside the table (render neutral) and MUST NOT reject the ANNOUNCE for an
+unknown avatar. Nickname/keys remain the identity surface.
+
+### 6.1.1 AVATAR TABLE (draft D1, fixed append-only)
+
+| Index | Fruit |
+|------|-------|
+| 0 | apple |
+| 1 | green apple |
+| 2 | pear |
+| 3 | orange |
+| 4 | lemon |
+| 5 | banana |
+| 6 | watermelon |
+| 7 | grapes |
+| 8 | strawberry |
+| 9 | melon |
+| 10 | cherries |
+| 11 | peach |
+| 12 | pineapple |
+| 13 | kiwi |
+| 14 | tomato |
+| 15 | avocado |
+
+- The table is **fixed and append-only**: never renumber or repurpose an entry.
+  Index `0xFF` (and any unassigned value, e.g. 16..254 until assigned) renders a
+  neutral default icon on old clients. New entries are appended after 15.
+- Deferred (NOT in v1): mango, coconut, blueberries — added at index 16+ **only
+  if** the app bundles an offline emoji font (androidx.emoji2 bundled provider;
+  never the downloadable-fonts provider, which needs network). Until then these
+  fruits MUST NOT be advertised.
 - Sent on (re)connect and then roughly every 30 s with jitter. Contains no secrets —
   public keys are public, the IP-style metadata is the senderId (truncated hash).
 - Receivers use it to populate the peer list (nickname, hops, signal). Signal
@@ -277,6 +318,91 @@ messageId(32)   the private-message ID being acknowledged
   traverse multi-hop paths. Handshake packets are rate-limited harder than any
   other type (§8).
 
+### 6.6 QR payload (draft D1, not coded in Step 0)
+
+Personal QR codes (public data only — **never private keys**) let a friend add you
+as a verified contact in person. Format:
+
+```
+version(1) = 1
+ed25519Pk = 32 bytes
+x25519Pk = 32 bytes
+avatarIndex(1) = AVATAR TABLE index (§6.1.1) or 0xFF for neutral
+nickLen(1) = nickname length 1..24 (UTF-8 bytes, sanitised per §6.1)
+nickname = nickLen bytes UTF-8
+checksum(4) = SHA-256(all preceding bytes)[0..4)
+```
+
+- On-wire form: base64url **without padding**, prefixed `meshline://c/`
+  (e.g. `meshline://c/AQID...`).
+- The fingerprint shown in the UI is always `SHA-256(ed25519Pk ‖ x25519Pk)`.
+- **Strict parser** (fail-closed, fuzz-tested in D1): reject wrong version,
+  wrong lengths, bad checksum, unsanitised nickname (control chars, >24 bytes,
+  empty), or trailing bytes. The scanner must never auto-add a contact — the
+  user confirms on the scan-confirmation screen (“Add verified contact?”).
+- Display identity in chat is `“<fruit> <nickname> - <4-hex fingerprint>”`
+  (e.g. `strawberry Rahul - 7F3A`; the 4 hex chars are the first 4 chars of the
+  fingerprint hex). Only QR-verified contacts get a verified badge.
+
+### 6.7 Group packets (draft E, design in GROUPS_DESIGN.md)
+
+Groups are E2E-encrypted with one shared symmetric key per epoch
+(ChaCha20-Poly1305, explicit nonce). Two new wire types carry them; full
+semantics are in `GROUPS_DESIGN.md`.
+
+- `GROUP_MESSAGE (0x09)`: `recipientId` = **8-byte group tag** (see below),
+  **`HAS_SIGNATURE` set; a valid Ed25519 signature from a current roster
+  member is mandatory** — a shared epoch key alone cannot authenticate the
+  sender, so packets without a verifiable roster-member signature MUST be
+  rejected (dropped, never cached) before dedupe/rate-limit/relay (§8).
+  Payload (encrypted, §6.7.1): `epoch(2 BE) | nonce(8) | ciphertext(N)`.
+  Plaintext (before AEAD): the 500-char-limit group text; the sender is
+  resolved locally from the roster (never trusted from the wire). AEAD
+  associated data is **`groupTag(8) ‖ epoch(2 BE) ‖ senderId(8)`** — both sides
+  MUST compute it identically (see §6.7.1). Only members holding the epoch
+  key can decrypt; everyone else drops at the tag check.
+- `GROUP_CONTROL (0x0A)`: `recipientId` = group tag, **signed** (§3.1, TTL-
+  invariant). Payload (NOT encrypted — roster is semi-public, signature is the
+  authority): `epoch(2) | kind(1) | nameLen(1) | name | roster(…)` where
+  `kind` = 1 leave, 2 rename, 3 roster-update. Roster entries list member
+  Ed25519 pubkeys (≤20). Only the admin may change membership; control
+  signature + admin identity are verified before any action.
+- **Group tag:** `HKDF(epochKey, info="meshline-group-tag", len=8)` (HKDF-SHA256
+  per RFC 5869). Relays see only the tag, so cross-group traffic cannot be
+  linked; the tag **changes every epoch**, so epochs cannot be linked either.
+  Members check the tag first (a fixed set of 8-byte compares) and drop other
+  groups' traffic **before any decryption**.
+- **Unknown types (forward compatibility):** after signature verification,
+  the router **relays** unknown packet types instead of dropping them (§2,
+  §8 rule 1a). A node that sees `0x09`/`0x0A` (or any future type) it does not
+  understand still forwards it, provided the signature verifies against a
+  key it already knows (peer/roster pin for `senderId`). Without a known key
+  the packet cannot be verified and is dropped. Pre-E nodes therefore relay
+  group traffic they cannot read — groups are invisible to old *clients* but
+  not opaque to old *relays*. Old nodes never decrypt group traffic.
+- **Invites** do NOT use either of these types: they travel only as Noise
+  `PRIVATE_MESSAGE`s (§6.3) with payload `group invite (groupId, name, icon,
+  epoch, epoch key, roster)`. See `GROUPS_DESIGN.md` §3.
+
+#### 6.7.1 AEAD associated data (draft E, normative when implemented)
+
+```
+ad = groupTag(8) ‖ epoch(2 BE) ‖ senderId(8)   // 18 bytes
+```
+- `groupTag` is the packet's `recipientId` (8 bytes, §6.7).
+- `epoch` is the 2-byte big-endian epoch in the payload header.
+- `senderId` is header bytes 16..24 (truncated hash of the sender's Ed25519 key).
+Both signer and receiver MUST compute `ad` identically. Tampering with tag,
+epoch or senderId breaks AEAD even if the ciphertext is untouched.
+
+#### 6.7.2 Q: does a GROUP_MESSAGE payload decrypt to a JOINED inner packet?
+
+No. `GROUP_MESSAGE` is a *single* outer packet whose payload is AEAD
+ciphertext. There is no inner MeshPacket; the plaintext is the group text
+plus the sender reference. Decryption happens exactly once per delivery
+(after tag + epoch-key lookup), and replays are caught by the per-sender
+nonce window (see `GROUPS_DESIGN.md` §5).
+
 ## 7. Identity & keys (summary — details in Phase D)
 
 - On first launch the `SecurityModule` generates:
@@ -302,6 +428,79 @@ messageId(32)   the private-message ID being acknowledged
    bucket. Until Phase D wires real verification, the router's verifier is
    permissive (`{ true }`) — the *placement* of the check is pinned now so
    Phase D only injects the key lookup.
+
+1a. **Forward compatibility:** after signature verification, the router
+    **relays unknown packet types** instead of dropping them (§2). A packet of
+    an unknown type is relayed iff its signature verifies against a key the
+    node already pins for that `senderId` (peer store / group roster). If the
+    key is unknown or the signature fails, the packet is dropped. Nodes never
+    deliver unknown types locally.
+
+#### 8.1 How a relay learns a sender's key (design D1, chosen: Candidate A)
+
+**Choice: Candidate A — flood ANNOUNCE (jittered, rate-limited, own TTL).**
+**Candidate B (attach the 32-byte key to a sender's first packets) is rejected
+for v1.** Justification: A reuses the existing ANNOUNCE/discovery machinery
+(no new flag, no per-packet 32-byte tax), is self-certifying (below), degrades
+gracefully on old nodes (they already flood ANNOUNCE), and separates identity
+discovery (ANNOUNCE) from data (everything else). B would tax the first N
+packets of every sender forever (32×N bytes per sender per node) and still
+need a cache for the N+1th packet — the cache is unavoidable either way.
+
+- **Self-certifying:** an ANNOUNCE is accepted iff it is structurally valid,
+  rate-limited (§7) and `SHA-256(ed25519Pk)[0..8) == header.senderId`. That
+  check binds the announced key to the claimed identity without prior trust.
+  Only then is the (senderId, ed25519Pk) pair inserted into the key cache.
+  A failed check drops the ANNOUNCE and never caches it.
+  **Signature (amended):** an ANNOUNCE **must** carry a valid Ed25519 signature
+  (`HAS_SIGNATURE` set) covering `nickname ‖ avatarIndex ‖ x25519Pk ‖
+  capabilities` *and* the header fields per §3.1 `signingInput` (TTL excluded).
+  Verification uses the **announced edPk itself** (key is in payload) and the
+  hash check above — it requires no prior trust — but it MUST happen **before**
+  the ANNOUNCE is cached, relayed, or shown in the UI. A payload tampered
+  after signing (nickname, avatar, x25519 key, capabilities, or any header
+  byte except TTL) fails `Ed25519.verify` and is dropped, never cached.
+  ANNOUNCEs with missing signatures, mismatched hashes or bad signatures are
+  `droppedInvalid`, not `droppedDuplicate`.
+- **Flood:** ANNOUNCE uses TTL 7 (same cap as data, so keys travel as far as
+  data will), jitter 10–200 ms per hop, adaptive relay probability (rule 6),
+  and its own rate limit (≤ 5/10 s per sender and per connection, same bucket
+  shape as HANDSHAKE). Cadence is on connect + every ~30 s (see §8.2 for the
+  interval choice from simulator numbers).
+- **Key cache — two tiers (amended):**
+  - **Protected tier** — QR-verified contacts + currently connected neighbours
+    (and self). Cap **100 entries**, **never expired/evicted by unauthenticated
+    (unverified) ANNOUNCEs**; entries leave only on block, disconnect timeout,
+    or panic wipe. A sustained flood of fake (self-consistent, even signed by
+    the attacker) identities **cannot** evict protected answers.
+  - **Untrusted tier** — all other verified ANNOUNCEs. **500-entry LRU**,
+    **420 s (7 min) expiry** (3 × 120 s slowest cadence + 60 s slack; §8 rule 8)
+    sliding on last verified ANNOUNCE (≈25 KB). Expired/LRU-evicted → treated
+    as unknown. An attacker can plant at most 500 untrusted entries; real peers
+    re-teach instantly on their next ANNOUNCE (not starved).
+  - **Per-connection budgets (amended):** cold-start replay (N = 20) consumed
+    the whole old **20/5-min** budget, so a node with ONE link into a 50-node
+    mesh could learn at most 20 of the other 49. The retuned split is:
+    - **Replay allowance: 49** new identities per connection per window
+      (covers “learn everyone through one bridge”), and
+    - **Normal budget: 20** new identities per connection per window for
+      non-replay discovery.
+    Worst-case honest use through one link = replay + subsequent floods
+    (~49 total), worst-case attacker churn = **(49 + 20) × 6 connections =
+    414** untrusted insertions per 5 min — still under the 500 cap, and the
+    **protected tier is never touched by this churn** (contacts/neighbours
+    are never evicted by it). Starting values only — phone-validated.
+- **Packets from unknown senders:** dropped, never relayed, never cached, and
+  counted as `droppedUnknownKey`. The only exception is an ANNOUNCE that
+  passes the self-certifying check (it *is* the teacher). A Noise HANDSHAKE
+  that passes §7.1 of NOISE_DESIGN.md may also teach its binding once D2
+  lands. Everything else (PUBLIC, PRIVATE, GROUP_*, unknown types) from an
+  unknown `senderId` is dropped even if its signature would otherwise verify
+  against a key the node does not hold.
+- **Simulator model (D1 test-only, not production):** nodes start knowing
+  **only direct neighbours** (via the adjacency map); all other keys are
+  learned exclusively by observing verified ANNOUNCE floods. Measurements in
+  `MeshSimulatorTest` / `KeyKnowledgeTest` are the evidence for §8.2.
 2. **Deduplicate with TTL upgrade:** the LRU cache (cap 5,000 IDs **or**
    1 hour, whichever comes first) stores the **highest TTL seen per message
    ID**. A copy whose TTL is ≤ the stored max is a duplicate: drop. A copy
@@ -326,8 +525,77 @@ messageId(32)   the private-message ID being acknowledged
    Over-limit → drop + count. Max packet size = 64 KiB (§1) — larger packets
    are fragmented, never sent whole. Blocked peers are dropped **before**
    budget accounting (Phase D, see `NOISE_DESIGN.md` §5).
-8. **Announce cadence:** on connect + ~30 s ± jitter, so offline peers time out
-   in ~90 s without generating traffic storms.
+8. **Announce cadence (adaptive with hysteresis, from §8.2/§8.4):** on connect +
+   adaptive periodic cadence — **30 s / 60 s / 120 s** bands (§8.4) plus ±10 s
+   jitter. Receivers set peer/key expiry to **3 × senderInterval + 30 s jitter
+   slack** using the sender's `intervalUnits` byte (§6.1): 30 s band → 120 s
+   expiry, 60 s → 210 s, 120 s → **390–420 s**. The untrusted-tier expiry is
+   therefore **420 s (7 min)**, not the old 300 s — it must outlive the
+   slowest sender's three cadences. Cadence has hysteresis (switch *up* at
+   33 known nodes, switch *down* at 27) so it cannot flap around a threshold
+   (see §8.4). Peer timeout = 3 missed cadences by band. ANNOUNCE has its own
+   rate limit and TTL 7 (see §8.1).
+
+#### 8.2 Announce interval (from simulator measurements)
+
+`KeyKnowledgeTest` (30 nodes, 20 seeds, key-knowledge model §8.1):
+- **Fully-connected:** delivery **1.000**, data flood **232** linkTx mean, one
+  full ANNOUNCE round (all 30 nodes flood once) **7,121** linkTx.
+  → ~**14,242/min** at 30 s cadence, ~**7,121/min** at 60 s, ~3,560/min at 120 s.
+- **Random degree ~6:** delivery **0.991**, data flood **952** linkTx mean,
+  one ANNOUNCE round **2,276** linkTx.
+  → ~**4,550/min** at 30 s, **2,276/min** at 60 s.
+- **20-node group flood (10 members / 10 non-member relays):** members
+  **9/9 delivered**, non-members relayed normally (130 relay forwards total),
+  per-node relay bound holds.
+
+**Chosen cadence: every ~60 s ± 10 s jitter** (on connect + periodic), peer
+timeout **180 s** (3 missed cadences). Compared with 30 s this halves the
+announce overhead (≈7k linkTx/min FC, ≈3k/min degree-6 at 30 nodes) while
+keeping the 5-minute cache warm across **five** cadences and tolerating loss
+in sparse meshes. A 120 s cadence would halve overhead again but leaves only
+2–3 refreshes per cache lifetime and risks timeout on lossy links, so 60 s is
+the current balance. The interval is behaviour-only (no wire change).
+**Amendment (starting values, phone-validated later): adaptive interval that
+grows with known-node count** — ≤10 known → 30 s, 11–30 → 60 s, >30 → 120 s
+(see §8.4). §8.2 numbers are the degree-6 decision case; the top line is the
+plain 60 s baseline before adaptation.
+
+#### 8.3 Cold start: cached-ANNOUNCE replay on a new link (amended)
+
+When a fresh BLE link to a neighbour comes up, that neighbour **replays up to
+N = 20** of its cached verified ANNOUNCEs to the newcomer (oldest-first is
+fine; newest-first also acceptable — the newcomer only needs a spanning set).
+The replay is **rate-limited** (same ANNOUNCE bucket, ≤5/10 s per connection)
+and **fragmented as needed** (normal §5/MTU path — each replayed ANNOUNCE is
+a whole packet). Rationale: a late joiner connected to one neighbour can then
+verify traffic from non-neighbours without waiting for the next full periodic
+flood. The simulator models this: a late joiner starts empty, receives N
+replays, then a non-neighbour flood verifies on first arrival (see
+`KeyKnowledgeTest` late-joiner probe: time-to-first-verified-delivery).
+
+#### 8.4 Announce overhead in bytes/s/node (degree-6 decision case)
+
+One ANNOUNCE on the wire is **~170 bytes** (32 header + ~70 payload + 64
+signature, avatar included). One full round (30 announces, degree ~6) is
+**2,276 link transmissions** (measured) ≈ 387 KB moved per round
+(`2,276 × 170 B`). Per node (TX + RX = 2 × moved ÷ 30 nodes):
+
+| cadence | per node per min | per node per sec |
+|---------|------------------|-------------------|
+| 30 s | ~52 KB | **~845 B/s** |
+| 60 s | ~26 KB | **~420 B/s** |
+| 120 s | ~13 KB | **~210 B/s** |
+
+At BLE LE-1M rates (~0.7 Mb/s usable) 420 B/s is a **~0.5% radio duty-cycle
+unvalidated estimate** — duty cycle is not battery drain. It says nothing
+about the PRD battery target (**≤4 %/hour screen-on**) without radio power,
+CPU wake and display measurements. In a fully-connected room the rate is
+~3.1× higher (≈1,320 B/s at 60 s). ANNOUNCE overhead *may* not be the
+battery bottleneck; adaptive spacing is therefore chosen for *storm
+hygiene*, not battery rescue, until measured.
+The adaptive schedule (switch up at 33 known, down at 27; bands 30/60/120 s)
+roughly equalises per-node bytes/s as the mesh grows.
 
 ## 9. BLE transport expectations (Phase C — normative for the codec)
 
@@ -374,6 +642,13 @@ messageId(32)   the private-message ID being acknowledged
   count) is visible to relays and to anyone sniffing BLE. Payloads are not.
 - **Meshline is not an anonymity tool** (PRD §12). Do not market it for high-risk
   use until it has had an independent security audit, and say so in the app.
+- **Group traffic is linkable within an epoch (draft E honest limit):**
+  `senderId` is in every header and the epoch tag is in every `recipientId`,
+  so a passive observer who sees a flood can infer *which senderIds talk to
+  which epoch tag* — i.e. group membership and who-talks-together within an
+  epoch — even though it cannot read the text. The tag rotates each epoch
+  (epochs are unlinkable) but traffic *inside* one epoch is correlatable.
+  The app MUST disclose this in group UI (see `GROUPS_DESIGN.md` §8).
 - **Known limitation — stable sender IDs (documented, design unchanged):**
   `senderId` derives from the long-term Ed25519 public key (§4, §7), so it is
   **stable and linkable across sessions and devices that share the key**. Any
