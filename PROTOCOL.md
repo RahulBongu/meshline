@@ -485,8 +485,9 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
     mesh could learn at most 20 of the other 49. The retuned split is:
     - **Replay allowance: 49** new identities per connection per window
       (covers “learn everyone through one bridge”), and
-    - **Normal budget: 20** new identities per connection per window for
-      non-replay discovery.
+    - **Normal budget: 50** new identities per connection per window for
+      non-replay discovery (the old 20 starved hub-link learning in degree-6;
+      the coverage probe below showed 67.8% at 20, so it was raised).
   - **Global cap (amended):** new untrusted identities are capped globally at
     **100 per 5-min window**, independent of connection count. Per-connection
     buckets reset on reconnect, so without this an attacker cycling
@@ -496,12 +497,14 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
     fresh node can learn everyone through one bridge. Once warm, the 100 cap
     binds. Test: an attacker that reconnects repeatedly cannot exceed the
     global cap (see `KeyKnowledgeTest` global-cap test).
-  - **Worst-case churn (corrected):** insertion rate can be **(49 + 20) × 6 =
-    414 per 5 min**; over the 7-min expiry the insertions that survive is
-    `414 × (7/5)` ≈ **580**, which exceeds the 500-entry LRU cap. At the cap
+  - **Worst-case churn (corrected):** insertion rate can be **(49 + 50) × 6 =
+    594 per 5 min**; over the 7-min expiry the insertions that survive is
+    `594 × (7/5)` ≈ **832**, which exceeds the 500-entry LRU cap. At the cap
     the **oldest untrusted entry is evicted** (LRU); the protected tier is
-    never affected. Real peers re-teach on their next ANNOUNCE. Starting
-    values only — phone-validated.
+    never affected, and the **global 100/149 cap is the real binder**
+    (594 is the per-connection arithmetic, 100 is what lands). Real peers
+    re-teach instantly on their next ANNOUNCE. Starting values only —
+    phone-validated.
 - **Packets from unknown senders:** dropped, never relayed, never cached, and
   counted as `droppedUnknownKey`. The only exception is an ANNOUNCE that
   passes the self-certifying check (it *is* the teacher). A Noise HANDSHAKE

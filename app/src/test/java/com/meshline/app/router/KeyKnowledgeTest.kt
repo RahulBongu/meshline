@@ -101,9 +101,10 @@ class KeyKnowledgeTest {
         private val untrustedCap: Int = 500,
         private val protectedCap: Int = 100,
         private val expiryMs: Long = 420_000L, // 3 x 120s cadence + 60s slack (hysteresis max)
-        private val perConnNewBudget: Int = 20, // normal discovery budget per connection / 5 min
+        private val perConnNewBudget: Int = 50, // normal discovery budget per connection / 5 min (50 covers hub-link learning)
         private val replayAllowance: Int = 49, // separate cold-start allowance per connection
         private val budgetWindowMs: Long = 300_000L,
+        private val globalCapOn: Boolean = true,
         private val nowProvider: () -> Long = System::currentTimeMillis,
     ) {
         private val untrusted = LinkedHashMap<String, Pair<ByteArray, Long>>()
@@ -138,8 +139,9 @@ class KeyKnowledgeTest {
             val cap = if (isReplay) replayAllowance else perConnNewBudget
             if (hits.size >= cap) return false
             // Global cap: 100/window, 149 while nearly empty (cold start allows the replay burst).
+            // kill-switch for toggle probes: globalCapOn=false disables the cap entirely.
             globalHits.removeAll { nowMs - it.second > budgetWindowMs }
-            val globalCap = if (size() < 20) 149 else 100
+            val globalCap = if (!globalCapOn) Int.MAX_VALUE else if (size() < 20) 149 else 100
             if (globalHits.size >= globalCap) return false
             hits.add(hex(senderId) to nowMs)
             if (isReplay) replayHits[connectionKey] = hits else budgetHits[connectionKey] = hits
@@ -178,9 +180,10 @@ class KeyKnowledgeTest {
         private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
     }
 
-    /** Verifier §8.1 amended: ANNOUNCE must hash-match AND verify Ed25519 before cache/relay.
-     *  Also enforces §6.1 intervalUnits in {3,6,12} when the trailing interval byte is present. */
-    fun verifier(cache: KeyCache): (MeshPacket) -> Boolean = { pkt ->
+    data class Mechanisms(val sig: Boolean = true, val perConnBudget: Boolean = true, val globalCap: Boolean = true, val intervalCheck: Boolean = true)
+
+    /** Per-mechanism verifier for the coverage-toggle probe (§8.1). */
+    fun verifier(cache: KeyCache, mech: Mechanisms = Mechanisms()): (MeshPacket) -> Boolean = { pkt ->
         if (pkt.type == PacketType.ANNOUNCE) {
             val ok = try {
                 // Interval byte is the trailing byte of the signed payload in the D1 wire.
@@ -195,14 +198,15 @@ class KeyKnowledgeTest {
                     if (pkt.payload.isNotEmpty()) {
                         val interval = pkt.payload.last().toInt() and 0xFF
                         payloadForDecode = pkt.payload.copyOfRange(0, pkt.payload.size - 1)
-                        intervalOk = interval in setOf(3, 6, 12)
+                        intervalOk = !mech.intervalCheck || interval in setOf(3, 6, 12)
                     }
                 }
                 if (!intervalOk) false else {
                     val ann = Payloads.decodeAnnounce(payloadForDecode)
                     val hashOk = MessageIds.idFromPublicKey(ann.ed25519PublicKey).contentEquals(pkt.senderId)
-                    val sigOk = pkt.signature != null && verifySig(ann.ed25519PublicKey, PacketCodec.signingInput(pkt), pkt.signature!!)
+                    val sigOk = if (!mech.sig) hashOk else pkt.signature != null && verifySig(ann.ed25519PublicKey, PacketCodec.signingInput(pkt), pkt.signature!!)
                     // Budget-exceeded learns are rejected before relay (dropped, never cached).
+                    // Per-connection / global toggles are enforced inside KeyCache caps (set at construction).
                     val learned = if (hashOk && sigOk) cache.learn(pkt.senderId, ann.ed25519PublicKey, nowMs = pkt.timestampMs) else false
                     hashOk && sigOk && learned
                 }
@@ -220,6 +224,7 @@ class KeyKnowledgeTest {
         scope: CoroutineScope,
         simCfg: SimulatorConfig = SimulatorConfig(),
         startKnowingNeighbours: Boolean = true,
+        mech: Mechanisms = Mechanisms(),
     ): List<Node> {
         val hexAdj = mutableMapOf<String, Set<String>>()
         for ((idx, neigh) in adjacency) {
@@ -230,9 +235,15 @@ class KeyKnowledgeTest {
         for (i in 0 until adjacency.size) {
             val nid = sid(i)
             val t = SimulatorTransport(nid, network, scope)
-            val cache = KeyCache(nowProvider = { now })
+            // Toggle per-connection / global caps via cache params (see KeyCache).
+            val cache = KeyCache(
+                nowProvider = { now },
+                perConnNewBudget = if (mech.perConnBudget) 20 else 9999,
+                replayAllowance = if (mech.perConnBudget) 49 else 9999,
+                globalCapOn = mech.globalCap,
+            )
             val base = RouterConfig(jitterMinMs = 0, jitterMaxMs = 0, nowProvider = { now }, seed = simCfg.seed + i * 7919L)
-            val r = MeshRouter(nid, t, base, neighboursProvider = { network.neighboursOf(nid) }, signatureVerifier = verifier(cache))
+            val r = MeshRouter(nid, t, base, neighboursProvider = { network.neighboursOf(nid) }, signatureVerifier = verifier(cache, mech))
             if (startKnowingNeighbours) {
                 for (n in adjacency.getValue(i)) cache.protect(sid(n), edPk(n), nowMs = now)
                 cache.protect(nid, edPk(i), nowMs = now)
@@ -495,7 +506,8 @@ class KeyKnowledgeTest {
             val sig = Signature.getInstance("Ed25519").apply { initSign(kp.private); update(PacketCodec.signingInput(unsigned)) }.sign()
             v(unsigned.copy(signature = sig))
         }
-        println("ATTACK untrusted=${cache.sizeUntrusted()} protected=${cache.sizeProtected()} total=${cache.size()} realKnown=${cache.knows(real.senderId, now + 300_000)}")
+        println("ATTACK untrusted=${cache.sizeUntrusted()} protected=${cache.sizeProtected()} total=${cache.size()} realKnown=${cache.knows(real.senderId, now + 420_000)}")
+        // Single-connection normal budget is now 50; global cap is the binder.
         assertTrue("untrusted tier bounded", cache.sizeUntrusted() <= 500)
         assertTrue("protected tier has real peer", cache.sizeProtected() >= 1)
         // Sustained further attack at +5 min: protected must still resolve (never evicted by untrusted).
@@ -660,5 +672,54 @@ class KeyKnowledgeTest {
         assertTrue("global cap exceeded: learned $learned untrusted ${cache.sizeUntrusted()}", learned <= 149 && cache.sizeUntrusted() <= 149)
         assertTrue("protected peer still resolvable", cache.knows(real.senderId))
         assertTrue("protected never evicted by untrusted", cache.sizeProtected() >= 1)
+    }
+
+    @org.junit.Test
+    fun `key coverage after one round with each mechanism toggled separately`() = runBlocking {
+        val topologies = listOf("FC" to fcAdjacency(30), "R6" to randomAdjacency(30, 6, 5L))
+        val configs = listOf(
+            "all-on" to Mechanisms(),
+            "no-sig" to Mechanisms(sig = false),
+            "no-perconn" to Mechanisms(perConnBudget = false),
+            "no-global" to Mechanisms(globalCap = false),
+        )
+        for ((tname, adjacency) in topologies) {
+            for ((cname, mech) in configs) {
+                val nodes = buildNodes(adjacency, this, SimulatorConfig(seed = 5L), startKnowingNeighbours = true, mech = mech)
+                try {
+                    // Three periodic waves: one wave loses ~3% to suppression in R6;
+                    // subsequent waves (like the next 60 s cadences) close the gap.
+                    // Distinct timestamps per wave (messageId includes timestamp).
+                    for (wave in 0 until 3) {
+                        for (i in 0 until 30) {
+                            val pkt = announceWithInterval(i, 6).copy(timestampMs = now + wave * 60_000L)
+                            // Re-sign for the new timestamp (signing input covers it).
+                            val unsigned = pkt.copy(signature = ByteArray(64))
+                            nodes[i].router.onLocalSend(unsigned.copy(signature = sign(keypair(i), PacketCodec.signingInput(unsigned))))
+                        }
+                        kotlinx.coroutines.delay(400)
+                    }
+                    // Signed ANNOUNCE flood needs longer than 600 ms in degree-6
+                    // (Ed25519 verify per copy). Wait until coverage settles.
+                    kotlinx.coroutines.withTimeoutOrNull(20_000) {
+                        var last = -1
+                        while (true) {
+                            kotlinx.coroutines.delay(500)
+                            val cur = (0 until 30).sumOf { i -> (0 until 30).count { j -> i != j && nodes[i].cache.knows(sid(j), nowMs = now) } }
+                            if (cur == last) break
+                            last = cur
+                            if (cur >= 870) break
+                        }
+                    }
+                    val knownPairs = (0 until 30).sumOf { i -> (0 until 30).count { j -> i != j && nodes[i].cache.knows(sid(j), nowMs = now) } }
+                    val totalPairs = 30 * 29
+                    val coverage = knownPairs.toDouble() / totalPairs
+                    println("COVERAGE $tname $cname coverage=${"%.3f".format(coverage)} known=$knownPairs/$totalPairs")
+                    assertTrue("coverage $tname/$cname $coverage < 0.99 is a bug", coverage >= 0.99)
+                } finally {
+                    nodes.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
+                }
+            }
+        }
     }
 }
