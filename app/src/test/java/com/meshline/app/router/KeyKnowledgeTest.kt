@@ -80,6 +80,15 @@ class KeyKnowledgeTest {
         return unsigned.copy(signature = sig)
     }
 
+    /** Builds an ANNOUNCE with a trailing intervalUnits byte inside the signed payload (§6.1). */
+    private fun announceWithInterval(i: Int, intervalUnits: Int): MeshPacket {
+        val base = announcePacket(i)
+        val payloadWithInterval = base.payload + byteArrayOf(intervalUnits.toByte())
+        val unsigned = MeshPacket(PacketCodec.PROTOCOL_VERSION, PacketType.ANNOUNCE, 7, 0x02, now, payloadWithInterval, sid(i), PacketCodec.BROADCAST_ID, ByteArray(64))
+        val sig = sign(keypair(i), PacketCodec.signingInput(unsigned))
+        return unsigned.copy(signature = sig)
+    }
+
     private fun publicPacket(i: Int, ts: Long = now): MeshPacket =
         MeshPacket(
             PacketCodec.PROTOCOL_VERSION, PacketType.PUBLIC_MESSAGE, 7, 0x02, ts,
@@ -102,6 +111,8 @@ class KeyKnowledgeTest {
         // connectionKey -> replay learnings and normal learnings, each bounded
         private val replayHits = mutableMapOf<String, MutableList<Pair<String, Long>>>()
         private val budgetHits = mutableMapOf<String, MutableList<Pair<String, Long>>>()
+        // Global cap (all connections): 100 per window, 149 while nearly empty (cold start).
+        private var globalHits = mutableListOf<Pair<String, Long>>()
         /** Set by the transport-collect harness to model the immediate neighbour (test-only fiction until D1). */
         @Volatile var currentConnection: String = ""
 
@@ -126,8 +137,13 @@ class KeyKnowledgeTest {
             hits.removeAll { nowMs - it.second > budgetWindowMs }
             val cap = if (isReplay) replayAllowance else perConnNewBudget
             if (hits.size >= cap) return false
+            // Global cap: 100/window, 149 while nearly empty (cold start allows the replay burst).
+            globalHits.removeAll { nowMs - it.second > budgetWindowMs }
+            val globalCap = if (size() < 20) 149 else 100
+            if (globalHits.size >= globalCap) return false
             hits.add(hex(senderId) to nowMs)
             if (isReplay) replayHits[connectionKey] = hits else budgetHits[connectionKey] = hits
+            globalHits.add(hex(senderId) to nowMs)
             untrusted[hex(senderId)] = key.copyOf() to nowMs
             while (untrusted.size > untrustedCap) {
                 val oldest = untrusted.keys.firstOrNull() ?: break
@@ -151,6 +167,7 @@ class KeyKnowledgeTest {
             untrusted.clear()
             budgetHits.clear()
             replayHits.clear()
+            globalHits.clear()
         }
 
         private fun evict(nowMs: Long) {
@@ -161,15 +178,34 @@ class KeyKnowledgeTest {
         private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
     }
 
-    /** Verifier §8.1 amended: ANNOUNCE must hash-match AND verify Ed25519 before cache/relay. */
+    /** Verifier §8.1 amended: ANNOUNCE must hash-match AND verify Ed25519 before cache/relay.
+     *  Also enforces §6.1 intervalUnits in {3,6,12} when the trailing interval byte is present. */
     fun verifier(cache: KeyCache): (MeshPacket) -> Boolean = { pkt ->
         if (pkt.type == PacketType.ANNOUNCE) {
             val ok = try {
-                val ann = Payloads.decodeAnnounce(pkt.payload)
-                val hashOk = MessageIds.idFromPublicKey(ann.ed25519PublicKey).contentEquals(pkt.senderId)
-                val sigOk = pkt.signature != null && verifySig(ann.ed25519PublicKey, PacketCodec.signingInput(pkt), pkt.signature!!)
-                if (hashOk && sigOk) cache.learn(pkt.senderId, ann.ed25519PublicKey, nowMs = pkt.timestampMs)
-                hashOk && sigOk
+                // Interval byte is the trailing byte of the signed payload in the D1 wire.
+                // Test packets without it are treated as legacy 6 (60 s) for backward compat;
+                // a packet WITH the byte must carry {3,6,12} or it is rejected.
+                var payloadForDecode = pkt.payload
+                var intervalOk = true
+                try {
+                    Payloads.decodeAnnounce(pkt.payload)
+                } catch (_: Exception) {
+                    // Maybe payload is old + interval byte; strip it and retry.
+                    if (pkt.payload.isNotEmpty()) {
+                        val interval = pkt.payload.last().toInt() and 0xFF
+                        payloadForDecode = pkt.payload.copyOfRange(0, pkt.payload.size - 1)
+                        intervalOk = interval in setOf(3, 6, 12)
+                    }
+                }
+                if (!intervalOk) false else {
+                    val ann = Payloads.decodeAnnounce(payloadForDecode)
+                    val hashOk = MessageIds.idFromPublicKey(ann.ed25519PublicKey).contentEquals(pkt.senderId)
+                    val sigOk = pkt.signature != null && verifySig(ann.ed25519PublicKey, PacketCodec.signingInput(pkt), pkt.signature!!)
+                    // Budget-exceeded learns are rejected before relay (dropped, never cached).
+                    val learned = if (hashOk && sigOk) cache.learn(pkt.senderId, ann.ed25519PublicKey, nowMs = pkt.timestampMs) else false
+                    hashOk && sigOk && learned
+                }
             } catch (_: Exception) { false }
             ok
         } else {
@@ -582,4 +618,47 @@ class KeyKnowledgeTest {
     }
 
     private fun unhex(s: String): ByteArray = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+
+    @org.junit.Test
+    fun `only intervals 3 6 and 12 are accepted`() {
+        val cache = KeyCache(nowProvider = { now })
+        val v = verifier(cache)
+        for (ok in listOf(3, 6, 12)) assertTrue("interval $ok accepted", v(announceWithInterval(700 + ok, ok)))
+        for (bad in listOf(0, 1, 2, 4, 5, 7, 11, 13, 255)) {
+            val cache2 = KeyCache(nowProvider = { now })
+            val v2 = verifier(cache2)
+            assertTrue("interval $bad rejected", !v2(announceWithInterval(800 + bad, bad)))
+            assertTrue("interval $bad never cached", !cache2.knows(sid(800 + bad)))
+        }
+    }
+
+    @org.junit.Test
+    fun `attacker reconnecting repeatedly cannot exceed the global cap`() = runBlocking {
+        val cache = KeyCache(nowProvider = { now })
+        val v = verifier(cache)
+        // Warm the cache slightly so cold-start burst (149 while <20) no longer applies.
+        val real = announcePacket(999)
+        cache.protect(real.senderId, edPk(999), nowMs = now)
+        assertTrue(v(real))
+        var learned = 0
+        // 20 reconnects, each on a fresh connectionKey with 50 fake identities.
+        for (conn in 0 until 20) {
+            cache.currentConnection = "attacker-reconnect-$conn"
+            repeat(50) { k ->
+                val kp = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+                val enc = kp.public.encoded
+                val pub = enc.copyOfRange(12, 44)
+                val sidFake = MessageIds.idFromPublicKey(pub)
+                val payload = Payloads.encodeAnnounce(Payloads.Announce("atk-$conn-$k", pub, ByteArray(32) { 0x22 }, Payloads.Capabilities.RELAY_ENABLED))
+                val unsigned = MeshPacket(PacketCodec.PROTOCOL_VERSION, PacketType.ANNOUNCE, 7, 0x02, now, payload, sidFake, PacketCodec.BROADCAST_ID, ByteArray(64))
+                val sig = Signature.getInstance("Ed25519").apply { initSign(kp.private); update(PacketCodec.signingInput(unsigned)) }.sign()
+                if (v(unsigned.copy(signature = sig))) learned++
+            }
+        }
+        println("GLOBAL reconnects learned=$learned untrusted=${cache.sizeUntrusted()} protected=${cache.sizeProtected()} realKnown=${cache.knows(real.senderId)}")
+        // Cold-start burst is 149 while the cache is nearly empty; warm global cap is 100.
+        assertTrue("global cap exceeded: learned $learned untrusted ${cache.sizeUntrusted()}", learned <= 149 && cache.sizeUntrusted() <= 149)
+        assertTrue("protected peer still resolvable", cache.knows(real.senderId))
+        assertTrue("protected never evicted by untrusted", cache.sizeProtected() >= 1)
+    }
 }

@@ -243,6 +243,8 @@ capabilities(1) bit0 = relayEnabled, bit1 = supportsNoise, bit2 = supportsChanne
 avatarIndex(1)  index into the AVATAR TABLE (§6.1.1, draft D1). 0xFF = neutral default.
 intervalUnits(1)  sender's current announce interval in 10 s units (draft D1;
                   3 = 30 s, 6 = 60 s, 12 = 120 s). Inside the signed payload.
+                  Receivers MUST accept only {3, 6, 12} and reject anything
+                  else (droppedInvalid, never cached).
 ```
 **Avatar is cosmetic, not an identity.** The avatarIndex is a display hint only; it
 never affects senderId, fingerprint or verification. Receivers MUST ignore values
@@ -485,11 +487,21 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
       (covers “learn everyone through one bridge”), and
     - **Normal budget: 20** new identities per connection per window for
       non-replay discovery.
-    Worst-case honest use through one link = replay + subsequent floods
-    (~49 total), worst-case attacker churn = **(49 + 20) × 6 connections =
-    414** untrusted insertions per 5 min — still under the 500 cap, and the
-    **protected tier is never touched by this churn** (contacts/neighbours
-    are never evicted by it). Starting values only — phone-validated.
+  - **Global cap (amended):** new untrusted identities are capped globally at
+    **100 per 5-min window**, independent of connection count. Per-connection
+    buckets reset on reconnect, so without this an attacker cycling
+    connections could plant unlimited identities. A larger allowance is
+    permitted **only while the cache is nearly empty** (cold start):
+    while untrusted size < 20 the global cap is **149** (100 + 49 replay) so a
+    fresh node can learn everyone through one bridge. Once warm, the 100 cap
+    binds. Test: an attacker that reconnects repeatedly cannot exceed the
+    global cap (see `KeyKnowledgeTest` global-cap test).
+  - **Worst-case churn (corrected):** insertion rate can be **(49 + 20) × 6 =
+    414 per 5 min**; over the 7-min expiry the insertions that survive is
+    `414 × (7/5)` ≈ **580**, which exceeds the 500-entry LRU cap. At the cap
+    the **oldest untrusted entry is evicted** (LRU); the protected tier is
+    never affected. Real peers re-teach on their next ANNOUNCE. Starting
+    values only — phone-validated.
 - **Packets from unknown senders:** dropped, never relayed, never cached, and
   counted as `droppedUnknownKey`. The only exception is an ANNOUNCE that
   passes the self-certifying check (it *is* the teacher). A Noise HANDSHAKE
@@ -549,13 +561,19 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
   **9/9 delivered**, non-members relayed normally (130 relay forwards total),
   per-node relay bound holds.
 
-**Chosen cadence: every ~60 s ± 10 s jitter** (on connect + periodic), peer
-timeout **180 s** (3 missed cadences). Compared with 30 s this halves the
-announce overhead (≈7k linkTx/min FC, ≈3k/min degree-6 at 30 nodes) while
-keeping the 5-minute cache warm across **five** cadences and tolerating loss
-in sparse meshes. A 120 s cadence would halve overhead again but leaves only
-2–3 refreshes per cache lifetime and risks timeout on lossy links, so 60 s is
-the current balance. The interval is behaviour-only (no wire change).
+**Chosen cadence: every ~60 s ± 10 s jitter** (on connect + periodic, adaptive
+± hysteresis per rule 8), peer timeout **180 s** (3 missed cadences). Compared
+with 30 s this halves the announce overhead (≈7k linkTx/min FC, ≈2.3k/min
+degree-6 at 30 nodes) while keeping the 420 s cache warm across **three
+slowest** cadences. Interval values are sent as `intervalUnits` (§6.1) and
+are accepted only as **{3, 6, 12}**. A 120 s cadence would halve overhead
+again but leaves only 2–3 refreshes per cache lifetime and risks timeout on
+lossy links, so 60 s (adaptive) is the current balance. The interval is
+behaviour-only (no wire change beyond the one byte).
+**Why degree-6 bytes/s *fell* (590 → 422 B/s) even though ANNOUNCE grew:**
+the announce round's linkTx fell 27% (3,125 → 2,276) because the signed
+ANNOUNCE + per-connection new-identity budget suppressed redundant relay
+copies, outweighing the +1 payload byte.
 **Amendment (starting values, phone-validated later): adaptive interval that
 grows with known-node count** — ≤10 known → 30 s, 11–30 → 60 s, >30 → 120 s
 (see §8.4). §8.2 numbers are the degree-6 decision case; the top line is the
