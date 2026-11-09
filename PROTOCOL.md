@@ -417,6 +417,11 @@ nonce window (see `GROUPS_DESIGN.md` §5).
   displayed in groups of 4. Verification by QR / in-person compare (PRD FR-13, P1)
   is *not* in MVP; MVP shows the fingerprint and marks TOFU (trust-on-first-use)
   honestly.
+- **4-hex short form is for disambiguation only** (16 bits — forgeable in
+  seconds). Chat display (`“<fruit> <nickname> - 7F3A”`) uses the short form to
+  tell duplicate nicks/fruits apart, but **only the QR-verified badge or a full
+  fingerprint comparison conveys trust**. Never treat a matching 4-hex prefix as
+  verified.
 
 ## 8. Router rules (normative, implemented in Phase B)
 
@@ -594,6 +599,14 @@ verify traffic from non-neighbours without waiting for the next full periodic
 flood. The simulator models this: a late joiner starts empty, receives N
 replays, then a non-neighbour flood verifies on first arrival (see
 `KeyKnowledgeTest` late-joiner probe: time-to-first-verified-delivery).
+
+**Known transient (degree-6, first round):** early `KeyKnowledgeTest` measured
+**0.969 key coverage after one announce wave** (843/870 ordered pairs). This is
+*not* a correctness bug: adaptive relay suppression legitimately drops ~3% of
+one-wave announces. After three waves (the real 60 s cadence) coverage was
+**1.000** in every toggle config — the overhead drop is fewer redundant copies,
+not lost keys. The 0.969 number is recorded here so future re-measures do not
+mistake it for a regression.
 
 #### 8.4 Announce overhead in bytes/s/node (degree-6 decision case)
 

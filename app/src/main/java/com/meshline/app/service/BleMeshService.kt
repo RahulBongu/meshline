@@ -89,7 +89,7 @@ class BleMeshService : Service() {
                 sendAnnounce()
             }
         }
-        Log.d(TAG, "BleMeshService up as $nickname")
+        Log.d(TAG, "BleMeshService up")
     }
 
     private suspend fun sendAnnounce() {

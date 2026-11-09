@@ -13,6 +13,12 @@
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="true" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <!-- Camera is requested only when the user taps Scan (D1). ZXing is offline; see aapt audit. -->
+    <uses-permission android:name="android.permission.CAMERA" />
 
     <!-- Bluetooth: legacy permissions only before Android 12 (API 31). -->
     <uses-permission android:name="android.permission.BLUETOOTH"

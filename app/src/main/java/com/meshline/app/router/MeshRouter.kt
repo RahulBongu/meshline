@@ -61,6 +61,7 @@ class MeshStats {
     @Volatile var droppedRateLimited: Int = 0
     @Volatile var linkTransmissions: Int = 0 // individual sendTo calls (originated + relayed)
     @Volatile var ttlUpgrades: Int = 0 // duplicates with a higher TTL that triggered one extra relay
+    @Volatile var droppedUnknownKey: Int = 0 // signature/key lookup failed after a node joins (before key learned)
 }
 
 data class RouterConfig(
@@ -267,6 +268,7 @@ class MeshRouter(
         // are dropped and never cached (Phase B/C verifier is permissive).
         if (pkt.signature != null && !signatureVerifier(pkt)) {
             stats.droppedInvalid++
+            stats.droppedUnknownKey++
             return RouteDecision.Drop
         }
 

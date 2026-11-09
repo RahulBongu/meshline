@@ -22,14 +22,24 @@ object Payloads {
         val ed25519PublicKey: ByteArray,
         val x25519PublicKey: ByteArray,
         val capabilities: Byte,
+        val avatarIndex: Byte = 0xFF.toByte(),
+        val intervalUnits: Byte = 6,
     ) {
+        init {
+            require(intervalUnits.toInt() in listOf(3, 6, 12)) {
+                "intervalUnits must be one of {3,6,12} (got ${intervalUnits.toInt()})"
+            }
+        }
+
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is Announce) return false
             return nickname == other.nickname &&
                 ed25519PublicKey.contentEquals(other.ed25519PublicKey) &&
                 x25519PublicKey.contentEquals(other.x25519PublicKey) &&
-                capabilities == other.capabilities
+                capabilities == other.capabilities &&
+                avatarIndex == other.avatarIndex &&
+                intervalUnits == other.intervalUnits
         }
 
         override fun hashCode(): Int {
@@ -37,6 +47,8 @@ object Payloads {
             h = 31 * h + ed25519PublicKey.contentHashCode()
             h = 31 * h + x25519PublicKey.contentHashCode()
             h = 31 * h + capabilities.toInt()
+            h = 31 * h + avatarIndex.toInt()
+            h = 31 * h + intervalUnits.toInt()
             return h
         }
     }
@@ -57,26 +69,31 @@ object Payloads {
     }
 
     // ---- ANNOUNCE (§6.1) ----
-    // nicknameLen(1) | nickname UTF-8 | ed25519Pk(32) | x25519Pk(32) | capabilities(1)
+    // nicknameLen(1) | nickname UTF-8 | ed25519Pk(32) | x25519Pk(32) | capabilities(1) | avatarIndex(1) | intervalUnits(1)
+    // D1: avatarIndex + intervalUnits are inside the signed payload. Unknown avatar silences to neutral;
+    // intervalUnits must be {3,6,12}.
 
     fun encodeAnnounce(announce: Announce): ByteArray {
         val nickBytes = sanitizeNickname(announce.nickname).toByteArray(Charsets.UTF_8)
         require(nickBytes.isNotEmpty() && nickBytes.size <= 255) { "nickname must be 1..255 UTF-8 bytes" }
         require(announce.ed25519PublicKey.size == PUBLIC_KEY_BYTES) { "ed25519 public key must be 32 bytes" }
         require(announce.x25519PublicKey.size == PUBLIC_KEY_BYTES) { "x25519 public key must be 32 bytes" }
-        val buf = ByteBuffer.allocate(1 + nickBytes.size + PUBLIC_KEY_BYTES * 2 + 1).order(ByteOrder.BIG_ENDIAN)
+        require(announce.intervalUnits.toInt() in listOf(3, 6, 12)) { "intervalUnits must be one of {3,6,12}" }
+        val buf = ByteBuffer.allocate(1 + nickBytes.size + PUBLIC_KEY_BYTES * 2 + 3).order(ByteOrder.BIG_ENDIAN)
         buf.put(nickBytes.size.toByte())
         buf.put(nickBytes)
         buf.put(announce.ed25519PublicKey)
         buf.put(announce.x25519PublicKey)
         buf.put(announce.capabilities)
+        buf.put(announce.avatarIndex)
+        buf.put(announce.intervalUnits)
         return buf.array()
     }
 
     fun decodeAnnounce(payload: ByteArray): Announce {
         if (payload.isEmpty()) throw PacketException.InvalidPacket("announce payload empty")
         val len = payload[0].toInt() and 0xFF
-        val expected = 1 + len + PUBLIC_KEY_BYTES * 2 + 1
+        val expected = 1 + len + PUBLIC_KEY_BYTES * 2 + 3
         if (payload.size != expected) {
             throw PacketException.InvalidPacket("announce length mismatch: expected $expected, got ${payload.size}")
         }
@@ -85,7 +102,12 @@ object Payloads {
         val ed = payload.copyOfRange(1 + len, 1 + len + PUBLIC_KEY_BYTES)
         val x = payload.copyOfRange(1 + len + PUBLIC_KEY_BYTES, 1 + len + PUBLIC_KEY_BYTES * 2)
         val caps = payload[1 + len + PUBLIC_KEY_BYTES * 2]
-        return Announce(sanitizeNickname(nickname), ed, x, caps)
+        val avatar = payload[1 + len + PUBLIC_KEY_BYTES * 2 + 1]
+        val interval = payload[1 + len + PUBLIC_KEY_BYTES * 2 + 2]
+        if ((interval.toInt() and 0xFF) !in listOf(3, 6, 12)) {
+            throw PacketException.InvalidPacket("announce intervalUnits must be one of {3,6,12}")
+        }
+        return Announce(sanitizeNickname(nickname), ed, x, caps, avatar, interval)
     }
 
     // ---- PUBLIC_MESSAGE (§6.2) ----

@@ -34,7 +34,7 @@ working crypto.
 | **A** | Project setup, `PROTOCOL.md`, `PacketCodec` + unit tests + test vectors | ✅ **Done** |
 | **B** | `MeshRouter` + in-memory mesh simulator (loss/latency/duplicate, 30-node flood test) + Noise design gate | ✅ **Done** (signing input TTL-invariant; dedupe stores highest TTL; signature-first ordering; per-connection rate limits; 20-seed storm measurements) |
 | **C** | Real BLE transport (dual-role GATT, announce, public chat 2+ phones) + frozen UUIDs | ✅ **Done** (`transport/BleTransport.kt`, `BleUuids.kt`, `service/BleMeshService.kt`) — needs physical phones to validate (see below) |
-| **D1** | Identity, profile, QR, contacts (Keystore-backed identity) | Draft (Step 0 docs done; awaiting review) |
+| **D1** | Identity, profile, QR, contacts (Keystore-backed identity) | ✅ **Done** (Keystore identity + BC primitives, QR strict parser + fuzz, protected tier, contacts DB, My QR / Scan / Contacts screens, ANNOUNCE avatar+signature+interval, router verifier; BLE untouched) |
 | **D2** | Noise + private chat + encrypted storage + panic wipe | Draft (see `NOISE_DESIGN.md`) |
 | **E** | Group chat (see `GROUPS_DESIGN.md`) | Draft (design only) |
 | **F** | Foreground-service polish, permission flow, power modes, UI polish, merged-manifest audit | *(was Phase E; renumbered when groups moved in)* |
@@ -158,6 +158,33 @@ Android 8.0+, both with Bluetooth LE and location services on. Install the same
     discovery beat 10 s, which hop counts you saw, and any Logcat tags
     `BleTransport` / `BleMeshService` errors (especially GATT 133 or permission
     denials). That data closes the Phase C AC and seeds Phase E battery tuning.
+
+**Manual scan checklist (D1, on phones):**
+- **Integrator check:** `ScanQRScreen` is a real CameraX + ZXing-core implementation
+  (not a placeholder): `ImageAnalysis` + `MultiFormatReader` with the `QR_CODE` hint
+  only, no other formats, and rotation from `ImageProxy.imageInfo.rotationDegrees`.
+- Try a QR code in **dim light**, under **screen glare**, printed large, and
+  **scanning another phone's screen**. A malformed or foreign (non-Meshline) QR
+  must show the error state, never crash.
+- **Reboot + update:** reboot each phone and confirm the *same* fingerprint
+  survives; update the APK (retained data) and confirm contacts/history survive.
+  If the OS invalidates the Keystore key after an upgrade, load must fail closed
+  (regenerate identity) rather than crash — report the OEM behaviour.
+
+**Battery (Phase F gate, screen-off, 30 min, 2 phones).** On each phone:
+record battery % (`Settings → Battery`) with the mesh idle in the foreground
+service, lock the screen for 30 minutes, unlock and record % again.
+Compute **% per hour** (and mAh if available: `adb shell dumpsys battery`
+before/after). Do this twice: (a) no traffic, (b) one public message every
+5 min. Report both numbers — **duty cycle is not battery drain**.
+
+**D1 phone checklist (after your Phase C report):**
+1. Two phones on this branch discover each other — signed ANNOUNCEs verify
+   (debug overlay shows `ttl` + `hops`; `droppedUnknownKey` stays low).
+2. Public messages still flow between the two phones, and each is **signed and
+   verified** (Logcat shows no `droppedInvalid` spike on valid traffic).
+3. **QR add-contact in both directions:** phone A shows My Profile QR, phone B
+   scans it → scan-confirmation → verified badge appears. Swap roles.
 
 **Logcat (per phone, replace `<serial>` with `adb devices` output):**
 ```powershell

@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -22,7 +23,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         debug {
@@ -41,11 +43,17 @@ android {
 
     packaging {
         resources { excludes += "/META-INF/{DEPENDENCIES,LICENSE,LICENSE.txt,NOTICE,NOTICE.txt}" }
+        jniLibs { useLegacyPackaging = true } // SQLCipher .so layout on older APIs
     }
-
-    // Pin the BLE UUIDs in one place (see BleConstants in transport/BleUuids.kt
-    // from Phase C). No INTERNET permission is declared in the manifest.
 }
+
+configurations.configureEach {
+    resolutionStrategy {
+        force("org.jetbrains:annotations:23.0.0")
+    }
+}
+
+
 
 dependencies {
     // Compose BOM manages all Compose artifact versions.
@@ -70,9 +78,24 @@ dependencies {
     // stable, but entities/DAOs (and the KSP plugin they need) land in Phase D.
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
+    implementation("androidx.room:room-compiler:2.6.1") {
+        exclude(group = "com.intellij", module = "annotations")
+    }
     implementation("net.zetetic:android-database-sqlcipher:4.5.4")
+    implementation("com.google.zxing:core:3.5.3") {
+        exclude(group = "com.intellij", module = "annotations")
+    }
+    implementation("androidx.camera:camera-core:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("com.google.guava:guava:32.1.2-android")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    ksp("androidx.room:room-compiler:2.6.1") {
+        exclude(group = "com.intellij", module = "annotations")
+    }
 
     testImplementation("junit:junit:4.13.2")
+    implementation("org.jetbrains:annotations:23.0.0")
     // Real JSON impl for JVM unit tests (android.jar's org.json is stubbed).
     testImplementation("org.json:json:20250517")
 
