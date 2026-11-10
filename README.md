@@ -20,8 +20,10 @@ working crypto.
 - Noise (`noise-java`) is **deferred to Phase D**. Phase A ships only BouncyCastle
   for primitives + SHA-256 in the codec, so the wire format can be frozen and fuzzed
   before any key material exists. Inventing crypto primitives or protocol is out.
-- Room entities + the KSP plugin land in Phase D. Phase A declares Room/SQLCipher
-  *runtime* dependencies only, no DAOs.
+- Room entities + KSP are wired in D1 (`storage/ContactsStore.kt`) and encrypted
+  with the maintained **`net.zetetic:sqlcipher-android`** artifact. The DB
+  passphrase is 32 random bytes wrapped by a Keystore AES-GCM key
+  (`security/DbPassphrase.kt`), never derived from a static value.
 - BLE service UUID (`a777356e-7ebc-429e-a847-d52eaeeb1331`) and characteristic UUID
   (`cf602b5c-31b5-4b91-aa65-9272bd79cd3f`) were generated once (random v4) and are
   now **frozen** in `transport/BleUuids.kt`. Changing either is a wire break and
@@ -34,8 +36,8 @@ working crypto.
 | **A** | Project setup, `PROTOCOL.md`, `PacketCodec` + unit tests + test vectors | ✅ **Done** |
 | **B** | `MeshRouter` + in-memory mesh simulator (loss/latency/duplicate, 30-node flood test) + Noise design gate | ✅ **Done** (signing input TTL-invariant; dedupe stores highest TTL; signature-first ordering; per-connection rate limits; 20-seed storm measurements) |
 | **C** | Real BLE transport (dual-role GATT, announce, public chat 2+ phones) + frozen UUIDs | ✅ **Done** (`transport/BleTransport.kt`, `BleUuids.kt`, `service/BleMeshService.kt`) — needs physical phones to validate (see below) |
-| **D1** | Identity, profile, QR, contacts (Keystore-backed identity) | Draft (Step 0 docs done; awaiting review) |
-| **D2** | Noise + private chat + encrypted storage + panic wipe | Draft (see `NOISE_DESIGN.md`) |
+| **D1** | Identity, profile, QR, contacts (Keystore-backed identity) | ✅ **Done** (Keystore identity + BC primitives, QR strict parser + fuzz, protected tier, contacts DB, My QR / Scan / Contacts screens, ANNOUNCE avatar+signature+interval, router verifier; BLE untouched) |
+| **D2** | Noise + private chat + encrypted storage + panic wipe | 🟡 **Protocol + storage layer done** (branch `d2-noise`): Noise state machine (official spec vectors as a gate), explicit transport nonce + 128-nonce replay window, session store in SQLCipher, handshake rate limits + quarantine. **Not wired into BLE or the UI** until the D1 phone test passes. |
 | **E** | Group chat (see `GROUPS_DESIGN.md`) | Draft (design only) |
 | **F** | Foreground-service polish, permission flow, power modes, UI polish, merged-manifest audit | *(was Phase E; renumbered when groups moved in)* |
 
@@ -74,13 +76,64 @@ $env:JAVA_HOME = "$env:USERPROFILE\.gradle\jdks\jdk-17" # JDK 17 (your local pat
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 cd meshline
 .\gradlew.bat :app:testDebugUnitTest          # test suite (see below for counts)
-.\gradlew.bat :app:assembleDebug              # app-debug.apk
+.\gradlew.bat :app:assembleDebug              # app-universal-debug.apk (universal, all ABIs)
+.\gradlew.bat :app:assembleRelease            # per-ABI release APKs (minified, unsigned)
+.\gradlew.bat :app:assembleReleaseSmoke       # release-shaped, signed with the DEBUG keystore
 .\gradlew.bat :app:lintDebug                  # clean
 ```
 
-Expected (as of Step 0): `PacketCodecTest` 21, `MeshRouterTest` 10, `MeshSimulatorTest` 2,
-`BleTransportTest` 5 — 38 tests, 0 failures. No INTERNET permission on the **merged
-manifest** or in `aapt dump permissions app-debug.apk`.
+Debug output is `app/build/outputs/apk/debug/app-universal-debug.apk` (one
+universal APK with all four ABIs, so it also installs on an x86_64 emulator).
+Release output is `app/build/outputs/apk/release/app-arm64-v8a-release-unsigned.apk`
+and `app-armeabi-v7a-release-unsigned.apk` (ABI splits, no universal APK).
+`releaseSmoke` is minified/shrunk exactly like release but signed with the local
+debug keystore for on-phone smoke testing:
+`app/build/outputs/apk/releaseSmoke/app-arm64-v8a-releaseSmoke.apk` (and the
+`armeabi-v7a` variant). **Never distribute a `releaseSmoke` APK**; the real
+`release` artifact stays unsigned until you supply a real key.
+
+Which outputs are produced is decided **per build type**, not per command line,
+so `.\gradlew.bat :app:assembleDebug :app:assembleReleaseSmoke` in one
+invocation still gives you the universal debug APK:
+
+| Build type | Outputs | Purpose |
+|---|---|---|
+| `debug` | 1 universal APK (arm64-v8a, armeabi-v7a, x86_64, x86) | emulator UI/DB tests, daily dev |
+| `release` | `arm64-v8a` + `armeabi-v7a` splits, unsigned | real distribution (needs your key) |
+| `releaseSmoke` | `arm64-v8a` + `armeabi-v7a` splits, debug-key-signed | release smoke test on a phone |
+
+Expected (D1): `PacketCodecTest` 21, `MeshRouterTest` 12, `MeshSimulatorTest` 2,
+`KeyKnowledgeTest` 12, `KeyCacheTest` 6, `AnnounceVerifierTest` 5,
+`IdentityTest` 1, `QrPayloadTest` 4, `BleTransportTest` 5,
+`HoldingBufferTest` 4, `SampleQrGeneratorTest` 1 — **73 tests, 0 failures**. No
+INTERNET permission on the **merged manifest** or in
+`aapt dump permissions app-universal-debug.apk`.
+
+On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
+`ReplayWindowTest` 6, `HandshakeRateLimiterTest` 7, `SessionCodecTest` 4 —
+**99 tests, 0 failures** in total.
+
+> **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
+> typically uninstalls the app (and its data) after the run, and the
+> Keystore/DB wipe tests (`IdentityStoreInstrumentedTest`,
+> `DbPassphraseInstrumentedTest`, `DatabaseInstrumentedTest`) deliberately
+> destroy the app's identity and contacts. Run instrumented tests **before** any
+> manual phone testing, then reinstall the APK and start with a fresh
+> identity/contacts. They require a connected device:
+> `.\gradlew.bat :app:connectedDebugAndroidTest`.
+
+### Dev-only sample QR (test one phone against a laptop screen)
+
+The JVM test source set contains a generator that writes a scannable QR for a
+throwaway identity:
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest --tests "*SampleQrGeneratorTest*"
+# app/build/reports/sample-contact-qr.png
+```
+
+It is never packaged into any APK (debug/release/releaseSmoke). Scan the PNG from
+the laptop screen with one phone; the contact is intentionally never online.
 
 ## Protocol in one page (full spec: [`PROTOCOL.md`](PROTOCOL.md))
 
@@ -115,7 +168,7 @@ in order with a 30 s timeout, then decoded once (signature verified there).
 
 **You need:** 2 physical phones (any brands; ideally different vendors), both
 Android 8.0+, both with Bluetooth LE and location services on. Install the same
-`app-debug.apk` on both. Keep both on the same desk first (within 1 m).
+`app-universal-debug.apk` on both. Keep both on the same desk first (within 1 m).
 
 1. **Permissions.** On each phone: Settings → Apps → Meshline → Permissions.
    Grant Nearby devices / Bluetooth (and Location on Android ≤ 11). Deny
@@ -159,11 +212,41 @@ Android 8.0+, both with Bluetooth LE and location services on. Install the same
     `BleTransport` / `BleMeshService` errors (especially GATT 133 or permission
     denials). That data closes the Phase C AC and seeds Phase E battery tuning.
 
+**Manual scan checklist (D1, on phones):**
+- **Integrator check:** `ScanQRScreen` is a real CameraX + ZXing-core implementation
+  (not a placeholder): `ImageAnalysis` + `MultiFormatReader` with the `QR_CODE` hint
+  only, no other formats, and rotation from `ImageProxy.imageInfo.rotationDegrees`.
+- Try a QR code in **dim light**, under **screen glare**, printed large, and
+  **scanning another phone's screen**. A malformed or foreign (non-Meshline) QR
+  must show the error state, never crash.
+- **Reboot + update:** reboot each phone and confirm the *same* fingerprint
+  survives; update the APK (retained data) and confirm contacts/history survive.
+  If the OS invalidates the Keystore key after an upgrade, load must fail closed
+  (regenerate identity) rather than crash — report the OEM behaviour.
+
+**Battery (Phase F gate, screen-off, 30 min, 2 phones).** On each phone:
+record battery % (`Settings → Battery`) with the mesh idle in the foreground
+service, lock the screen for 30 minutes, unlock and record % again.
+Compute **% per hour** (and mAh if available: `adb shell dumpsys battery`
+before/after). Do this twice: (a) no traffic, (b) one public message every
+5 min. Report both numbers — **duty cycle is not battery drain**.
+
+**D1 phone checklist (run after installing the `d1-identity` build):**
+1. Two phones on this branch discover each other — signed ANNOUNCEs verify
+   (debug overlay shows `ttl` + `hops`; `droppedUnknownKey` stays low). The
+   overlay also shows `held` / `released` / `bufFull`: right after a join
+   `held` rises and `released` catches up — a packet that is held and then
+   released was **not** lost.
+2. Public messages still flow between the two phones, and each is **signed and
+   verified** (Logcat shows no `droppedInvalid` spike on valid traffic).
+3. **QR add-contact in both directions:** phone A shows My Profile QR, phone B
+   scans it → scan-confirmation → verified badge appears. Swap roles.
+
 **Logcat (per phone, replace `<serial>` with `adb devices` output):**
 ```powershell
 adb -s <serial> logcat -s BleTransport BleMeshService
 ```
-Look for: `BleMeshService up as anonXXXX`, `duplicate link closed`,
+Look for: `BleMeshService up`, `duplicate link closed`,
 `isMultipleAdvertisementSupported=...`, and any GATT error codes in the debug
 overlay's `last GATT error` line.
 
@@ -171,18 +254,132 @@ overlay's `last GATT error` line.
 service `a777356e-7ebc-429e-a847-d52eaeeb1331`, characteristic
 `cf602b5c-31b5-4b91-aa65-9272bd79cd3f`, MTU 512 (payload 509), max connections 6.
 
-## Open issues after Phase C
+## D1 integration status (wired, awaiting phone verification)
 
-- **UI send wiring is partial.** `MainActivity` has the composer + Start button;
-  `BleMeshService.sendPublic` exists but is not yet bound to the composer's Send
-  action with a live router handle — bind it (and the peer list from ANNOUNCE
-  nicknames + signal + hops) at the start of Phase D while Phase E polishes UI.
-- **Identity is ephemeral in Phase C** (random nickname + random senderId per
-  process; placeholder key bytes in ANNOUNCE). Phase D replaces this with
-  Keystore-backed Ed25519/X25519 pairs, real signatures, and fingerprint display.
-- **Signature verification is permissive until Phase D.** The router already
-  *orders* verification before dedupe/rate-limit/relay (PROTOCOL §8) — Phase D
-  only injects the key lookup into the verifier hook.
+D1 is wired into the running app:
+- `BleMeshService` loads the Keystore identity, signs ANNOUNCE and
+  PUBLIC_MESSAGE, verifies every incoming packet through `AnnounceVerifier` +
+  the two-tier `KeyCache`, preloads QR-verified contacts into the protected
+  tier, and runs as a connected-device foreground service.
+- `MainActivity` navigates Home / My QR / Scan / Contacts / Settings, asks for
+  camera permission only when **Scan** is tapped, and sends the public composer
+  text through `ACTION_SEND_PUBLIC`.
+- Room + SQLCipher opens through `SupportOpenHelperFactory`; QR-added contacts
+  persist across restart.
+- If the Keystore wrap key is invalidated or the DB cannot be decrypted, the app
+  fails closed: it creates a new identity / empties contacts and shows the
+  **“secure storage was reset”** dialog. Peers see a new key (D2 adds the
+  key-change warning).
+- A packet from a sender whose key is not known yet is **held** (32 total / 8
+  per connection / 3 s) and released when that sender's verified ANNOUNCE
+  arrives, instead of being dropped on the spot. `droppedUnknownKey` counts
+  **only** held packets that timed out; a full buffer is counted separately as
+  `droppedBufferFull`, so an unknown-sender flood cannot delay real traffic.
+- After linking a **new** peer, the sender waits **2 s** before its first data
+  packet to it, so the peer has learned the sender's key from the ANNOUNCE
+  first.
+
+The D1 phone checklist above is the gate. **D2 does not start until it passes.**
+
+### Release smoke-test checklist (run on the release APK)
+
+1. Install `app-arm64-v8a-releaseSmoke.apk` (or the `armeabi-v7a` variant). It
+   is minified/shrunk like release but signed with the local debug keystore, so
+   no manual signing is needed. **Never distribute this APK.**
+2. Launch: the contacts DB opens (no crash); Home shows `fruit nickname - 4hex`.
+   Confirm the merged manifest has **no INTERNET** permission.
+3. **My QR** renders; on phone B tap **Scan** → camera permission prompt appears
+   only now → scan → confirmation → verified contact appears. With only one
+   phone, scan the sample PNG on your laptop screen instead — see
+   “Dev-only sample QR” above.
+4. Force-stop and relaunch: same fingerprint, contact still listed.
+5. Send a public message between the two phones; both show it (release strips
+   `Log.d`, so use the debug build if you want the `BleMeshService up` line).
+6. Optional destructive drill: clear the app's data / Keystore entry and relaunch
+   → “secure storage was reset” dialog, **new** 4-hex id, empty contacts, no crash.
+
+### Release artifact size (per ABI, budget < 25 MB)
+
+Measured with `:app:assembleRelease` (minified, resource-shrunk, unsigned) on
+2026-11-10:
+
+| Artifact | Bytes | MiB | Budget |
+|---|---:|---:|---|
+| `app-arm64-v8a-release-unsigned.apk` | 5,673,688 | 5.41 | < 25 MB |
+| `app-armeabi-v7a-release-unsigned.apk` | 5,311,786 | 5.07 | < 25 MB |
+| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,681,764 | 5.42 | < 25 MB |
+| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,319,858 | 5.07 | < 25 MB |
+
+Each release/releaseSmoke APK contains exactly one ABI and
+`lib/.../libsqlcipher.so`, and none of them declares
+`android.permission.INTERNET`. The `releaseSmoke` APKs are signed with the
+local **debug** certificate (`CN=Android Debug`) — they are for the on-phone
+smoke test only, never for distribution. The universal debug APK is
+24,273,208 bytes (23.15 MiB) because it carries all four ABIs for
+emulator/UI testing; it is not a release artifact. (The `d2-noise` branch
+adds ~63 KB of `noise-java` on top of the D1 sizes.)
+
+## D2 integration status (protocol + storage only, branch `d2-noise`)
+
+The D2 layer is **coded and tested, but not wired in**: nothing in
+`BleTransport`, `BleMeshService` or the UI calls it yet, so the shipping app
+behaves exactly like `d1-identity` until the D1 phone test passes.
+
+What exists (all pure JVM, all simulator-tested):
+- **Noise state machine** (`noise/NoiseHandshake.kt`) — `Noise_XX_25519_ChaChaPoly_SHA256`
+  over the pinned `org.signal.forks:noise-java:0.1.1`. The **official Noise
+  test vectors** for that pattern are a test gate (`NoiseVectorsTest`): the
+  handshake messages, the transcript hash and the transport ciphertexts must
+  be byte-exact.
+- **Transport nonce + replay window** (`noise/TransportCipher.kt`,
+  `noise/ReplayWindow.kt`) — the nonce is explicit on the wire, and a
+  128-nonce sliding window per direction refuses replays and nonces that are
+  too far ahead.
+- **Session store** (`storage/NoiseSessionStore.kt`) — the `noise_sessions`
+  table in the SQLCipher database (DB version 2, non-destructive migration),
+  plus a versioned snapshot codec.
+- **Handshake rate limits and quarantine** (`noise/HandshakeRateLimiter.kt`) —
+  per *connection* (never per claimed `senderId`): 5 handshake packets / 10 s,
+  20 starts / hour, 60 s cooldown after a success, 30 packets / 10 s per node,
+  3 invalid strikes in 5 min → 10 min quarantine.
+- **Secure-channel engine** (`noise/SessionManager.kt`) — the per-peer session
+  state machine, the identity binding check (Ed25519 trailer ↔ `senderId`) and
+  the impersonation defence (the X25519 key the handshake reveals must match
+  the announced one), the concurrent-handshake tie-break (lower `senderId`
+  wins) and the silent re-handshake on session loss.
+- **Store-and-forward outbox** (`storage/OutboxStore.kt`) — the sender's outbox
+  stores the **plaintext** (protected by SQLCipher) and encrypts **at send
+  time** under the session that is live then, so a queued message never
+  carries a stale nonce and never belongs to a session that no longer exists.
+  Relays never cache private ciphertext. User-visible states: **Queued** →
+  **Sent** (after the silent re-handshake) → **Delivered** / **Read**.
+- **Global handshake work budget** (`noise/HandshakeRateLimiter.kt`) — 300
+  X25519 operations per minute across *all* connections, because the
+  per-connection buckets reset when a peer reconnects under a new BLE address.
+
+Wire format: `PROTOCOL.md` §6.3 and §6.5. Design and its amendments:
+`NOISE_DESIGN.md`.
+
+**Known limitation:** `noise-java` 0.1.1 cannot export the Noise transport
+keys, so a session cannot be resumed byte-for-byte after a restart — a
+restored session **re-handshakes silently** instead (see `NOISE_DESIGN.md`
+amendment A2). Everything else in the store works as designed.
+
+## Open issues after D1
+
+- **Foreground-service permission gate (Phase F).** The service now fails soft
+  (no crash) if Android rejects the FGS start, but the UI should explain which
+  Bluetooth permission is missing instead of silently stopping.
+- **Connection-slot exhaustion (Phase F).** Six GATT slots can be consumed by
+  peers that never send a valid ANNOUNCE; planned mitigation is to close
+  non-Announced connections after ~10 s.
+- **Adaptive announce cadence (Phase E/F).** D1 announces at a fixed 30 s
+  (`intervalUnits = 3`). The 30/60/120 s hysteresis rule (§8.4) is specified but
+  not yet driven by known-node count.
+- **Neighbour set is not wired into the router yet.** `neighboursProvider`
+  returns an empty set, so D1 always floods instead of using the direct-send
+  shortcut and adaptive relay probability. Correct, but more expensive at scale.
+- **D2+**: Noise private chat, encrypted message storage, panic wipe, groups.
 
 ## Compliance notes (PRD §12)
 

@@ -4,5 +4,5 @@ plugins {
     id("com.android.application") version "8.12.0" apply false
     id("org.jetbrains.kotlin.android") version "2.1.20" apply false
     id("org.jetbrains.kotlin.plugin.compose") version "2.1.20" apply false
-    // KSP is intentionally NOT added yet; it lands with Room entities in Phase D.
+    id("com.google.devtools.ksp") version "2.1.20-1.0.32" apply false
 }

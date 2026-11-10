@@ -1,7 +1,44 @@
 # Meshline Noise design note — **PROPOSAL, awaiting review (Phase D gate)**
 
-> **Status:** Design proposal. No Noise code exists yet. Phase D should not start
-> until this note is reviewed. It pins the decisions that are hard to change
+> **Status (D2, protocol + storage level):** the design was **approved with
+> amendments** and the **protocol and storage layers are now implemented** on
+> branch `d2-noise`: the Noise state machine, the explicit transport nonce and
+> the 128-nonce replay window, the session store and the handshake rate limits
+> are coded and tested against the simulator. What is **not** done yet is the
+> wiring into `BleTransport` and the UI — that waits for the D1 phone test to
+> pass, so the D2 code is currently reachable only from the tests.
+>
+> **Amendment A2 (D2, library limitation):** §6.1 says a session resumes in
+> `ESTABLISHED` across a restart because the Noise transport cipher state is
+> serialised into Room. `noise-java` 0.1.1 **cannot export that state**:
+> `HandshakeState` has no key getter, `CipherState` only accepts a key, and
+> `SymmetricState` (which computes the transport keys) is a package-private
+> class. We do not reach into the library's internals to fish the keys out.
+> Instead:
+>   - the `noise_sessions` table keeps the identity binding, the state, the
+>     nonce counters and the replay window — everything the library allows —
+>     and has a `transportKey` column ready for a library that can export the
+>     material;
+>   - a session restored from the store is treated as **session loss** and
+>     **silently re-handshakes**, which is exactly the recovery path §6.1
+>     already specifies for a stale or rotated session;
+>   - ephemeral private keys are still never persisted (§3.5) — unchanged.
+>
+> Consequence for the product: after an app restart the peer sees one extra
+> handshake round, not a resumed session. The wire format, the handshake, the
+> nonce window and the store are unaffected.
+>
+> **Amendment A3 (D2, wire):** the handshake payload carries a small Meshline
+> envelope (version, flags, **step**, Noise length, Noise message, optional
+> Ed25519 binding trailer) instead of "one raw Noise message" (§2). The
+> `step` byte is needed because a Noise read that fails **destroys the
+> handshake state machine** — the transcript hash is mixed before the tag
+> check — so the receiver must never guess which message it received. A wrong
+> step can only make the read fail (the packet is then rejected as an invalid
+> handshake); it can never make a bad message look good. See PROTOCOL.md §6.5.
+>
+> **Original status text:** design proposal. Phase D should not start until
+> this note is reviewed. It pins the decisions that are hard to change
 > after code lands: the handshake pattern, how a handshake crosses a multi-hop
 > BLE mesh, when sessions re-key, and how handshake rate limits are enforced.
 > All cryptographic primitives and the Noise framework itself come from
@@ -171,7 +208,19 @@ budget or quarantine an innocent peer.
 |--------|-------------------------------|
 | Per connection | **5 handshake packets / 10 s**; **20 handshake starts / hour**; cooldown **60 s** after a successful handshake before a *new* start is allowed |
 | Per node | **30 handshake packets / 10 s** accepted; beyond that, drop silently |
+| Per node (**handshake work**) | **300 X25519 operations / minute** across *all* connections — see below |
 | Invalid handshake | **3 strikes in 5 min** per connection → 10 min handshake-quarantine for that connection |
+
+**Why a global work budget (D2):** the per-connection buckets reset whenever a
+peer reconnects under a **new BLE address**, so on their own they do not bound
+the *work* an attacker can make us do — a peer that keeps reconnecting would get
+a fresh budget every time. The global budget is per **node** and survives
+reconnects: one XX handshake costs **5** X25519 operations (the initiator's
+ephemeral key pair, the responder's ephemeral key pair, `ee`, `es`, `se`), so
+300 operations per minute is 60 handshakes per minute — far above what a
+legitimate mesh needs, far below what a flood would ask for. The cost is
+charged **before** the key agreement happens, and a handshake that cannot pay
+is dropped silently like any other over-limit handshake.
 
 Over-limit handshakes are **dropped silently** (no error reply — errors are
 amplifiers). Repeatedly-invalid handshakes (e.g. correct outer packet, garbage
@@ -206,15 +255,22 @@ long-lived transport keys still need limits:
 ### 6.1 Session persistence across restarts and store-and-forward
 
 **Sessions persist (encrypted) across app restarts.** On ESTABLISHED, the
-SecurityModule serialises the Noise session's transport + handshake cipher
-states (chaining keys, counters, replay window) into Room under SQLCipher — the
-database key itself is wrapped by the Android Keystore, so the ciphertext on
-disk is useless without the device key. Ephemeral *private* keys are still
-never written; only the session's derived cipher state is stored.
+SecurityModule serialises the session's derived state (the identity binding,
+the state, the nonce counters and the replay window) into Room under
+SQLCipher — the database key itself is wrapped by the Android Keystore, so the
+ciphertext on disk is useless without the device key. Ephemeral *private* keys
+are still never written; only the derived session state is stored.
 
-- **Restart behaviour:** on boot, sessions are reloaded from Room and resume
-  in ESTABLISHED without a new handshake. Half-finished handshakes (§3.5)
-  are *not* persisted and restart as ABSENT (fresh handshake).
+- **What cannot be stored (amendment A2):** the Noise *transport cipher state*
+  cannot be exported by `noise-java` 0.1.1, so it cannot be written down. A
+  session restored from the store is therefore treated as **session loss** and
+  **silently re-handshakes** — the same recovery path as below — instead of
+  resuming in place. The store keeps a `transportKey` column ready for a
+  library that can export the material; it is never written today.
+- **Restart behaviour:** on boot, the sessions and the peer records are
+  reloaded from Room. A session that was `ESTABLISHED` re-handshakes silently
+  (above) and is `ESTABLISHED` again a moment later. Half-finished handshakes
+  (§3.5) are *not* persisted and restart as ABSENT (fresh handshake).
 - **Silent re-handshake on session loss:** if a delivered transport packet's
   AEAD verification fails (stale/rotated state, peer upgraded, counter drift
   beyond the replay window), the node **silently starts a fresh XX handshake**
@@ -222,16 +278,36 @@ never written; only the session's derived cipher state is stored.
   the conversation or surfacing a cryptographic error to the user. The peer
   sees a normal re-handshake (rate-limited as usual, §5). Repeated failures
   (>5 in an hour) switch to the honest "couldn't establish session" UX.
-- **Interaction with store-and-forward (P1, FR-12):** MVP does not yet
-  store-and-forward private messages to absent peers. When it lands, queued
-  *ciphertexts* (already transport-encrypted under the persisted session) are
-  cached in the outbox for up to 12 h (configurable) and replayed on
-  reconnection without a new handshake, provided the session has not been
-  re-keyed in the meantime. If the nonce window has moved past a cached
-  message, that message is re-encrypted under the live session or marked
-  expired — never sent with a stale nonce.
+- **Store-and-forward (FR-12, amended for non-persistent sessions):** the
+  sender's **outbox stores the PLAINTEXT**, protected by the SQLCipher
+  database, and the message is **encrypted at send time**, under the session
+  that is live *then*.
+  - *Why plaintext and not ciphertext:* a stored ciphertext would belong to a
+    session that no longer exists after a restart (the transport keys cannot be
+    exported, A2), and it would carry a nonce that must never be reused under
+    the same key. Encrypting late avoids both problems by construction: the
+    nonce comes from the live session, and the plaintext never leaves the
+    encrypted database.
+  - *Relays never cache private ciphertext.* A relay forwards a private
+    message and forgets it; it never stores it, and never re-sends it under a
+    different session. Store-and-forward for private messages is a
+    **sender-side** feature only.
+  - *Lifetime:* a queued message waits up to **12 h** (configurable) and is
+    then dropped rather than arriving as a stale surprise.
+  - *User-visible states (see §8):*
+
+    | state | meaning |
+    |---|---|
+    | **Queued** | the message is in the outbox; no session yet, so nothing is on the wire |
+    | **Sent** | encrypted under the live session and handed to the router ("sent to mesh" — BLE offers no delivery guarantee) |
+    | **Delivered** | the peer acknowledged it (RECEIPT, §6.4) |
+    | **Read** | the peer opened it |
+
+    A message queued while the peer is away goes **Queued → (re-handshake) →
+    Sent**: the silent re-handshake of §6.1 happens under the hood and the
+    user only sees the state change from *Queued* to *Sent*.
 - **Panic wipe (§7)** erases all sessions, all peer fingerprints, the outbox
-  (Queued messages), and both long-term key pairs. The device returns to
+  (Queued messages) and both long-term key pairs. The device returns to
   "never seen anyone" with a fresh random nickname.
 
 ## 7. Key storage and identity

@@ -295,11 +295,42 @@ text UTF-8, 1..500 characters (NOT bytes — enforced before encode)
 
 ### 6.3 PRIVATE_MESSAGE
 ```
-ciphertext = Noise transport message bytes (Noise_XX_25519_ChaChaPoly_SHA256)
+version(1)   = 1
+flags(1)     = 0
+nonce(8)     the Noise transport nonce, big-endian
+ciphertext   ChaCha20-Poly1305 ciphertext (plaintext + 16-byte tag)
 ```
-- Outer packet: `recipientId` = recipient, `HAS_SIGNATURE` clear.
+- Outer packet: `recipientId` = recipient, `HAS_SIGNATURE` clear (the Noise
+  transport authenticates the content).
+- The nonce is **explicit on the wire** (§4.1 of NOISE_DESIGN.md): the mesh
+  reorders and duplicates packets, so the receiver must know which nonce a
+  ciphertext used before it runs the replay window.
+- **How the nonce is applied.** Noise's ChaChaPoly uses a 64-bit counter as the
+  AEAD nonce, and that counter is *independent of the key*: the key stays
+  inside the library's cipher state (which is why the transport state cannot
+  be exported — NOISE_DESIGN amendment A2), while the nonce is a value we set
+  on the cipher before every operation (`CipherState.setNonce`). The sender
+  owns the counter and puts it in the packet; the receiver uses exactly that
+  nonce. **Consequence: message N+1 can be decrypted before message N** —
+  nothing has to arrive in order, and no key ever has to be reconstructed.
+  The library's own counter is a side effect of each operation and is
+  overwritten before every use, so our counter is the only authority.
+- **Associated data (normative):** the 32-byte packet header with the **TTL
+  byte zeroed** (relays decrement it, so the ciphertext must survive any
+  number of hops) and the **payload length zeroed** (the payload *is* the
+  ciphertext and cannot be part of its own associated data; a truncated
+  ciphertext fails the Poly1305 tag check anyway). Everything else — version,
+  type, flags, timestamp, sender, recipient — is bound, so a ciphertext cannot
+  be replayed under a different sender, a different recipient or a different
+  timestamp.
+- The receiver runs a **128-nonce replay window** per direction before it
+  decrypts: a nonce below the window is a replay (dropped and counted), a
+  nonce more than 128 ahead of the expectation is refused as a possible gap
+  attack, a nonce inside the window is accepted exactly once.
 - Re-key after the Noise library's recommended message count / interval
-  (Phase D). Message states: Queued → Sent → Delivered → Read (PRD §13).
+  (Phase D). Meshline's own bound is **1 000 messages per direction**, plus
+  24 h of session age and 7 days since the first transport message.
+- Message states: Queued → Sent → Delivered → Read (PRD §13).
 
 ### 6.4 RECEIPT
 ```
@@ -314,11 +345,45 @@ messageId(32)   the private-message ID being acknowledged
   kept so a parser that only reads the payload can still log who left).
   Signed, broadcast. Receivers mark the peer offline immediately instead of
   waiting for the announce timeout.
-- `HANDSHAKE`: payload = one raw Noise handshake message (length is implicit in
-  the Noise spec — no length prefix here; the Noise library parses it).
+- `HANDSHAKE`: the Noise handshake message plus a small Meshline envelope.
   Unsigned, directed. Relayed like a private message so the handshake can
   traverse multi-hop paths. Handshake packets are rate-limited harder than any
   other type (§8).
+
+```
+version(1)   = 1
+flags(1)     bit 0 = an Ed25519 binding trailer follows
+step(1)      1 = "-> e"        (initiator's first message)
+             2 = "<- e, ee, s, es" (responder's answer)
+             3 = "-> s, se"    (initiator's final message)
+noiseLen(2)  length of the Noise message, big-endian
+noise        the raw Noise handshake message
+binding      ed25519Pk(32), present when flags bit 0 is set
+```
+
+- **Why the envelope:** the Noise library parses a handshake message from its
+  own framing, but the mesh needs three things around it: a version, the
+  identity binding, and — importantly — **which step** the message is. A Noise
+  read that fails *destroys the handshake state machine* (the transcript hash
+  is mixed before the tag check), so the receiver must never guess which
+  message it got. The `step` byte says exactly which message to feed in. The
+  step byte is not secret and not authenticated: a wrong step only makes the
+  Noise read fail (the packet is then rejected and counted as an invalid
+  handshake), it can never make a bad message look good.
+- **Binding trailer (§7.1 of NOISE_DESIGN.md):** the *first* message of each
+  side carries the signer's long-term Ed25519 public key. The receiver checks
+  that `SHA-256(ed25519Pk)[0..8)` equals the outer packet's `senderId`; a
+  mismatch is an impersonation attempt (the handshake is aborted and the
+  connection is quarantined). The strong check is the X25519 key the Noise
+  handshake itself reveals: it must equal the key already announced for that
+  `senderId`, otherwise the peer is impersonating somebody.
+- **Prologue:** both sides use the same prologue
+  (`"Meshline-D2-NoiseXX-v1"`), which is hashed into the transcript. It is a
+  wire constant — changing it invalidates every session.
+- **Pattern:** `Noise_XX_25519_ChaChaPoly_SHA256`, implemented by the pinned
+  `org.signal.forks:noise-java:0.1.1`. The official Noise test vectors for
+  that pattern are run as a unit test (`NoiseVectorsTest`) — a non-conformant
+  implementation cannot ship.
 
 ### 6.6 QR payload (draft D1, not coded in Step 0)
 
@@ -410,13 +475,74 @@ nonce window (see `GROUPS_DESIGN.md` §5).
 - On first launch the `SecurityModule` generates:
   - **X25519** (Curve25519) key pair for key agreement (Noise uses this), and
   - **Ed25519** key pair for signing.
-- Private keys live in the **Android Keystore** (non-exportable where the hardware
-  supports it); they are never in the Room database and never in a packet.
+- Raw Ed25519/X25519 private keys **cannot be imported into the Android Keystore**
+  on minSdk 26. They are therefore encrypted with a non-exportable Keystore
+  AES-256-GCM key (`meshline-key-wrap`, one random IV per key) and only the
+  ciphertext is kept in SharedPreferences; keys never enter Room and never enter
+  a packet. Panic wipe deletes both the ciphertext and the wrap key.
+- The **SQLCipher passphrase** is 32 bytes from `SecureRandom`, generated once,
+  wrapped by a second Keystore key (`meshline-db-wrap`). It is never derived from
+  a PIN, nickname, device id, or any static value, and is never logged.
+- **Backup is disabled**: `android:allowBackup="false"` plus
+  `data_extraction_rules.xml` excluding every domain (`database`, `sharedpref`,
+  `file`, `root`) from both cloud backup and device transfer, so identity keys,
+  contacts, and messages cannot leave the device through backup.
+- **Secure-storage reset (D1, fail-closed):** if the Keystore wrap key is
+  missing/invalidated (OS upgrade, OEM key loss) or the SQLCipher database
+  cannot be opened/decrypted, the app MUST recover without crashing:
+  1. discard the unusable wrap-key entry and generate a **fresh Ed25519+X25519
+     identity** (new `senderId`/fingerprint),
+  2. wipe the wrapped DB key and `meshline.db*` files, so contacts start empty,
+  3. record a one-shot `SecureStorageStatus` reason (`KEYSTORE_INVALIDATED` or
+     `DB_UNREADABLE`) and show a clear **“secure storage was reset”** dialog the
+     next time the UI opens.
+
+  Peers will observe a **key change** (new senderId/fingerprint) after an
+  identity reset; D2 adds the explicit key-change warning for pinned contacts.
+  A DB-only reset keeps the identity and only empties contacts. The app never
+  silently presents an undecryptable store as empty without this notice.
 - `senderId` = truncated SHA-256 of the *Ed25519* public key (identity anchor).
+- **Secure sessions (D2, protocol + storage level):** established Noise sessions
+  and the peer records they carry are stored in the `noise_sessions` table of
+  the same SQLCipher-encrypted database (so the rows are ciphertext at rest
+  under the Keystore-wrapped DB key). **Ephemeral private keys are never
+  stored** — only the derived session state, the identity binding, the nonce
+  counters and the replay window. The table was added in DB version 2 with a
+  non-destructive `MIGRATION_1_2` (contacts survive the upgrade).
+  - **The `transportKey` column is never written.** `noise-java` 0.1.1 exposes
+    no way to export the Noise transport key material (`HandshakeState` has no
+    key getter and `SymmetricState` is package-private), so there is nothing
+    meaningful to store — writing key material the app cannot use would only
+    add a second secret to erase in a panic wipe. The `SessionStore` mapping
+    always writes NULL, even when a snapshot carries a key; the column exists
+    only so a future library with an export path needs no schema change.
+  - **Limitation (D2, documented):** because the transport cipher state
+    cannot be written down, a session restored from the store **re-handshakes
+    silently** — the same recovery path NOISE_DESIGN.md §6.1 prescribes for
+    session loss — instead of resuming in place.
+- **Store-and-forward outbox (D2, FR-12):** the `outbox` table (DB version 3,
+  `MIGRATION_2_3`) holds the **plaintext** of private messages that wait for
+  a session, protected by the same SQLCipher database. The message is
+  **encrypted at send time**, under the session that is live then — so it
+  never carries a stale nonce and never belongs to a session that no longer
+  exists. **Relays never cache private ciphertext**: a relay forwards a
+  private message and forgets it; store-and-forward for private messages is
+  sender-side only. A queued message waits at most **12 h** and is then
+  dropped. User-visible states: **Queued** (in the outbox, nothing on the
+  wire) → **Sent** (encrypted under the live session and handed to the router)
+  → **Delivered** / **Read** (receipts, §6.4). A message queued while the
+  peer is away shows *Queued* until the silent re-handshake completes, then
+  flips to *Sent*.
+  - A panic wipe (§7) erases every session, every peer record and the outbox.
 - **Fingerprint** shown in the UI = `SHA-256(ed25519Pk ‖ x25519Pk)` as 64 hex chars,
   displayed in groups of 4. Verification by QR / in-person compare (PRD FR-13, P1)
   is *not* in MVP; MVP shows the fingerprint and marks TOFU (trust-on-first-use)
   honestly.
+- **4-hex short form is for disambiguation only** (16 bits — forgeable in
+  seconds). Chat display (`“<fruit> <nickname> - 7F3A”`) uses the short form to
+  tell duplicate nicks/fruits apart, but **only the QR-verified badge or a full
+  fingerprint comparison conveys trust**. Never treat a matching 4-hex prefix as
+  verified.
 
 ## 8. Router rules (normative, implemented in Phase B)
 
@@ -427,9 +553,10 @@ nonce window (see `GROUPS_DESIGN.md` §5).
    accounting and relay (Phase D ordering rule).** A packet whose signature
    fails verification (or is missing where §3 requires one) is dropped and
    **never inserted into the dedupe cache** and never charged to a rate-limit
-   bucket. Until Phase D wires real verification, the router's verifier is
-   permissive (`{ true }`) — the *placement* of the check is pinned now so
-   Phase D only injects the key lookup.
+   bucket. D1 wires the production verifier (`AnnounceVerifier` + two-tier
+   `KeyCache`); there is no permissive fallback in the app. JVM simulator
+   tests may inject a permissive verifier, but that verifier is test-only and
+   never shipped.
 
 1a. **Forward compatibility:** after signature verification, the router
     **relays unknown packet types** instead of dropping them (§2). A packet of
@@ -463,7 +590,10 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
   after signing (nickname, avatar, x25519 key, capabilities, or any header
   byte except TTL) fails `Ed25519.verify` and is dropped, never cached.
   ANNOUNCEs with missing signatures, mismatched hashes or bad signatures are
-  `droppedInvalid`, not `droppedDuplicate`.
+  `droppedInvalid` **and** `droppedBadSignature`, not `droppedDuplicate`. An
+  ANNOUNCE that is cryptographically valid but rejected by the learning budget
+  is counted as `droppedBudget` and is **not** counted as invalid (see §8.1
+  counter table).
 - **Flood:** ANNOUNCE uses TTL 7 (same cap as data, so keys travel as far as
   data will), jitter 10–200 ms per hop, adaptive relay probability (rule 6),
   and its own rate limit (≤ 5/10 s per sender and per connection, same bucket
@@ -505,13 +635,63 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
     (594 is the per-connection arithmetic, 100 is what lands). Real peers
     re-teach instantly on their next ANNOUNCE. Starting values only —
     phone-validated.
-- **Packets from unknown senders:** dropped, never relayed, never cached, and
-  counted as `droppedUnknownKey`. The only exception is an ANNOUNCE that
-  passes the self-certifying check (it *is* the teacher). A Noise HANDSHAKE
-  that passes §7.1 of NOISE_DESIGN.md may also teach its binding once D2
-  lands. Everything else (PUBLIC, PRIVATE, GROUP_*, unknown types) from an
-  unknown `senderId` is dropped even if its signature would otherwise verify
-  against a key the node does not hold.
+- **Packets from unknown senders — bounded holding buffer (amended, D1):** a
+  packet whose sender key is not cached is **held for a short while** instead
+  of being dropped on the spot, because in a mesh the sender's ANNOUNCE and
+  its first data packet routinely race each other (the ANNOUNCE has one more
+  hop to travel, or the relay was busy). The buffer is strictly bounded:
+
+  | Bound | Value | Rule |
+  |---|---|---|
+  | Packets held **in total** | **32** | the whole buffer, per node |
+  | Packets held **per connection** | **8** | one chatty neighbour cannot fill it |
+  | **Hold time** | **3 s** | after that the packet is dropped |
+
+  A held packet is **released** as soon as the matching **verified ANNOUNCE**
+  arrives (that ANNOUNCE teaches the sender's key); the released packet then
+  goes through the normal path again (verification → dedupe → rate limit →
+  delivery → relay). A held packet is **not** relayed while it waits, and it
+  is never cached. Packets are keyed by message id, so a duplicate copy of a
+  held packet is ignored rather than queued twice.
+
+  Anything that does not fit (buffer full) is dropped immediately and counted
+  as `droppedBufferFull` — **an unknown-sender flood must never be able to
+  delay or displace legitimate traffic**, and it must never grow the buffer
+  beyond 32/8. The only exception to "unknown senders are never trusted" is
+  an ANNOUNCE that passes the self-certifying check (it *is* the teacher); a
+  Noise HANDSHAKE that passes §7.1 of NOISE_DESIGN.md may also teach its
+  binding once D2 lands. Everything else (PUBLIC, PRIVATE, GROUP_*, unknown
+  types) from an unknown `senderId` is held (not delivered, not relayed) and
+  is dropped even if its signature would otherwise verify against a key the
+  node does not hold.
+- **Sender settle window (new, D1):** after linking a **new** neighbour, the
+  sender waits **2 s** before its **first data packet** to that neighbour
+  (ANNOUNCE and HANDSHAKE are never delayed). The neighbour needs the
+  sender's ANNOUNCE before it can verify the sender's data, and the ANNOUNCE
+  travels one hop less than the data. The window is per connection: it starts
+  when the peer is first seen, is skipped for peers that were already linked,
+  and restarts after a disconnect. Only *originated* data waits — a relayed
+  packet keeps the **origin's** signature, so the relay's key is not what the
+  receiver needs. `MeshRouter` implements this with a wall-clock timer
+  (`RouterConfig.newPeerSettleMs`, default 2 000 ms) over the transport's
+  connection view; the mesh neighbour view used for routing is unchanged.
+- **Signature counters (normative names in `MeshStats`):**
+
+  | Counter | Meaning |
+  |---|---|
+  | `droppedUnknownKey` | A held packet **timed out** (3 s) without its sender's ANNOUNCE arriving. Also increments `droppedInvalid`. This is the **only** place the counter moves: a packet that is held and later released is not a drop at all. |
+  | `droppedBadSignature` | Key was known but Ed25519 verification failed, or a type that §3 requires to be signed arrived unsigned. Also increments `droppedInvalid`. |
+  | `droppedBudget` | ANNOUNCE is structurally valid and correctly signed, but the `KeyCache` per-connection or global learning budget rejected it. **Not** invalid and **not** charged to `droppedInvalid`; a later announce can still teach the key. |
+  | `droppedBufferFull` | The holding buffer was full (32 total / 8 per connection) when the packet arrived, so it was dropped instead of held. Also increments `droppedInvalid`. |
+
+  Operators use the split to distinguish "the mesh has not converged yet"
+  (`droppedUnknownKey` — a timeout, i.e. the key never arrived), "someone is
+  forging/corrupting" (`droppedBadSignature`), "a flood is being throttled"
+  (`droppedBudget`) and "the buffer was full" (`droppedBufferFull`). The
+  holding buffer also exposes `heldTotal` (packets ever held) and
+  `releasedPending` (packets released after their ANNOUNCE arrived): in a
+  healthy mesh `heldTotal > releasedPending > 0` right after a join, and the
+  difference is what times out.
 - **Simulator model (D1 test-only, not production):** nodes start knowing
   **only direct neighbours** (via the adjacency map); all other keys are
   learned exclusively by observing verified ANNOUNCE floods. Measurements in
@@ -558,25 +738,37 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
   full ANNOUNCE round (all 30 nodes flood once) **7,121** linkTx.
   → ~**14,242/min** at 30 s cadence, ~**7,121/min** at 60 s, ~3,560/min at 120 s.
 - **Random degree ~6:** delivery **0.991**, data flood **952** linkTx mean,
-  one ANNOUNCE round **2,276** linkTx.
-  → ~**4,550/min** at 30 s, **2,276/min** at 60 s.
+  one ANNOUNCE round **3,125** linkTx.
+  → ~**6,250/min** at 30 s, **3,125/min** at 60 s.
 - **20-node group flood (10 members / 10 non-member relays):** members
   **9/9 delivered**, non-members relayed normally (130 relay forwards total),
   per-node relay bound holds.
 
+**Measurement method:** an ANNOUNCE round is measured **to quiescence** — the
+test waits until the virtual network stops transmitting (300 ms quiet, 10 s
+cap) instead of sleeping a fixed 500 ms. A fixed sleep truncates the wave:
+at 500 ms only ~70% of the round has been transmitted and 10–27 of 30 nodes
+have the sender's key, so the data packet is dropped as *unknown-sender*
+rather than proving the key-knowledge path. Measuring a settled wave is what
+makes the delivery numbers above reproducible; the earlier 2,276-linkTx /
+0.969-coverage figures were measured on a truncated wave (see §8.3).
+
 **Chosen cadence: every ~60 s ± 10 s jitter** (on connect + periodic, adaptive
 ± hysteresis per rule 8), peer timeout **180 s** (3 missed cadences). Compared
-with 30 s this halves the announce overhead (≈7k linkTx/min FC, ≈2.3k/min
+with 30 s this halves the announce overhead (≈7k linkTx/min FC, ≈3.1k/min
 degree-6 at 30 nodes) while keeping the 420 s cache warm across **three
 slowest** cadences. Interval values are sent as `intervalUnits` (§6.1) and
 are accepted only as **{3, 6, 12}**. A 120 s cadence would halve overhead
 again but leaves only 2–3 refreshes per cache lifetime and risks timeout on
 lossy links, so 60 s (adaptive) is the current balance. The interval is
 behaviour-only (no wire change beyond the one byte).
-**Why degree-6 bytes/s *fell* (590 → 422 B/s) even though ANNOUNCE grew:**
-the announce round's linkTx fell 27% (3,125 → 2,276) because the signed
-ANNOUNCE + per-connection new-identity budget suppressed redundant relay
-copies, outweighing the +1 payload byte.
+**Correction (D1):** the previously recorded "degree-6 bytes/s *fell*
+(590 → 422 B/s)" and the "announce round's linkTx fell 27% (3,125 → 2,276)"
+were a **measurement artifact**, not a saving: the 2,276 figure was taken
+500 ms after the wave started, so it counted only part of the round. A settled
+round is **3,125 linkTx**, i.e. the original figure. The signed ANNOUNCE +
+per-connection new-identity budget do suppress redundant relay copies, but
+they do not change the round's size this much.
 **Amendment (starting values, phone-validated later): adaptive interval that
 grows with known-node count** — ≤10 known → 30 s, 11–30 → 60 s, >30 → 120 s
 (see §8.4). §8.2 numbers are the degree-6 decision case; the top line is the
@@ -595,28 +787,48 @@ flood. The simulator models this: a late joiner starts empty, receives N
 replays, then a non-neighbour flood verifies on first arrival (see
 `KeyKnowledgeTest` late-joiner probe: time-to-first-verified-delivery).
 
+**Known transient (degree-6, first round):** an early `KeyKnowledgeTest`
+measured **0.969 key coverage after one announce wave** (843/870 ordered
+pairs). This is *not* a correctness bug: adaptive relay suppression
+legitimately drops ~3% of one-wave announces. After three waves (the real
+60 s cadence) coverage was **1.000** in every toggle config — the overhead
+drop is fewer redundant copies, not lost keys. The 0.969 number is recorded
+here so future re-measures do not mistake it for a regression.
+**Correction (D1):** the 0.969 figure was measured on a wave that was still
+in flight (the test slept a fixed 500 ms, then counted). Measured **to
+quiescence**, one wave reaches **870/870 pairs (1.000)** and the origin's key
+is known by **30/30** nodes in 17 of 20 seeds (29/30 in 3 seeds), so delivery
+is **0.991** (§8.2). The residual gap is not missing keys but adaptive
+suppression on the *data* flood: a node that learned the key can still miss
+the packet itself (27–29 of 29 delivered in the worst seeds).
+
 #### 8.4 Announce overhead in bytes/s/node (degree-6 decision case)
 
 One ANNOUNCE on the wire is **~170 bytes** (32 header + ~70 payload + 64
 signature, avatar included). One full round (30 announces, degree ~6) is
-**2,276 link transmissions** (measured) ≈ 387 KB moved per round
-(`2,276 × 170 B`). Per node (TX + RX = 2 × moved ÷ 30 nodes):
+**3,125 link transmissions** (measured, wave measured to quiescence) ≈ 528 KB
+moved per round (`3,125 × 169 B`). Per node (TX + RX = 2 × moved ÷ 30 nodes):
 
 | cadence | per node per min | per node per sec |
 |---------|------------------|-------------------|
-| 30 s | ~52 KB | **~845 B/s** |
-| 60 s | ~26 KB | **~420 B/s** |
-| 120 s | ~13 KB | **~210 B/s** |
+| 30 s | ~69 KB | **~1,175 B/s** |
+| 60 s | ~34 KB | **~590 B/s** |
+| 120 s | ~17 KB | **~295 B/s** |
 
-At BLE LE-1M rates (~0.7 Mb/s usable) 420 B/s is a **~0.5% radio duty-cycle
+At BLE LE-1M rates (~0.7 Mb/s usable) 590 B/s is a **~0.7% radio duty-cycle
 unvalidated estimate** — duty cycle is not battery drain. It says nothing
 about the PRD battery target (**≤4 %/hour screen-on**) without radio power,
 CPU wake and display measurements. In a fully-connected room the rate is
-~3.1× higher (≈1,320 B/s at 60 s). ANNOUNCE overhead *may* not be the
+~2.3× higher (≈1,340 B/s at 60 s). ANNOUNCE overhead *may* not be the
 battery bottleneck; adaptive spacing is therefore chosen for *storm
 hygiene*, not battery rescue, until measured.
 The adaptive schedule (switch up at 33 known, down at 27; bands 30/60/120 s)
 roughly equalises per-node bytes/s as the mesh grows.
+**Correction (D1):** these figures were previously ~37% lower (2,276 linkTx,
+~420 B/s at 60 s) because the round was measured 500 ms after it started; see
+§8.2. The battery band (**≤4 %/hour**) is unaffected in direction but the
+60 s cadence now costs ~590 B/s per node, so the **30 s band (≈1,175 B/s) is
+the one to keep off** until a phone measures real drain.
 
 ## 9. BLE transport expectations (Phase C — normative for the codec)
 

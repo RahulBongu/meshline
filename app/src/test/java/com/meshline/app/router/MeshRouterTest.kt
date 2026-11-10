@@ -38,8 +38,11 @@ class MeshRouterTest {
         to: Int? = null,
     ): MeshPacket {
         val recip = if (to == null) PacketCodec.BROADCAST_ID else id(to)
-        val flags = (if (to != null) 0x01 else 0).toByte()
-        return MeshPacket(PacketCodec.PROTOCOL_VERSION, type, ttl, flags, now, payload, id(from), recip)
+        val flags = ((if (to != null) 0x01 else 0) or 0x02).toByte() // §3: signed
+        return MeshPacket(
+            PacketCodec.PROTOCOL_VERSION, type, ttl, flags, now, payload, id(from), recip,
+            ByteArray(64) { 0x11 }, // tests use a permissive verifier; presence satisfies §3
+        )
     }
 
     private fun testConfig() = RouterConfig(jitterMinMs = 0, jitterMaxMs = 0, nowProvider = { now }, seed = 1L)
@@ -286,7 +289,7 @@ class MeshRouterTest {
         // insertion/rate-limit/relay. With a rejecting verifier, the same
         // packet twice must count as two invalids and zero dedupe entries.
         val transport = FakeTransport(id(1), setOf(id(2)))
-        val rejecting = MeshRouter(id(1), transport, testConfig(), { transport.snapshot() }, signatureVerifier = { false })
+        val rejecting = MeshRouter(id(1), transport, testConfig(), { transport.snapshot() }, signatureVerifier = { _, _ -> SignatureCheck.BAD_SIGNATURE })
         val signed = MeshPacket(
             PacketCodec.PROTOCOL_VERSION, PacketType.PUBLIC_MESSAGE, 7, 0x02, now,
             "hello".toByteArray(Charsets.UTF_8), id(0), PacketCodec.BROADCAST_ID,
@@ -300,5 +303,82 @@ class MeshRouterTest {
         assertEquals(0, rejecting.dedupeSize())
         assertEquals(0, rejecting.stats.linkTransmissions)
         assertEquals(0, rejecting.stats.delivered)
+    }
+
+    @Test
+    fun `unknown sender is held and only counted when the hold times out`() = runBlocking {
+        // Review item: droppedUnknownKey measures the post-join transient
+        // (key not learned yet), not forged packets. Since PROTOCOL §8.1 the
+        // packet is *held* for up to 3 s first, so the counter only moves on
+        // timeout.
+        val clock = java.util.concurrent.atomic.AtomicLong(now)
+        fun signedPacket() = MeshPacket(
+            PacketCodec.PROTOCOL_VERSION, PacketType.PUBLIC_MESSAGE, 7, 0x02, now,
+            "hello".toByteArray(Charsets.UTF_8), id(0), PacketCodec.BROADCAST_ID,
+            ByteArray(64) { 0xAB.toByte() }
+        )
+
+        val unknownTransport = FakeTransport(id(1), setOf(id(2)))
+        val unknown = MeshRouter(
+            id(1), unknownTransport,
+            RouterConfig(jitterMinMs = 0, jitterMaxMs = 0, nowProvider = { clock.get() }, seed = 1L),
+            { unknownTransport.snapshot() },
+            signatureVerifier = { _, _ -> SignatureCheck.UNKNOWN_SENDER },
+        )
+        unknown.onReceive(PacketCodec.encode(signedPacket()), id(0))
+        // Held: nothing delivered, nothing relayed, no counter moved yet.
+        assertEquals(0, unknown.stats.droppedUnknownKey)
+        assertEquals(0, unknown.stats.droppedBadSignature)
+        assertEquals(0, unknown.stats.droppedInvalid)
+        assertEquals(1, unknown.stats.heldTotal)
+        assertEquals(1, unknown.pendingSize())
+        assertEquals(0, unknown.stats.delivered)
+        assertEquals(0, unknown.stats.linkTransmissions)
+
+        // Still inside the 3 s hold window.
+        clock.set(now + 2_000)
+        assertEquals(0, unknown.sweepExpiredPending())
+        assertEquals(0, unknown.stats.droppedUnknownKey)
+
+        // Timeout: now it counts as an unknown-key drop.
+        clock.set(now + 3_001)
+        assertEquals(1, unknown.sweepExpiredPending())
+        assertEquals(1, unknown.stats.droppedUnknownKey)
+        assertEquals(1, unknown.stats.droppedInvalid)
+        assertEquals(0, unknown.stats.droppedBadSignature)
+        assertEquals(0, unknown.pendingSize())
+
+        val forgedTransport = FakeTransport(id(1), setOf(id(2)))
+        val forged = MeshRouter(
+            id(1), forgedTransport, testConfig(), { forgedTransport.snapshot() },
+            signatureVerifier = { _, _ -> SignatureCheck.BAD_SIGNATURE },
+        )
+        forged.onReceive(PacketCodec.encode(signedPacket()), id(0))
+        assertEquals(0, forged.stats.droppedUnknownKey)
+        assertEquals(1, forged.stats.droppedBadSignature)
+        assertEquals(1, forged.stats.droppedInvalid)
+
+        val budgetTransport = FakeTransport(id(1), setOf(id(2)))
+        val budget = MeshRouter(
+            id(1), budgetTransport, testConfig(), { budgetTransport.snapshot() },
+            signatureVerifier = { _, _ -> SignatureCheck.BUDGET },
+        )
+        budget.onReceive(PacketCodec.encode(signedPacket()), id(0))
+        assertEquals(1, budget.stats.droppedBudget)
+        assertEquals(0, budget.stats.droppedInvalid)
+        assertEquals(0, budget.stats.droppedBadSignature)
+    }
+
+    @Test
+    fun `unsigned public message is rejected per protocol section 3`() = runBlocking {
+        val transport = FakeTransport(id(1), setOf(id(2)))
+        val router = MeshRouter(id(1), transport, testConfig(), { transport.snapshot() })
+        val unsigned = MeshPacket(
+            PacketCodec.PROTOCOL_VERSION, PacketType.PUBLIC_MESSAGE, 7, 0x00, now,
+            "hello".toByteArray(Charsets.UTF_8), id(0), PacketCodec.BROADCAST_ID,
+        )
+        router.onReceive(PacketCodec.encode(unsigned), id(0))
+        assertEquals(1, router.stats.droppedBadSignature)
+        assertEquals(0, router.stats.delivered)
     }
 }

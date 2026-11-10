@@ -48,11 +48,12 @@ class MeshSimulatorTest {
         PacketCodec.PROTOCOL_VERSION,
         PacketType.PUBLIC_MESSAGE,
         7,
-        0,
+        0x02,
         now,
         "flood".toByteArray(Charsets.UTF_8),
         id(from),
         PacketCodec.BROADCAST_ID,
+        ByteArray(64) { 0x11 }, // permissive simulator verifier; presence satisfies §3
     )
 
     private data class Node(val transport: SimulatorTransport, val router: MeshRouter, val delivered: MutableList<MeshPacket>, val jobs: List<Job>)

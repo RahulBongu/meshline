@@ -45,10 +45,21 @@ sealed interface RouteDecision {
      *  suppressed by adaptive probability, or addressed to another node. */
     data object Drop : RouteDecision
 
+    /** Held pending the sender's ANNOUNCE (key not known yet). The packet is
+     *  re-processed when the verified ANNOUNCE arrives, or dropped on timeout. */
+    data class Hold(val packet: MeshPacket) : RouteDecision
+
     /** FRAGMENT held for reassembly; [completeBytes] is non-null when the last
      *  fragment arrived and only needs decoding. */
     data class InFragment(val completeBytes: ByteArray?) : RouteDecision
 }
+
+/**
+ * Result of the router's signature hook. The four states are counted
+ * separately so operators can tell the post-join key transient, real
+ * forgeries, and key-learning budget drops apart.
+ */
+enum class SignatureCheck { OK, UNKNOWN_SENDER, BAD_SIGNATURE, BUDGET }
 
 /** Counters a test or the mesh-status screen reads (all volatile writes via @Volatile ints). */
 class MeshStats {
@@ -61,6 +72,20 @@ class MeshStats {
     @Volatile var droppedRateLimited: Int = 0
     @Volatile var linkTransmissions: Int = 0 // individual sendTo calls (originated + relayed)
     @Volatile var ttlUpgrades: Int = 0 // duplicates with a higher TTL that triggered one extra relay
+    /** No key for the sender yet (expected transient right after a node joins).
+     *  Counted **only** when a held packet times out (PROTOCOL §8.1). */
+    @Volatile var droppedUnknownKey: Int = 0
+    /** Key was known and the Ed25519 signature did not verify (forgery/corruption). */
+    @Volatile var droppedBadSignature: Int = 0
+    /** Valid announce rejected by the KeyCache per-connection/global learning budget. */
+    @Volatile var droppedBudget: Int = 0
+    /** Packet dropped because the unknown-sender holding buffer was full
+     *  (32 total / 8 per connection). Not an unknown-key drop. */
+    @Volatile var droppedBufferFull: Int = 0
+    /** Packets put into the holding buffer (cumulative). */
+    @Volatile var heldTotal: Int = 0
+    /** Held packets released because the matching verified ANNOUNCE arrived. */
+    @Volatile var releasedPending: Int = 0
 }
 
 data class RouterConfig(
@@ -76,6 +101,19 @@ data class RouterConfig(
     val rateHandshakePer10s: Int = 5,
     val rateReceiptPer10s: Int = 30,
     val rateOtherPer10s: Int = 40,
+    // Unknown-sender holding buffer (PROTOCOL §8.1). A packet from a sender
+    // whose key is not known yet waits here for the matching ANNOUNCE.
+    val pendingTotalCap: Int = 32,
+    val pendingPerConnectionCap: Int = 8,
+    val pendingHoldMs: Long = 3_000,
+    // A sender waits this long after a neighbour appears before it sends its
+    // first data packet to it, so the neighbour has learned the sender's key
+    // from the ANNOUNCE (which travels one hop less than the data).
+    val newPeerSettleMs: Long = 2_000,
+    // Wall clock for the settle timer only. `nowProvider` is the *simulated*
+    // packet clock and may be frozen in tests; the settle timer needs real
+    // elapsed time.
+    val wallClock: () -> Long = System::currentTimeMillis,
 ) {
     init {
         require(jitterMinMs >= 0 && jitterMaxMs >= jitterMinMs) { "jitter range invalid" }
@@ -195,23 +233,47 @@ class MeshRouter(
     /** Snapshot of currently connected neighbours (ids). Defaults to empty for unit tests. */
     private val neighboursProvider: () -> Set<ByteArray> = { emptySet() },
     /**
+     * The transport's *connection* view (ids we are linked to right now).
+     * Used **only** for the settle window below — it deliberately does not
+     * drive routing, which keeps using [neighboursProvider] (the mesh view).
+     */
+    private val connectedPeersProvider: () -> Set<ByteArray> = { emptySet() },
+    /**
      * Signature verifier. Phase B/C default is permissive (`{ true }`) because no
      * keys exist yet; Phase D injects real Ed25519 verification.
      * **Ordering rule (Phase D, PROTOCOL.md §8):** the verifier runs *before*
      * dedupe insertion, rate-limit accounting and relay. Invalid packets are
      * dropped and never cached.
      */
-    private val signatureVerifier: (MeshPacket) -> Boolean = { true },
+    private val signatureVerifier: (MeshPacket, ByteArray) -> SignatureCheck = { _, _ -> SignatureCheck.OK },
 ) {
     private val dedupe = DedupeCache(config.dedupeCapacity, config.dedupeTtlMs, config.nowProvider)
     private val rateLimiter = RateLimiter(nowProvider = config.nowProvider, config = config)
     private val reassembler = Reassembler()
     private val random = Random(config.seed)
+    /** Unknown-sender holding buffer (PROTOCOL §8.1). */
+    private val pending = PendingBuffer(config.pendingTotalCap, config.pendingPerConnectionCap, config.pendingHoldMs)
+    /** When a neighbour was first seen (wall clock) — drives the settle delay. */
+    private val peerFirstSeenMs = HashMap<String, Long>()
+    /** Neighbours that already waited out their settle window. */
+    private val peerSettled = HashSet<String>()
 
     val stats = MeshStats()
 
     private val _delivered = MutableSharedFlow<MeshPacket>(extraBufferCapacity = 256)
     val delivered: Flow<MeshPacket> = _delivered.asSharedFlow()
+
+    /**
+     * Locally delivered packets **with the neighbour they arrived on**.
+     *
+     * The D2 secure-channel layer needs the immediate neighbour: its
+     * handshake rate limits and quarantine are per *connection* (NOISE_DESIGN
+     * §5), never per claimed `senderId` — a spoofed senderId must not be able
+     * to spend another peer's budget. The plain [delivered] flow cannot carry
+     * that information.
+     */
+    private val _deliveredWithPeer = MutableSharedFlow<Pair<ByteArray, MeshPacket>>(extraBufferCapacity = 256)
+    val deliveredWithPeer: Flow<Pair<ByteArray, MeshPacket>> = _deliveredWithPeer.asSharedFlow()
 
     /**
      * Receive one encoded packet from an immediate neighbour. Returns the
@@ -240,7 +302,33 @@ class MeshRouter(
         val encoded = PacketCodec.encode(packet)
         val targets = chooseTargets(packet, exclude = ownId)
         stats.originatedSends++
-        return transmit(encoded, targets)
+        return transmit(encoded, targets, originSend = true, packetType = packet.type)
+    }
+
+    /** Number of packets currently waiting for their sender's ANNOUNCE. */
+    fun pendingSize(): Int = pending.size()
+
+    /** Number of packets currently held for one connection. */
+    fun pendingSizeForConnection(connectionKey: String): Int = pending.sizeForConnection(connectionKey)
+
+    /**
+     * Drops held packets whose hold window has expired and counts them as
+     * `droppedUnknownKey`. The router calls this on every received packet;
+     * the service also calls it on a timer so the counter moves even in a
+     * silent mesh.
+     */
+    fun sweepExpiredPending(nowMs: Long = config.nowProvider()): Int {
+        val expired = pending.expire(nowMs)
+        for (e in expired) {
+            stats.droppedInvalid++
+            stats.droppedUnknownKey++
+        }
+        return expired.size
+    }
+
+    private fun mustBeSigned(type: PacketType): Boolean = when (type) {
+        PacketType.ANNOUNCE, PacketType.PUBLIC_MESSAGE, PacketType.RECEIPT, PacketType.LEAVE -> true
+        else -> false
     }
 
     private suspend fun onDecoded(pkt: MeshPacket, fromPeer: ByteArray): RouteDecision {
@@ -262,14 +350,66 @@ class MeshRouter(
     }
 
     private suspend fun process(pkt: MeshPacket, fromPeer: ByteArray): RouteDecision {
-        // Phase D ordering rule: signature verification happens *before*
-        // dedupe insertion, rate-limit accounting and relay. Invalid packets
-        // are dropped and never cached (Phase B/C verifier is permissive).
-        if (pkt.signature != null && !signatureVerifier(pkt)) {
-            stats.droppedInvalid++
-            return RouteDecision.Drop
+        // Expire held packets first: their timeout is the only place the
+        // droppedUnknownKey counter moves.
+        sweepExpiredPending()
+
+        // Signature verification happens *before* dedupe insertion, rate-limit
+        // accounting and relay. Invalid packets are dropped and never cached.
+        var verified = false
+        if (pkt.signature == null) {
+            // PROTOCOL §3: ANNOUNCE, PUBLIC_MESSAGE, RECEIPT and LEAVE MUST be
+            // signed. An unsigned one is treated as an invalid signature.
+            if (mustBeSigned(pkt.type)) {
+                stats.droppedInvalid++
+                stats.droppedBadSignature++
+                return RouteDecision.Drop
+            }
+        } else {
+            when (signatureVerifier(pkt, fromPeer)) {
+                SignatureCheck.OK -> verified = true
+                SignatureCheck.UNKNOWN_SENDER -> {
+                    // The sender's key is not known yet (post-join transient).
+                    // Hold the packet briefly: the matching verified ANNOUNCE
+                    // releases it. The buffer is bounded (32 total / 8 per
+                    // connection / 3 s), so an unknown-sender flood can neither
+                    // grow it nor delay legitimate traffic.
+                    val held = pending.hold(pkt, fromPeer, hex(fromPeer), config.nowProvider())
+                    if (held) {
+                        stats.heldTotal++
+                        return RouteDecision.Hold(pkt)
+                    }
+                    // Buffer full: drop now. Not an unknown-key drop — the
+                    // counter for that moves only on timeout.
+                    stats.droppedInvalid++
+                    stats.droppedBufferFull++
+                    return RouteDecision.Drop
+                }
+                SignatureCheck.BAD_SIGNATURE -> {
+                    stats.droppedInvalid++
+                    stats.droppedBadSignature++
+                    return RouteDecision.Drop
+                }
+                SignatureCheck.BUDGET -> {
+                    // Valid packet, but the key-learning budget is exhausted.
+                    stats.droppedBudget++
+                    return RouteDecision.Drop
+                }
+            }
         }
 
+        val decision = processVerified(pkt, fromPeer)
+
+        // A verified ANNOUNCE teaches the sender's key: everything we held for
+        // that sender can now be verified, delivered and relayed.
+        if (verified && pkt.type == PacketType.ANNOUNCE) {
+            releasePending(pkt.senderId)
+        }
+        return decision
+    }
+
+    /** Everything after successful verification: dedupe, rate limit, delivery, relay. */
+    private suspend fun processVerified(pkt: MeshPacket, fromPeer: ByteArray): RouteDecision {
         val id = pkt.messageId
         val prevMax = dedupe.highestTtl(id)
         if (prevMax != null) {
@@ -303,11 +443,25 @@ class MeshRouter(
         if (forMe) {
             deliveredHere = _delivered.tryEmit(pkt)
             if (!deliveredHere) { /* buffer full in tests: count anyway */ deliveredHere = true }
+            _deliveredWithPeer.tryEmit(fromPeer to pkt)
             stats.delivered++
         }
 
         // 4..6. Relay decision (shared by first sighting and TTL-upgrade paths).
         return relay(pkt, fromPeer, deliveredHere = deliveredHere)
+    }
+
+    /**
+     * Re-processes the packets we held for [senderId] now that its key is
+     * known. Each released packet goes through the normal path again
+     * (verification → dedupe → rate limit → delivery → relay).
+     */
+    private suspend fun releasePending(senderId: ByteArray) {
+        val released = pending.release(senderId)
+        for (e in released) {
+            stats.releasedPending++
+            process(e.packet, e.fromPeer)
+        }
     }
 
     /** Shared relay decision: relayOn + destination + TTL + adaptive probability + jitter. */
@@ -354,7 +508,51 @@ class MeshRouter(
         return neighbours.filterTo(mutableSetOf()) { !it.contentEquals(exclude) && !it.contentEquals(ownId) }
     }
 
-    private fun snapshotNeighbours(): Set<ByteArray> = runCatching { neighboursProvider() }.getOrDefault(emptySet())
+    private fun snapshotNeighbours(): Set<ByteArray> {
+        noteConnectedPeers()
+        return runCatching { neighboursProvider() }.getOrDefault(emptySet())
+    }
+
+    /**
+     * Tracks when each *connected* peer first appeared. A peer that disappears
+     * (disconnect) is forgotten, so a reconnect starts a fresh settle window.
+     */
+    private fun noteConnectedPeers() {
+        val connected = runCatching { connectedPeersProvider() }.getOrDefault(emptySet())
+        val now = config.wallClock()
+        val present = HashSet<String>(connected.size)
+        for (n in connected) {
+            val k = hex(n)
+            present += k
+            if (!peerFirstSeenMs.containsKey(k)) peerFirstSeenMs[k] = now
+        }
+        peerFirstSeenMs.keys.retainAll(present)
+        peerSettled.retainAll(present)
+    }
+
+    /**
+     * Waits out the settle window before the first data packet to a newly seen
+     * neighbour: the neighbour needs our ANNOUNCE (one hop) before it can
+     * verify our data. Only *originated* data waits — a relayed packet keeps
+     * the origin's signature, so the relay's key is not what the receiver
+     * needs.
+     */
+    private suspend fun awaitPeerSettle(target: ByteArray) {
+        noteConnectedPeers()
+        val k = hex(target)
+        if (k in peerSettled) return
+        val firstSeen = peerFirstSeenMs[k] ?: return
+        val elapsed = config.wallClock() - firstSeen
+        val remaining = config.newPeerSettleMs - elapsed
+        if (remaining > 0) delay(remaining)
+        peerSettled += k
+    }
+
+    /** True for packet types that carry user content (they wait for the settle window). */
+    private fun isContentType(type: PacketType): Boolean = when (type) {
+        PacketType.PUBLIC_MESSAGE, PacketType.PRIVATE_MESSAGE, PacketType.RECEIPT, PacketType.FRAGMENT -> true
+        else -> false
+    }
 
     /** Bounded relay probability: 1.0 up to 4 neighbours, then 4/n floored at 0.25. */
     fun relayProbability(neighbourCount: Int): Double {
@@ -362,9 +560,19 @@ class MeshRouter(
         return max(0.25, 4.0 / neighbourCount)
     }
 
-    private suspend fun transmit(encoded: ByteArray, targets: Set<ByteArray>): RouteDecision {
+    private suspend fun transmit(
+        encoded: ByteArray,
+        targets: Set<ByteArray>,
+        originSend: Boolean = false,
+        packetType: PacketType? = null,
+    ): RouteDecision {
         if (targets.isEmpty()) return RouteDecision.Drop
         for (target in targets) {
+            // The sender waits out the settle window before its first data
+            // packet to a new neighbour (PROTOCOL §8.1).
+            if (originSend && packetType != null && isContentType(packetType)) {
+                awaitPeerSettle(target)
+            }
             // One transmission per target per (hop) so tests can bound link counts.
             runCatching { transport.sendTo(target, encoded) }
             stats.linkTransmissions++
@@ -391,4 +599,6 @@ class MeshRouter(
     )
 
     fun dedupeSize(): Int = dedupe.size()
+
+    private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
 }
