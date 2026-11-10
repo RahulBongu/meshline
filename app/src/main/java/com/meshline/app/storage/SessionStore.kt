@@ -50,7 +50,7 @@ class SessionStore(private val dao: NoiseSessionDao) {
             recvNonce = recvNonce,
             replayWindow = replayWindow.copyOf(),
             createdAtMs = createdAtMs,
-            lastUsedMs = lastUsedMs,
+            lastUsedAtMs = lastUsedAtMs,
             messagesSent = messagesSent,
             messagesReceived = messagesReceived,
             // Deliberately NULL: the transport key cannot be exported, so it is
@@ -70,7 +70,7 @@ class SessionStore(private val dao: NoiseSessionDao) {
             recvNonce = recvNonce,
             replayWindow = replayWindow.copyOf(),
             createdAtMs = createdAtMs,
-            lastUsedAtMs = lastUsedMs,
+            lastUsedAtMs = lastUsedAtMs,
             messagesSent = messagesSent,
             messagesReceived = messagesReceived,
             // The column is always NULL (see toEntity), but read it as-is so a

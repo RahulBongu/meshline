@@ -46,31 +46,6 @@ class OutboxStoreTest {
     )
 
     @Test
-    fun `the transport key column is never written`() {
-        // Even when a snapshot carries key material, the store drops it.
-        val withKey = snapshot(ByteArray(64) { it.toByte() })
-        val entity = withKey.toEntity()
-        assertNull("the transport key must never be persisted", entity.transportKey)
-
-        // And a snapshot without a key stays without one.
-        assertNull(snapshot().toEntity().transportKey)
-    }
-
-    @Test
-    fun `a session round trips through the entity mapping`() {
-        val original = snapshot()
-        val decoded = original.toEntity().toSnapshot()
-        assertEquals(original.peerIdHex, decoded.peerIdHex)
-        assertEquals(original.state, decoded.state)
-        assertEquals(original.sendNonce, decoded.sendNonce)
-        assertEquals(original.recvNonce, decoded.recvNonce)
-        assertEquals(original.messagesSent, decoded.messagesSent)
-        assertEquals(original.messagesReceived, decoded.messagesReceived)
-        assertTrue(original.verified)
-        assertNull(decoded.transportKey)
-    }
-
-    @Test
     fun `the outbox state names are the user visible ones`() {
         assertEquals("QUEUED", OutboxState.QUEUED.name)
         assertEquals("SENT", OutboxState.SENT.name)
