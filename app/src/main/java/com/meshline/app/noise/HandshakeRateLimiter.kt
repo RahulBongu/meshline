@@ -27,6 +27,36 @@ class HandshakeRateLimiter(
     private val nodePacketBucket = ArrayDeque<Long>()
 
     /**
+     * Global handshake-work budget: the X25519 operations spent in the last
+     * minute, across **all** connections.
+     *
+     * The per-connection buckets reset when a peer reconnects under a new BLE
+     * address, so they cannot bound the *work* an attacker can make us do.
+     * This bucket is per node and survives reconnects.
+     */
+    private val globalDhOps = ArrayDeque<Long>()
+
+    /**
+     * Charges [cost] X25519 operations against the global per-minute budget.
+     * Returns false when the budget is exhausted — the caller must then drop
+     * the handshake instead of doing the key agreement.
+     */
+    fun allowDhWork(cost: Int): Boolean {
+        if (cost <= 0) return true
+        val now = nowProvider()
+        prune(globalDhOps, now, WINDOW_1M)
+        if (globalDhOps.size + cost > NoiseProtocol.MAX_X25519_OPS_PER_MINUTE) return false
+        repeat(cost) { globalDhOps.add(now) }
+        return true
+    }
+
+    /** X25519 operations still available in the current minute. */
+    fun remainingDhOps(): Int {
+        prune(globalDhOps, nowProvider(), WINDOW_1M)
+        return (NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - globalDhOps.size).coerceAtLeast(0)
+    }
+
+    /**
      * A handshake *packet* may be processed? (5 per connection per 10 s, 30 per
      * node per 10 s.)
      */
@@ -116,10 +146,15 @@ class HandshakeRateLimiter(
         quarantinedUntil.clear()
         lastSuccessAt.clear()
         nodePacketBucket.clear()
+        globalDhOps.clear()
     }
 
     private fun prune(bucket: MutableList<Long>, now: Long, windowMs: Long) {
         while (bucket.isNotEmpty() && now - bucket.first() > windowMs) bucket.removeAt(0)
+    }
+
+    private fun prune(bucket: ArrayDeque<Long>, now: Long, windowMs: Long) {
+        while (bucket.isNotEmpty() && now - bucket.first() > windowMs) bucket.removeFirst()
     }
 
     private companion object {

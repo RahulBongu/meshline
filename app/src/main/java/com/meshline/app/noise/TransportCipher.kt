@@ -5,11 +5,34 @@ import com.southernstorm.noise.protocol.CipherState
 /**
  * One direction of an established Noise transport session.
  *
- * The Noise cipher state keeps its own counter, but NOISE_DESIGN §4.1 wants
- * the nonce to be **explicit on the wire** (the mesh reorders and duplicates
- * packets, so the receiver must know which nonce a ciphertext used before it
- * can run the replay window). We therefore own the counter here and set it on
- * the cipher state before every operation.
+ * ## How the explicit nonce is applied (and why the missing key export does
+ * ## not matter)
+ *
+ * Noise's ChaChaPoly uses a **64-bit counter as the AEAD nonce**
+ * (`ChaChaCore.initIV(input, n)` in the library), and the *key* is what stays
+ * inside the cipher state. Those are two independent things:
+ *
+ *  - the **key** never leaves the library object (`CipherState` only accepts a
+ *    key, it never returns one — which is why the transport state cannot be
+ *    exported, see NOISE_DESIGN amendment A2), and
+ *  - the **nonce** is just the counter we hand to the cipher before each
+ *    operation. `CipherState.setNonce(long)` sets it, and it is *not* derived
+ *    from the key.
+ *
+ * So we own the counter and set it explicitly on every operation:
+ *
+ * ```
+ * encrypt:  state.setNonce(nonce); state.encryptWithAd(ad, ...); nonce++
+ * decrypt:  state.setNonce(nonceFromTheWire); state.decryptWithAd(ad, ...)
+ * ```
+ *
+ * Because the nonce is set explicitly rather than taken from the library's
+ * internal counter, the receiver can decrypt **message N+1 before message N**:
+ * the ciphertext names the nonce it used, and the receiver uses exactly that
+ * nonce. Nothing has to arrive in order, and the receiver never needs the
+ * key. (The library's own counter is incremented as a side effect of every
+ * operation; we overwrite it before each one, so our counter is the only
+ * authority.)
  *
  * The counter is a 64-bit value; it must never wrap. The re-key rule
  * (1 000 messages per direction, NOISE_DESIGN §6) keeps us far below that,

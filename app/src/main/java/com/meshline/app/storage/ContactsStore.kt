@@ -50,10 +50,15 @@ interface ContactsDao {
     suspend fun deleteAll()
 }
 
-@Database(entities = [ContactEntity::class, NoiseSessionEntity::class], version = 2, exportSchema = false)
+@Database(
+    entities = [ContactEntity::class, NoiseSessionEntity::class, OutboxEntity::class],
+    version = 3,
+    exportSchema = false,
+)
 abstract class MeshlineDatabase : RoomDatabase() {
     abstract fun contactsDao(): ContactsDao
     abstract fun noiseSessionDao(): NoiseSessionDao
+    abstract fun outboxDao(): OutboxDao
 
     companion object {
         /**
@@ -81,6 +86,27 @@ abstract class MeshlineDatabase : RoomDatabase() {
                         `transportKey` BLOB,
                         `verified` INTEGER NOT NULL,
                         PRIMARY KEY(`peerIdHex`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v2 → v3 adds the `outbox` table (D2 store-and-forward). The rows
+         * hold **plaintext** protected by SQLCipher, never ciphertext.
+         */
+        val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `outbox` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `peerIdHex` TEXT NOT NULL,
+                        `plaintext` BLOB NOT NULL,
+                        `createdAtMs` INTEGER NOT NULL,
+                        `state` TEXT NOT NULL,
+                        `attempts` INTEGER NOT NULL
                     )
                     """.trimIndent()
                 )

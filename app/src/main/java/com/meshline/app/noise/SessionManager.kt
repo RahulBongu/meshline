@@ -116,6 +116,12 @@ class SessionManager(
             counters.startsRateLimited++
             return null
         }
+        // The global work budget: a peer that reconnects under a new BLE
+        // address must not be able to make us do endless key agreement.
+        if (!limiter.allowDhWork(NoiseProtocol.DH_COST_START)) {
+            counters.handshakeBudgetExhausted++
+            return null
+        }
         val handshake = NoiseHandshake.initiator(localStaticX25519)
         val session = existing ?: SecureSession(
             peerId = peerId,
@@ -197,6 +203,15 @@ class SessionManager(
         if (binding != null && !MessageIds.idFromPublicKey(binding).contentEquals(packet.senderId)) {
             limiter.recordViolation(connectionKey)
             strike(connectionKey, packet.senderId, "identity binding mismatch", events)
+            return events
+        }
+
+        // Global work budget: charge the X25519 operations this step will
+        // cost *before* doing them. A peer that reconnects under a new BLE
+        // address gets a fresh per-connection bucket, but not a fresh work
+        // budget (NOISE_DESIGN §5).
+        if (!limiter.allowDhWork(NoiseProtocol.dhCost(payload.step))) {
+            counters.handshakeBudgetExhausted++
             return events
         }
 
@@ -416,6 +431,12 @@ class SessionManager(
             ReplayWindow.Decision.TOO_FAR_AHEAD -> {
                 counters.protocolViolations++
                 limiter.recordViolation(connectionKey)
+                // The counter drifted further than the replay window allows:
+                // our session state and the peer's have diverged (too many
+                // messages lost, or the peer re-keyed). NOISE_DESIGN §6.1 says
+                // recover with a *silent re-handshake*, not with an error.
+                session.needsRekey = true
+                events += Event.RehandshakeNeeded(packet.senderId.copyOf())
                 events += Event.Violation(packet.senderId.copyOf(), connectionKey, "nonce beyond the replay window")
                 return events
             }
@@ -555,6 +576,8 @@ class SessionManager(
         @Volatile var quarantines: Int = 0
         @Volatile var startsRateLimited: Int = 0
         @Volatile var handshakePacketsRateLimited: Int = 0
+        /** Handshakes refused because the global X25519 work budget was spent. */
+        @Volatile var handshakeBudgetExhausted: Int = 0
         @Volatile var blockedDropped: Int = 0
         @Volatile var unexpectedHandshake: Int = 0
         @Volatile var tieBreakWon: Int = 0

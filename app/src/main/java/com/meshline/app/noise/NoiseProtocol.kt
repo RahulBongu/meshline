@@ -49,6 +49,37 @@ object NoiseProtocol {
 
     // ---- handshake rate limits (NOISE_DESIGN §5) ----
 
+    /**
+     * Global budget for handshake **work**, in X25519 operations per minute,
+     * across *all* connections.
+     *
+     * The per-connection buckets are not enough on their own: they reset
+     * whenever a peer reconnects under a new BLE address, so a peer that keeps
+     * reconnecting could make us do unlimited key agreement. This budget is
+     * per **node** and survives reconnects.
+     *
+     * One XX handshake costs **5** X25519 operations in total (the initiator's
+     * ephemeral key pair, the responder's ephemeral key pair, `ee`, `es` and
+     * `se`), so 300 operations per minute is 60 handshakes per minute — far
+     * above what a legitimate mesh needs, far below what a flood would ask
+     * for. Starting value; the field numbers may retune it.
+     */
+    const val MAX_X25519_OPS_PER_MINUTE: Int = 300
+
+    /** X25519 operations spent when *starting* a handshake (the ephemeral key pair). */
+    const val DH_COST_START: Int = 1
+
+    /**
+     * X25519 operations a handshake step costs:
+     *  - step 1 (`-> e`): the initiator's ephemeral key pair,
+     *  - step 2 (`<- e, ee, s, es`): the responder's ephemeral key pair + `ee` + `es`,
+     *  - step 3 (`-> s, se`): `se`.
+     */
+    fun dhCost(step: Int): Int = when (step) {
+        NoisePayloads.Step.RESPONDER -> 3
+        else -> 1
+    }
+
     /** Handshake packets accepted per connection per 10 s. */
     const val HANDSHAKE_PACKETS_PER_CONNECTION_PER_10S: Int = 5
 

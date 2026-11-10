@@ -98,4 +98,39 @@ class HandshakeRateLimiterTest {
         assertTrue("the hint must surface above the threshold", limiter.shouldSurfaceViolations("conn-a"))
         assertFalse("another connection has its own count", limiter.shouldSurfaceViolations("conn-b"))
     }
+
+    @Test
+    fun `the global work budget survives a reconnect under a new address`() {
+        val limiter = HandshakeRateLimiter { now }
+        // One full handshake costs 5 X25519 operations.
+        assertEquals(5, NoiseProtocol.DH_COST_START + NoiseProtocol.dhCost(NoisePayloads.Step.RESPONDER) +
+            NoiseProtocol.dhCost(NoisePayloads.Step.INITIATOR_FINAL))
+        // Spend the whole budget, spread over many *different* connections —
+        // exactly what a peer that reconnects under a new BLE address does.
+        var spent = 0
+        var connection = 0
+        while (spent < NoiseProtocol.MAX_X25519_OPS_PER_MINUTE) {
+            val cost = NoiseProtocol.dhCost(NoisePayloads.Step.RESPONDER)
+            assertTrue("connection $connection must be allowed", limiter.allowDhWork(cost))
+            spent += cost
+            connection++
+        }
+        assertEquals(0, limiter.remainingDhOps())
+        // A brand new connection does not get a fresh budget.
+        assertFalse("a new connection must not reset the global budget", limiter.allowDhWork(1))
+        // The per-connection buckets are a different thing and do reset.
+        assertTrue("the per-connection packet budget is separate", limiter.allowPacket("brand-new-connection"))
+    }
+
+    @Test
+    fun `the global work budget refills after a minute`() {
+        val limiter = HandshakeRateLimiter { now }
+        repeat(NoiseProtocol.MAX_X25519_OPS_PER_MINUTE) {
+            assertTrue(limiter.allowDhWork(1))
+        }
+        assertFalse("the budget must be spent", limiter.allowDhWork(1))
+        advance(61_000)
+        assertTrue("the budget must refill after a minute", limiter.allowDhWork(1))
+        assertEquals(NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - 1, limiter.remainingDhOps())
+    }
 }
