@@ -10,21 +10,28 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * Keystore-backed identity store (D1).
- * Raw Ed25519 cannot live in the Android Keystore on minSdk 26, so each
- * private key is wrapped with a Keystore AES-GCM key (alias below) and the
- * ciphertext is stored in SharedPreferences. Public keys + metadata are
- * stored plaintext (they are public). Panic wipe creates a *new* identity,
- * so old QR codes become invalid (their keys are gone).
  *
- * JVM unit tests use [InMemoryIdentityStore] (BouncyCastle AES-GCM, same shape).
+ * Raw Ed25519/X25519 keys cannot live in the Android Keystore on minSdk 26,
+ * so each private key is encrypted separately with a non-exportable Keystore
+ * AES-256-GCM key (alias below). Each ciphertext carries its **own** IV; the
+ * ciphertext + IV are stored in SharedPreferences. Public keys are stored
+ * plaintext because they are public.
+ *
+ * Panic wipe deletes both prefs and the Keystore key, so old QR codes and
+ * senderIds become invalid (the private keys are gone).
+ *
+ * [load] fails closed: if the Keystore key was invalidated (OS upgrade on some
+ * OEMs) or the ciphertext is corrupt, it returns null instead of throwing, and
+ * the app generates a fresh identity.
+ *
+ * JVM unit tests use [InMemoryIdentityStore] (same shape, no Keystore).
  */
 interface IdentityStore {
     fun load(): Identity?
-    fun save(identity: Identity, edPrivateWrapped: ByteArray, xPrivateWrapped: ByteArray, iv: ByteArray)
+    fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray)
     suspend fun wipe()
 }
 
@@ -43,84 +50,105 @@ object IdentityFactory {
 
 class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore {
     private val prefs: SharedPreferences
-        get() = context.getSharedPreferences("meshline_identity", Context.MODE_PRIVATE)
+        get() = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    override fun load(): Identity? {
-        val edPub = prefs.getString("ed_pub", null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return null
-        val xPub = prefs.getString("x_pub", null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return null
-        val edWrapped = prefs.getString("ed_wrapped", null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return null
-        val xWrapped = prefs.getString("x_wrapped", null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return null
-        val iv = prefs.getString("iv", null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return null
-        val key = keystoreKey()
-        val edPriv = decrypt(edWrapped, iv, key)
-        val xPriv = decrypt(xWrapped, iv, key)
-        return Identity(edPub, xPub, edPriv, xPriv)
-    }
+    override fun load(): Identity? = runCatching {
+        val edPub = prefs.getString("ed_pub", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+            ?: return null
+        val xPub = prefs.getString("x_pub", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+            ?: return null
+        val edWrapped = prefs.getString("ed_wrapped", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+            ?: return null
+        val xWrapped = prefs.getString("x_wrapped", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+            ?: return null
+        val edIv = prefs.getString("ed_iv", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+            ?: return null
+        val xIv = prefs.getString("x_iv", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+            ?: return null
+        val key = keystoreKey(createIfMissing = false) ?: return null
+        val edPriv = decrypt(edWrapped, edIv, key)
+        val xPriv = decrypt(xWrapped, xIv, key)
+        Identity(edPub, xPub, edPriv, xPriv)
+    }.getOrNull()
 
-    override fun save(identity: Identity, edPrivateWrapped: ByteArray, xPrivateWrapped: ByteArray, iv: ByteArray) {
-        val key = keystoreKey()
-        val edWrapped = encrypt(edPrivateWrapped, key)
-        val xWrapped = encrypt(xPrivateWrapped, key)
+    override fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray) {
+        val key = keystoreKey(createIfMissing = true)!!
+        val (edWrapped, edIv) = encrypt(edPrivate, key)
+        val (xWrapped, xIv) = encrypt(xPrivate, key)
         prefs.edit()
             .putString("ed_pub", Base64.encodeToString(identity.ed25519PublicKey, Base64.NO_WRAP))
             .putString("x_pub", Base64.encodeToString(identity.x25519PublicKey, Base64.NO_WRAP))
             .putString("ed_wrapped", Base64.encodeToString(edWrapped, Base64.NO_WRAP))
             .putString("x_wrapped", Base64.encodeToString(xWrapped, Base64.NO_WRAP))
-            .putString("iv", Base64.encodeToString(iv, Base64.NO_WRAP))
+            .putString("ed_iv", Base64.encodeToString(edIv, Base64.NO_WRAP))
+            .putString("x_iv", Base64.encodeToString(xIv, Base64.NO_WRAP))
             .apply()
     }
 
     override suspend fun wipe() {
         prefs.edit().clear().apply()
-        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         runCatching { ks.deleteEntry(ALIAS) }
     }
 
-    private fun keystoreKey(): SecretKey {
-        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    private fun keystoreKey(createIfMissing: Boolean): SecretKey? {
+        val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
-        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        gen.init(KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .build())
+        if (!createIfMissing) return null
+        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+        gen.init(
+            KeyGenParameterSpec.Builder(
+                ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+        )
         return gen.generateKey()
     }
 
-    private fun encrypt(plaintext: ByteArray, key: SecretKey): ByteArray {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    /** Returns ciphertext + the random IV the cipher chose for this operation. */
+    private fun encrypt(plaintext: ByteArray, key: SecretKey): Pair<ByteArray, ByteArray> {
+        val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key)
-        return cipher.doFinal(plaintext)
+        return cipher.doFinal(plaintext) to cipher.iv
     }
 
     private fun decrypt(ciphertext: ByteArray, iv: ByteArray, key: SecretKey): ByteArray {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
         return cipher.doFinal(ciphertext)
     }
 
     companion object {
+        private const val PREFS = "meshline_identity"
         private const val ALIAS = "meshline-key-wrap"
+        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val GCM_TAG_BITS = 128
+
         fun generateAndStore(context: Context): Identity {
             val (identity, edPriv, xPriv) = IdentityFactory.generate()
-            val store = AndroidKeystoreIdentityStore(context)
-            store.save(identity, edPriv, xPriv, ByteArray(12)) // IV is generated per encrypt in production; placeholder here is replaced by cipher IV handling.
+            AndroidKeystoreIdentityStore(context).save(identity, edPriv, xPriv)
             return identity
         }
     }
 }
 
-/** JVM-test double (same public shape, BouncyCastle AES-GCM, no Keystore). */
+/** JVM-test double (same public shape, keeps keys in memory only). */
 class InMemoryIdentityStore : IdentityStore {
     var identity: Identity? = null
     private var edWrapped: ByteArray? = null
     private var xWrapped: ByteArray? = null
 
     override fun load(): Identity? = identity
-    override fun save(identity: Identity, edPrivateWrapped: ByteArray, xPrivateWrapped: ByteArray, iv: ByteArray) {
+
+    override fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray) {
         this.identity = identity
-        edWrapped = edPrivateWrapped.copyOf()
-        xWrapped = xPrivateWrapped.copyOf()
+        edWrapped = edPrivate.copyOf()
+        xWrapped = xPrivate.copyOf()
     }
 
     override suspend fun wipe() {

@@ -20,8 +20,10 @@ working crypto.
 - Noise (`noise-java`) is **deferred to Phase D**. Phase A ships only BouncyCastle
   for primitives + SHA-256 in the codec, so the wire format can be frozen and fuzzed
   before any key material exists. Inventing crypto primitives or protocol is out.
-- Room entities + the KSP plugin land in Phase D. Phase A declares Room/SQLCipher
-  *runtime* dependencies only, no DAOs.
+- Room entities + KSP are wired in D1 (`storage/ContactsStore.kt`) and encrypted
+  with the maintained **`net.zetetic:sqlcipher-android`** artifact. The DB
+  passphrase is 32 random bytes wrapped by a Keystore AES-GCM key
+  (`security/DbPassphrase.kt`), never derived from a static value.
 - BLE service UUID (`a777356e-7ebc-429e-a847-d52eaeeb1331`) and characteristic UUID
   (`cf602b5c-31b5-4b91-aa65-9272bd79cd3f`) were generated once (random v4) and are
   now **frozen** in `transport/BleUuids.kt`. Changing either is a wire break and
@@ -178,7 +180,7 @@ Compute **% per hour** (and mAh if available: `adb shell dumpsys battery`
 before/after). Do this twice: (a) no traffic, (b) one public message every
 5 min. Report both numbers — **duty cycle is not battery drain**.
 
-**D1 phone checklist (after your Phase C report):**
+**D1 phone checklist (BLOCKED — see “D1 integration status” below):**
 1. Two phones on this branch discover each other — signed ANNOUNCEs verify
    (debug overlay shows `ttl` + `hops`; `droppedUnknownKey` stays low).
 2. Public messages still flow between the two phones, and each is **signed and
@@ -197,6 +199,18 @@ overlay's `last GATT error` line.
 **Frozen wire constants (do not change without a version bump):**
 service `a777356e-7ebc-429e-a847-d52eaeeb1331`, characteristic
 `cf602b5c-31b5-4b91-aa65-9272bd79cd3f`, MTU 512 (payload 509), max connections 6.
+
+## D1 integration status (important)
+
+The D1 building blocks exist and are unit-tested (`security/Identity*`,
+`security/QrPayload`, `security/KeyCache`, `security/AnnounceVerifier`,
+`profile/`, `storage/` Room+SQLCipher, `ui/D1Screens`). **They are not yet wired
+into the running app:** `BleMeshService` still uses the Phase C ephemeral
+identity and placeholder announce keys, `MainActivity` does not navigate to the
+D1 screens, and the contacts DAO has no repository instance. Therefore the D1
+phone checklist above **cannot pass yet**; wiring the service (load identity,
+sign/verify announces and public messages) and the QR/contacts UI is the
+remaining D1 work.
 
 ## Open issues after Phase C
 

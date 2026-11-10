@@ -78,10 +78,9 @@ dependencies {
     // stable, but entities/DAOs (and the KSP plugin they need) land in Phase D.
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
-    implementation("androidx.room:room-compiler:2.6.1") {
-        exclude(group = "com.intellij", module = "annotations")
-    }
-    implementation("net.zetetic:android-database-sqlcipher:4.5.4")
+    // room-compiler is only needed by KSP; never put it on the app classpath.
+    // Maintained SQLCipher for Android (replaces the EOL android-database-sqlcipher).
+    implementation("net.zetetic:sqlcipher-android:4.20.0")
     implementation("com.google.zxing:core:3.5.3") {
         exclude(group = "com.intellij", module = "annotations")
     }
@@ -95,6 +94,9 @@ dependencies {
     }
 
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
     implementation("org.jetbrains:annotations:23.0.0")
     // Real JSON impl for JVM unit tests (android.jar's org.json is stubbed).
     testImplementation("org.json:json:20250517")

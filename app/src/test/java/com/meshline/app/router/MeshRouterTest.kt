@@ -286,7 +286,7 @@ class MeshRouterTest {
         // insertion/rate-limit/relay. With a rejecting verifier, the same
         // packet twice must count as two invalids and zero dedupe entries.
         val transport = FakeTransport(id(1), setOf(id(2)))
-        val rejecting = MeshRouter(id(1), transport, testConfig(), { transport.snapshot() }, signatureVerifier = { false })
+        val rejecting = MeshRouter(id(1), transport, testConfig(), { transport.snapshot() }, signatureVerifier = { SignatureCheck.INVALID })
         val signed = MeshPacket(
             PacketCodec.PROTOCOL_VERSION, PacketType.PUBLIC_MESSAGE, 7, 0x02, now,
             "hello".toByteArray(Charsets.UTF_8), id(0), PacketCodec.BROADCAST_ID,
@@ -300,5 +300,34 @@ class MeshRouterTest {
         assertEquals(0, rejecting.dedupeSize())
         assertEquals(0, rejecting.stats.linkTransmissions)
         assertEquals(0, rejecting.stats.delivered)
+    }
+
+    @Test
+    fun `unknown sender is counted separately from an invalid signature`() = runBlocking {
+        // Review item: droppedUnknownKey measures the post-join transient
+        // (key not learned yet), not forged packets.
+        fun signedPacket() = MeshPacket(
+            PacketCodec.PROTOCOL_VERSION, PacketType.PUBLIC_MESSAGE, 7, 0x02, now,
+            "hello".toByteArray(Charsets.UTF_8), id(0), PacketCodec.BROADCAST_ID,
+            ByteArray(64) { 0xAB.toByte() }
+        )
+
+        val unknownTransport = FakeTransport(id(1), setOf(id(2)))
+        val unknown = MeshRouter(
+            id(1), unknownTransport, testConfig(), { unknownTransport.snapshot() },
+            signatureVerifier = { SignatureCheck.UNKNOWN_SENDER },
+        )
+        unknown.onReceive(PacketCodec.encode(signedPacket()), id(0))
+        assertEquals(1, unknown.stats.droppedUnknownKey)
+        assertEquals(1, unknown.stats.droppedInvalid)
+
+        val forgedTransport = FakeTransport(id(1), setOf(id(2)))
+        val forged = MeshRouter(
+            id(1), forgedTransport, testConfig(), { forgedTransport.snapshot() },
+            signatureVerifier = { SignatureCheck.INVALID },
+        )
+        forged.onReceive(PacketCodec.encode(signedPacket()), id(0))
+        assertEquals(0, forged.stats.droppedUnknownKey)
+        assertEquals(1, forged.stats.droppedInvalid)
     }
 }

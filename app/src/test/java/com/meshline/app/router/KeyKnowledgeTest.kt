@@ -243,7 +243,7 @@ class KeyKnowledgeTest {
                 globalCapOn = mech.globalCap,
             )
             val base = RouterConfig(jitterMinMs = 0, jitterMaxMs = 0, nowProvider = { now }, seed = simCfg.seed + i * 7919L)
-            val r = MeshRouter(nid, t, base, neighboursProvider = { network.neighboursOf(nid) }, signatureVerifier = verifier(cache, mech))
+            val r = MeshRouter(nid, t, base, neighboursProvider = { network.neighboursOf(nid) }, signatureVerifier = { pkt -> if (verifier(cache, mech)(pkt)) SignatureCheck.OK else SignatureCheck.INVALID })
             if (startKnowingNeighbours) {
                 for (n in adjacency.getValue(i)) cache.protect(sid(n), edPk(n), nowMs = now)
                 cache.protect(nid, edPk(i), nowMs = now)

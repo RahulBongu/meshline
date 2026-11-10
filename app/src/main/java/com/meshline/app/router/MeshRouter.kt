@@ -50,6 +50,13 @@ sealed interface RouteDecision {
     data class InFragment(val completeBytes: ByteArray?) : RouteDecision
 }
 
+/**
+ * Result of the router's signature hook. Distinguishing “key not learned yet”
+ * from “bad signature” keeps [MeshStats.droppedUnknownKey] meaningful: it
+ * counts the post-join transient, not forgeries.
+ */
+enum class SignatureCheck { OK, UNKNOWN_SENDER, INVALID }
+
 /** Counters a test or the mesh-status screen reads (all volatile writes via @Volatile ints). */
 class MeshStats {
     @Volatile var delivered: Int = 0
@@ -202,7 +209,7 @@ class MeshRouter(
      * dedupe insertion, rate-limit accounting and relay. Invalid packets are
      * dropped and never cached.
      */
-    private val signatureVerifier: (MeshPacket) -> Boolean = { true },
+    private val signatureVerifier: (MeshPacket) -> SignatureCheck = { SignatureCheck.OK },
 ) {
     private val dedupe = DedupeCache(config.dedupeCapacity, config.dedupeTtlMs, config.nowProvider)
     private val rateLimiter = RateLimiter(nowProvider = config.nowProvider, config = config)
@@ -266,10 +273,21 @@ class MeshRouter(
         // Phase D ordering rule: signature verification happens *before*
         // dedupe insertion, rate-limit accounting and relay. Invalid packets
         // are dropped and never cached (Phase B/C verifier is permissive).
-        if (pkt.signature != null && !signatureVerifier(pkt)) {
-            stats.droppedInvalid++
-            stats.droppedUnknownKey++
-            return RouteDecision.Drop
+        if (pkt.signature != null) {
+            when (signatureVerifier(pkt)) {
+                SignatureCheck.OK -> Unit
+                SignatureCheck.UNKNOWN_SENDER -> {
+                    // Post-join transient: the sender's ANNOUNCE has not been
+                    // learned yet, so the key lookup fails. Counted separately.
+                    stats.droppedInvalid++
+                    stats.droppedUnknownKey++
+                    return RouteDecision.Drop
+                }
+                SignatureCheck.INVALID -> {
+                    stats.droppedInvalid++
+                    return RouteDecision.Drop
+                }
+            }
         }
 
         val id = pkt.messageId

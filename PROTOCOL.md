@@ -410,8 +410,18 @@ nonce window (see `GROUPS_DESIGN.md` §5).
 - On first launch the `SecurityModule` generates:
   - **X25519** (Curve25519) key pair for key agreement (Noise uses this), and
   - **Ed25519** key pair for signing.
-- Private keys live in the **Android Keystore** (non-exportable where the hardware
-  supports it); they are never in the Room database and never in a packet.
+- Raw Ed25519/X25519 private keys **cannot be imported into the Android Keystore**
+  on minSdk 26. They are therefore encrypted with a non-exportable Keystore
+  AES-256-GCM key (`meshline-key-wrap`, one random IV per key) and only the
+  ciphertext is kept in SharedPreferences; keys never enter Room and never enter
+  a packet. Panic wipe deletes both the ciphertext and the wrap key.
+- The **SQLCipher passphrase** is 32 bytes from `SecureRandom`, generated once,
+  wrapped by a second Keystore key (`meshline-db-wrap`). It is never derived from
+  a PIN, nickname, device id, or any static value, and is never logged.
+- **Backup is disabled**: `android:allowBackup="false"` plus
+  `data_extraction_rules.xml` excluding every domain (`database`, `sharedpref`,
+  `file`, `root`) from both cloud backup and device transfer, so identity keys,
+  contacts, and messages cannot leave the device through backup.
 - `senderId` = truncated SHA-256 of the *Ed25519* public key (identity anchor).
 - **Fingerprint** shown in the UI = `SHA-256(ed25519Pk ‖ x25519Pk)` as 64 hex chars,
   displayed in groups of 4. Verification by QR / in-person compare (PRD FR-13, P1)
