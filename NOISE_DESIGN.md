@@ -255,15 +255,22 @@ long-lived transport keys still need limits:
 ### 6.1 Session persistence across restarts and store-and-forward
 
 **Sessions persist (encrypted) across app restarts.** On ESTABLISHED, the
-SecurityModule serialises the Noise session's transport + handshake cipher
-states (chaining keys, counters, replay window) into Room under SQLCipher — the
-database key itself is wrapped by the Android Keystore, so the ciphertext on
-disk is useless without the device key. Ephemeral *private* keys are still
-never written; only the session's derived cipher state is stored.
+SecurityModule serialises the session's derived state (the identity binding,
+the state, the nonce counters and the replay window) into Room under
+SQLCipher — the database key itself is wrapped by the Android Keystore, so the
+ciphertext on disk is useless without the device key. Ephemeral *private* keys
+are still never written; only the derived session state is stored.
 
-- **Restart behaviour:** on boot, sessions are reloaded from Room and resume
-  in ESTABLISHED without a new handshake. Half-finished handshakes (§3.5)
-  are *not* persisted and restart as ABSENT (fresh handshake).
+- **What cannot be stored (amendment A2):** the Noise *transport cipher state*
+  cannot be exported by `noise-java` 0.1.1, so it cannot be written down. A
+  session restored from the store is therefore treated as **session loss** and
+  **silently re-handshakes** — the same recovery path as below — instead of
+  resuming in place. The store keeps a `transportKey` column ready for a
+  library that can export the material; it is never written today.
+- **Restart behaviour:** on boot, the sessions and the peer records are
+  reloaded from Room. A session that was `ESTABLISHED` re-handshakes silently
+  (above) and is `ESTABLISHED` again a moment later. Half-finished handshakes
+  (§3.5) are *not* persisted and restart as ABSENT (fresh handshake).
 - **Silent re-handshake on session loss:** if a delivered transport packet's
   AEAD verification fails (stale/rotated state, peer upgraded, counter drift
   beyond the replay window), the node **silently starts a fresh XX handshake**
@@ -271,16 +278,36 @@ never written; only the session's derived cipher state is stored.
   the conversation or surfacing a cryptographic error to the user. The peer
   sees a normal re-handshake (rate-limited as usual, §5). Repeated failures
   (>5 in an hour) switch to the honest "couldn't establish session" UX.
-- **Interaction with store-and-forward (P1, FR-12):** MVP does not yet
-  store-and-forward private messages to absent peers. When it lands, queued
-  *ciphertexts* (already transport-encrypted under the persisted session) are
-  cached in the outbox for up to 12 h (configurable) and replayed on
-  reconnection without a new handshake, provided the session has not been
-  re-keyed in the meantime. If the nonce window has moved past a cached
-  message, that message is re-encrypted under the live session or marked
-  expired — never sent with a stale nonce.
+- **Store-and-forward (FR-12, amended for non-persistent sessions):** the
+  sender's **outbox stores the PLAINTEXT**, protected by the SQLCipher
+  database, and the message is **encrypted at send time**, under the session
+  that is live *then*.
+  - *Why plaintext and not ciphertext:* a stored ciphertext would belong to a
+    session that no longer exists after a restart (the transport keys cannot be
+    exported, A2), and it would carry a nonce that must never be reused under
+    the same key. Encrypting late avoids both problems by construction: the
+    nonce comes from the live session, and the plaintext never leaves the
+    encrypted database.
+  - *Relays never cache private ciphertext.* A relay forwards a private
+    message and forgets it; it never stores it, and never re-sends it under a
+    different session. Store-and-forward for private messages is a
+    **sender-side** feature only.
+  - *Lifetime:* a queued message waits up to **12 h** (configurable) and is
+    then dropped rather than arriving as a stale surprise.
+  - *User-visible states (see §8):*
+
+    | state | meaning |
+    |---|---|
+    | **Queued** | the message is in the outbox; no session yet, so nothing is on the wire |
+    | **Sent** | encrypted under the live session and handed to the router ("sent to mesh" — BLE offers no delivery guarantee) |
+    | **Delivered** | the peer acknowledged it (RECEIPT, §6.4) |
+    | **Read** | the peer opened it |
+
+    A message queued while the peer is away goes **Queued → (re-handshake) →
+    Sent**: the silent re-handshake of §6.1 happens under the hood and the
+    user only sees the state change from *Queued* to *Sent*.
 - **Panic wipe (§7)** erases all sessions, all peer fingerprints, the outbox
-  (Queued messages), and both long-term key pairs. The device returns to
+  (Queued messages) and both long-term key pairs. The device returns to
   "never seen anyone" with a fresh random nickname.
 
 ## 7. Key storage and identity

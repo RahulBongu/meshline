@@ -347,6 +347,15 @@ What exists (all pure JVM, all simulator-tested):
   the impersonation defence (the X25519 key the handshake reveals must match
   the announced one), the concurrent-handshake tie-break (lower `senderId`
   wins) and the silent re-handshake on session loss.
+- **Store-and-forward outbox** (`storage/OutboxStore.kt`) — the sender's outbox
+  stores the **plaintext** (protected by SQLCipher) and encrypts **at send
+  time** under the session that is live then, so a queued message never
+  carries a stale nonce and never belongs to a session that no longer exists.
+  Relays never cache private ciphertext. User-visible states: **Queued** →
+  **Sent** (after the silent re-handshake) → **Delivered** / **Read**.
+- **Global handshake work budget** (`noise/HandshakeRateLimiter.kt`) — 300
+  X25519 operations per minute across *all* connections, because the
+  per-connection buckets reset when a peer reconnects under a new BLE address.
 
 Wire format: `PROTOCOL.md` §6.3 and §6.5. Design and its amendments:
 `NOISE_DESIGN.md`.

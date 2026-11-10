@@ -136,7 +136,10 @@ class OutboxRepository(
     suspend fun drop(id: Long) = dao.delete(id)
 
     /** Drops everything that waited longer than the age limit. */
-    suspend fun expireOlderThan(nowMs: Long): Int = dao.deleteOlderThan(nowMs - maxAgeMs)
+    suspend fun expireOlderThan(nowMs: Long): Int = dao.deleteOlderThan(expiryCutoff(nowMs))
+
+    /** The cutoff below which a row is too old to send. */
+    fun expiryCutoff(nowMs: Long): Long = nowMs - maxAgeMs
 
     /** Panic wipe (§7): the outbox goes with the identity. */
     suspend fun wipe() = dao.deleteAll()

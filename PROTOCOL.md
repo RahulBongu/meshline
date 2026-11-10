@@ -509,13 +509,30 @@ nonce window (see `GROUPS_DESIGN.md` §5).
   stored** — only the derived session state, the identity binding, the nonce
   counters and the replay window. The table was added in DB version 2 with a
   non-destructive `MIGRATION_1_2` (contacts survive the upgrade).
-  - **Limitation (D2, documented):** `noise-java` 0.1.1 exposes no way to
-    export the Noise transport key material (`HandshakeState` has no key
-    getter and `SymmetricState` is package-private), so the transport cipher
-    state cannot be written to disk. A session restored from the store
-    therefore **re-handshakes silently** — the same recovery path
-    NOISE_DESIGN.md §6.1 prescribes for session loss — instead of resuming in
-    place. The store keeps the column ready for a library that can export it.
+  - **The `transportKey` column is never written.** `noise-java` 0.1.1 exposes
+    no way to export the Noise transport key material (`HandshakeState` has no
+    key getter and `SymmetricState` is package-private), so there is nothing
+    meaningful to store — writing key material the app cannot use would only
+    add a second secret to erase in a panic wipe. The `SessionStore` mapping
+    always writes NULL, even when a snapshot carries a key; the column exists
+    only so a future library with an export path needs no schema change.
+  - **Limitation (D2, documented):** because the transport cipher state
+    cannot be written down, a session restored from the store **re-handshakes
+    silently** — the same recovery path NOISE_DESIGN.md §6.1 prescribes for
+    session loss — instead of resuming in place.
+- **Store-and-forward outbox (D2, FR-12):** the `outbox` table (DB version 3,
+  `MIGRATION_2_3`) holds the **plaintext** of private messages that wait for
+  a session, protected by the same SQLCipher database. The message is
+  **encrypted at send time**, under the session that is live then — so it
+  never carries a stale nonce and never belongs to a session that no longer
+  exists. **Relays never cache private ciphertext**: a relay forwards a
+  private message and forgets it; store-and-forward for private messages is
+  sender-side only. A queued message waits at most **12 h** and is then
+  dropped. User-visible states: **Queued** (in the outbox, nothing on the
+  wire) → **Sent** (encrypted under the live session and handed to the router)
+  → **Delivered** / **Read** (receipts, §6.4). A message queued while the
+  peer is away shows *Queued* until the silent re-handshake completes, then
+  flips to *Sent*.
   - A panic wipe (§7) erases every session, every peer record and the outbox.
 - **Fingerprint** shown in the UI = `SHA-256(ed25519Pk ‖ x25519Pk)` as 64 hex chars,
   displayed in groups of 4. Verification by QR / in-person compare (PRD FR-13, P1)
