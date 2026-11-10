@@ -305,6 +305,16 @@ ciphertext   ChaCha20-Poly1305 ciphertext (plaintext + 16-byte tag)
 - The nonce is **explicit on the wire** (§4.1 of NOISE_DESIGN.md): the mesh
   reorders and duplicates packets, so the receiver must know which nonce a
   ciphertext used before it runs the replay window.
+- **How the nonce is applied.** Noise's ChaChaPoly uses a 64-bit counter as the
+  AEAD nonce, and that counter is *independent of the key*: the key stays
+  inside the library's cipher state (which is why the transport state cannot
+  be exported — NOISE_DESIGN amendment A2), while the nonce is a value we set
+  on the cipher before every operation (`CipherState.setNonce`). The sender
+  owns the counter and puts it in the packet; the receiver uses exactly that
+  nonce. **Consequence: message N+1 can be decrypted before message N** —
+  nothing has to arrive in order, and no key ever has to be reconstructed.
+  The library's own counter is a side effect of each operation and is
+  overwritten before every use, so our counter is the only authority.
 - **Associated data (normative):** the 32-byte packet header with the **TTL
   byte zeroed** (relays decrement it, so the ciphertext must survive any
   number of hops) and the **payload length zeroed** (the payload *is* the
