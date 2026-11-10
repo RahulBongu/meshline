@@ -110,8 +110,9 @@ INTERNET permission on the **merged manifest** or in
 `aapt dump permissions app-universal-debug.apk`.
 
 On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
-`ReplayWindowTest` 6, `HandshakeRateLimiterTest` 7, `SessionCodecTest` 4 —
-**99 tests, 0 failures** in total.
+`NoiseNonceOrderingTest` 6, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 9,
+`SessionCodecTest` 4, `SessionStoreTest` 2, `OutboxStoreTest` 2 —
+**111 tests, 0 failures** in total.
 
 > **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
 > typically uninstalls the app (and its data) after the run, and the
@@ -307,8 +308,8 @@ Measured with `:app:assembleRelease` (minified, resource-shrunk, unsigned) on
 |---|---:|---:|---|
 | `app-arm64-v8a-release-unsigned.apk` | 5,673,688 | 5.41 | < 25 MB |
 | `app-armeabi-v7a-release-unsigned.apk` | 5,311,786 | 5.07 | < 25 MB |
-| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,681,764 | 5.42 | < 25 MB |
-| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,319,858 | 5.07 | < 25 MB |
+| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,682,204 | 5.42 | < 25 MB |
+| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,320,302 | 5.07 | < 25 MB |
 
 Each release/releaseSmoke APK contains exactly one ABI and
 `lib/.../libsqlcipher.so`, and none of them declares
@@ -363,7 +364,32 @@ Wire format: `PROTOCOL.md` §6.3 and §6.5. Design and its amendments:
 **Known limitation:** `noise-java` 0.1.1 cannot export the Noise transport
 keys, so a session cannot be resumed byte-for-byte after a restart — a
 restored session **re-handshakes silently** instead (see `NOISE_DESIGN.md`
-amendment A2). Everything else in the store works as designed.
+amendment A2). Everything else in the store works as designed. The
+`noise_sessions.transportKey` column is **never written** (the store's
+mapping always stores NULL), so there is no key material on disk that the app
+cannot use — and no second secret for a panic wipe to chase.
+
+### Review round 1 (D2)
+
+Four review items were closed on this branch:
+
+1. **Explicit nonces with no key export.** The ChaChaPoly nonce is the 64-bit
+   counter, which is *independent of the key*: we own it and set it on the live
+   cipher state (`CipherState.setNonce`) before every operation. The key never
+   leaves the library object, so the missing export does not affect the nonce
+   design — and the receiver can decrypt **N+1 before N**.
+   `NoiseNonceOrderingTest` proves it: out-of-order decryption, a duplicate
+   refused, a gap of 100 lost messages tolerated inside the 128-nonce window,
+   and a gap beyond it forcing a clean re-handshake.
+2. **Store-and-forward under non-persistent sessions.** The outbox stores
+   **plaintext** (SQLCipher-protected) and encrypts **at send time** under the
+   live session; relays never cache private ciphertext. `NOISE_DESIGN.md` §6.1
+   (FR-12) and `PROTOCOL.md` §7 were updated, with the user-visible states
+   (Queued → Sent after the re-handshake → Delivered → Read).
+3. **Global handshake work budget.** 300 X25519 operations per minute across
+   all connections, because the per-connection buckets reset when a peer
+   reconnects under a new BLE address.
+4. **The transport key column is never written** — see above.
 
 ## Open issues after D1
 
