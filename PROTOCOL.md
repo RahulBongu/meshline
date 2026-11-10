@@ -538,24 +538,63 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
     (594 is the per-connection arithmetic, 100 is what lands). Real peers
     re-teach instantly on their next ANNOUNCE. Starting values only —
     phone-validated.
-- **Packets from unknown senders:** dropped, never relayed, never cached, and
-  counted as `droppedUnknownKey`. The only exception is an ANNOUNCE that
-  passes the self-certifying check (it *is* the teacher). A Noise HANDSHAKE
-  that passes §7.1 of NOISE_DESIGN.md may also teach its binding once D2
-  lands. Everything else (PUBLIC, PRIVATE, GROUP_*, unknown types) from an
-  unknown `senderId` is dropped even if its signature would otherwise verify
-  against a key the node does not hold.
+- **Packets from unknown senders — bounded holding buffer (amended, D1):** a
+  packet whose sender key is not cached is **held for a short while** instead
+  of being dropped on the spot, because in a mesh the sender's ANNOUNCE and
+  its first data packet routinely race each other (the ANNOUNCE has one more
+  hop to travel, or the relay was busy). The buffer is strictly bounded:
+
+  | Bound | Value | Rule |
+  |---|---|---|
+  | Packets held **in total** | **32** | the whole buffer, per node |
+  | Packets held **per connection** | **8** | one chatty neighbour cannot fill it |
+  | **Hold time** | **3 s** | after that the packet is dropped |
+
+  A held packet is **released** as soon as the matching **verified ANNOUNCE**
+  arrives (that ANNOUNCE teaches the sender's key); the released packet then
+  goes through the normal path again (verification → dedupe → rate limit →
+  delivery → relay). A held packet is **not** relayed while it waits, and it
+  is never cached. Packets are keyed by message id, so a duplicate copy of a
+  held packet is ignored rather than queued twice.
+
+  Anything that does not fit (buffer full) is dropped immediately and counted
+  as `droppedBufferFull` — **an unknown-sender flood must never be able to
+  delay or displace legitimate traffic**, and it must never grow the buffer
+  beyond 32/8. The only exception to "unknown senders are never trusted" is
+  an ANNOUNCE that passes the self-certifying check (it *is* the teacher); a
+  Noise HANDSHAKE that passes §7.1 of NOISE_DESIGN.md may also teach its
+  binding once D2 lands. Everything else (PUBLIC, PRIVATE, GROUP_*, unknown
+  types) from an unknown `senderId` is held (not delivered, not relayed) and
+  is dropped even if its signature would otherwise verify against a key the
+  node does not hold.
+- **Sender settle window (new, D1):** after linking a **new** neighbour, the
+  sender waits **2 s** before its **first data packet** to that neighbour
+  (ANNOUNCE and HANDSHAKE are never delayed). The neighbour needs the
+  sender's ANNOUNCE before it can verify the sender's data, and the ANNOUNCE
+  travels one hop less than the data. The window is per connection: it starts
+  when the peer is first seen, is skipped for peers that were already linked,
+  and restarts after a disconnect. Only *originated* data waits — a relayed
+  packet keeps the **origin's** signature, so the relay's key is not what the
+  receiver needs. `MeshRouter` implements this with a wall-clock timer
+  (`RouterConfig.newPeerSettleMs`, default 2 000 ms) over the transport's
+  connection view; the mesh neighbour view used for routing is unchanged.
 - **Signature counters (normative names in `MeshStats`):**
 
   | Counter | Meaning |
   |---|---|
-  | `droppedUnknownKey` | No cached key for the sender yet (expected post-join transient). Also increments `droppedInvalid`. |
+  | `droppedUnknownKey` | A held packet **timed out** (3 s) without its sender's ANNOUNCE arriving. Also increments `droppedInvalid`. This is the **only** place the counter moves: a packet that is held and later released is not a drop at all. |
   | `droppedBadSignature` | Key was known but Ed25519 verification failed, or a type that §3 requires to be signed arrived unsigned. Also increments `droppedInvalid`. |
   | `droppedBudget` | ANNOUNCE is structurally valid and correctly signed, but the `KeyCache` per-connection or global learning budget rejected it. **Not** invalid and **not** charged to `droppedInvalid`; a later announce can still teach the key. |
+  | `droppedBufferFull` | The holding buffer was full (32 total / 8 per connection) when the packet arrived, so it was dropped instead of held. Also increments `droppedInvalid`. |
 
-  Operators use the split to distinguish “the mesh has not converged yet”
-  (`droppedUnknownKey`), “someone is forging/corrupting” (`droppedBadSignature`)
-  and “a flood is being throttled” (`droppedBudget`).
+  Operators use the split to distinguish "the mesh has not converged yet"
+  (`droppedUnknownKey` — a timeout, i.e. the key never arrived), "someone is
+  forging/corrupting" (`droppedBadSignature`), "a flood is being throttled"
+  (`droppedBudget`) and "the buffer was full" (`droppedBufferFull`). The
+  holding buffer also exposes `heldTotal` (packets ever held) and
+  `releasedPending` (packets released after their ANNOUNCE arrived): in a
+  healthy mesh `heldTotal > releasedPending > 0` right after a join, and the
+  difference is what times out.
 - **Simulator model (D1 test-only, not production):** nodes start knowing
   **only direct neighbours** (via the adjacency map); all other keys are
   learned exclusively by observing verified ANNOUNCE floods. Measurements in

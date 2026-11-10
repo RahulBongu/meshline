@@ -49,6 +49,9 @@ data class MeshStatsSnapshot(
     val droppedBadSignature: Int = 0,
     val droppedBudget: Int = 0,
     val droppedInvalid: Int = 0,
+    val droppedBufferFull: Int = 0,
+    val heldTotal: Int = 0,
+    val releasedPending: Int = 0,
 )
 
 /**
@@ -75,6 +78,9 @@ class BleMeshService : Service() {
     private val contacts by lazy { ContactsRepository(applicationContext) }
     private val keyCache = KeyCache()
 
+    /** Peers we are currently linked to (transport view) — drives the settle window. */
+    @Volatile private var connectedPeers: Set<ByteArray> = emptySet()
+
     /** Keystore-backed identity; a reset creates a new one (see SecureStorageStatus). */
     val identity: Identity by lazy {
         identityStore.load() ?: AndroidKeystoreIdentityStore.generateAndStore(applicationContext)
@@ -99,6 +105,10 @@ class BleMeshService : Service() {
             transport = t,
             config = RouterConfig(),
             neighboursProvider = { emptySet() },
+            // The transport's connection view drives the settle window only
+            // (PROTOCOL §8.1): the sender waits ~2 s after linking a new peer
+            // before its first data packet to it.
+            connectedPeersProvider = { connectedPeers },
             signatureVerifier = { pkt, from -> AnnounceVerifier.verify(pkt, keyCache, from) },
         )
         transport = t
@@ -106,6 +116,10 @@ class BleMeshService : Service() {
 
         jobs += scope.launch {
             t.incoming.collect { (from, bytes) -> runCatching { r.onReceive(bytes, from) } }
+        }
+        // Track the connected peers (transport view) for the settle window.
+        jobs += scope.launch {
+            t.neighbours.collect { set -> connectedPeers = set.map { it.copyOf() }.toSet() }
         }
         jobs += scope.launch { t.debugPeers.collect { setPeers(it) } }
         jobs += scope.launch { t.lastGattError.collect { if (it != null) setGattError(it) } }
@@ -127,6 +141,9 @@ class BleMeshService : Service() {
         jobs += scope.launch {
             while (true) {
                 val s = r.stats
+                // Held packets time out on a timer, not only when traffic
+                // arrives (PROTOCOL §8.1).
+                r.sweepExpiredPending()
                 setStats(
                     MeshStatsSnapshot(
                         delivered = s.delivered,
@@ -135,6 +152,9 @@ class BleMeshService : Service() {
                         droppedBadSignature = s.droppedBadSignature,
                         droppedBudget = s.droppedBudget,
                         droppedInvalid = s.droppedInvalid,
+                        droppedBufferFull = s.droppedBufferFull,
+                        heldTotal = s.heldTotal,
+                        releasedPending = s.releasedPending,
                     )
                 )
                 delay(2_000)

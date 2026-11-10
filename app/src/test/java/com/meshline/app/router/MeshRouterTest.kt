@@ -306,9 +306,12 @@ class MeshRouterTest {
     }
 
     @Test
-    fun `unknown sender is counted separately from an invalid signature`() = runBlocking {
+    fun `unknown sender is held and only counted when the hold times out`() = runBlocking {
         // Review item: droppedUnknownKey measures the post-join transient
-        // (key not learned yet), not forged packets.
+        // (key not learned yet), not forged packets. Since PROTOCOL §8.1 the
+        // packet is *held* for up to 3 s first, so the counter only moves on
+        // timeout.
+        val clock = java.util.concurrent.atomic.AtomicLong(now)
         fun signedPacket() = MeshPacket(
             PacketCodec.PROTOCOL_VERSION, PacketType.PUBLIC_MESSAGE, 7, 0x02, now,
             "hello".toByteArray(Charsets.UTF_8), id(0), PacketCodec.BROADCAST_ID,
@@ -317,13 +320,33 @@ class MeshRouterTest {
 
         val unknownTransport = FakeTransport(id(1), setOf(id(2)))
         val unknown = MeshRouter(
-            id(1), unknownTransport, testConfig(), { unknownTransport.snapshot() },
+            id(1), unknownTransport,
+            RouterConfig(jitterMinMs = 0, jitterMaxMs = 0, nowProvider = { clock.get() }, seed = 1L),
+            { unknownTransport.snapshot() },
             signatureVerifier = { _, _ -> SignatureCheck.UNKNOWN_SENDER },
         )
         unknown.onReceive(PacketCodec.encode(signedPacket()), id(0))
-        assertEquals(1, unknown.stats.droppedUnknownKey)
+        // Held: nothing delivered, nothing relayed, no counter moved yet.
+        assertEquals(0, unknown.stats.droppedUnknownKey)
         assertEquals(0, unknown.stats.droppedBadSignature)
+        assertEquals(0, unknown.stats.droppedInvalid)
+        assertEquals(1, unknown.stats.heldTotal)
+        assertEquals(1, unknown.pendingSize())
+        assertEquals(0, unknown.stats.delivered)
+        assertEquals(0, unknown.stats.linkTransmissions)
+
+        // Still inside the 3 s hold window.
+        clock.set(now + 2_000)
+        assertEquals(0, unknown.sweepExpiredPending())
+        assertEquals(0, unknown.stats.droppedUnknownKey)
+
+        // Timeout: now it counts as an unknown-key drop.
+        clock.set(now + 3_001)
+        assertEquals(1, unknown.sweepExpiredPending())
+        assertEquals(1, unknown.stats.droppedUnknownKey)
         assertEquals(1, unknown.stats.droppedInvalid)
+        assertEquals(0, unknown.stats.droppedBadSignature)
+        assertEquals(0, unknown.pendingSize())
 
         val forgedTransport = FakeTransport(id(1), setOf(id(2)))
         val forged = MeshRouter(

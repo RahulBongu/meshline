@@ -105,8 +105,9 @@ invocation still gives you the universal debug APK:
 Expected (D1): `PacketCodecTest` 21, `MeshRouterTest` 12, `MeshSimulatorTest` 2,
 `KeyKnowledgeTest` 12, `KeyCacheTest` 6, `AnnounceVerifierTest` 5,
 `IdentityTest` 1, `QrPayloadTest` 4, `BleTransportTest` 5,
-`SampleQrGeneratorTest` 1 — **69 tests, 0 failures**. No INTERNET permission on
-the **merged manifest** or in `aapt dump permissions app-universal-debug.apk`.
+`HoldingBufferTest` 4, `SampleQrGeneratorTest` 1 — **73 tests, 0 failures**. No
+INTERNET permission on the **merged manifest** or in
+`aapt dump permissions app-universal-debug.apk`.
 
 > **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
 > typically uninstalls the app (and its data) after the run, and the
@@ -228,7 +229,10 @@ before/after). Do this twice: (a) no traffic, (b) one public message every
 
 **D1 phone checklist (run after installing the `d1-identity` build):**
 1. Two phones on this branch discover each other — signed ANNOUNCEs verify
-   (debug overlay shows `ttl` + `hops`; `droppedUnknownKey` stays low).
+   (debug overlay shows `ttl` + `hops`; `droppedUnknownKey` stays low). The
+   overlay also shows `held` / `released` / `bufFull`: right after a join
+   `held` rises and `released` catches up — a packet that is held and then
+   released was **not** lost.
 2. Public messages still flow between the two phones, and each is **signed and
    verified** (Logcat shows no `droppedInvalid` spike on valid traffic).
 3. **QR add-contact in both directions:** phone A shows My Profile QR, phone B
@@ -262,6 +266,14 @@ D1 is wired into the running app:
   fails closed: it creates a new identity / empties contacts and shows the
   **“secure storage was reset”** dialog. Peers see a new key (D2 adds the
   key-change warning).
+- A packet from a sender whose key is not known yet is **held** (32 total / 8
+  per connection / 3 s) and released when that sender's verified ANNOUNCE
+  arrives, instead of being dropped on the spot. `droppedUnknownKey` counts
+  **only** held packets that timed out; a full buffer is counted separately as
+  `droppedBufferFull`, so an unknown-sender flood cannot delay real traffic.
+- After linking a **new** peer, the sender waits **2 s** before its first data
+  packet to it, so the peer has learned the sender's key from the ANNOUNCE
+  first.
 
 The D1 phone checklist above is the gate. **D2 does not start until it passes.**
 
@@ -291,15 +303,15 @@ Measured with `:app:assembleRelease` (minified, resource-shrunk, unsigned) on
 |---|---:|---:|---|
 | `app-arm64-v8a-release-unsigned.apk` | 5,610,196 | 5.35 | < 25 MB |
 | `app-armeabi-v7a-release-unsigned.apk` | 5,248,290 | 5.01 | < 25 MB |
-| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,618,420 | 5.36 | < 25 MB |
-| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,256,514 | 5.01 | < 25 MB |
+| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,621,324 | 5.36 | < 25 MB |
+| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,259,418 | 5.01 | < 25 MB |
 
 Each release/releaseSmoke APK contains exactly one ABI and
 `lib/.../libsqlcipher.so`, and none of them declares
 `android.permission.INTERNET`. The `releaseSmoke` APKs are signed with the
 local **debug** certificate (`CN=Android Debug`) — they are for the on-phone
 smoke test only, never for distribution. The universal debug APK is
-21,191,558 bytes (20.21 MiB) because it carries all four ABIs for
+21,245,086 bytes (20.27 MiB) because it carries all four ABIs for
 emulator/UI testing; it is not a release artifact.
 
 ## Open issues after D1

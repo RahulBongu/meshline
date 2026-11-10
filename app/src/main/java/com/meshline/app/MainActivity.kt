@@ -327,7 +327,9 @@ private fun Home(
             Text(
                 "counters: delivered=${stats.delivered} relayed=${stats.relayedForwards} " +
                     "unknownKey=${stats.droppedUnknownKey} badSig=${stats.droppedBadSignature} " +
-                    "budget=${stats.droppedBudget} invalid=${stats.droppedInvalid}",
+                    "budget=${stats.droppedBudget} invalid=${stats.droppedInvalid} " +
+                    "bufFull=${stats.droppedBufferFull} held=${stats.heldTotal} " +
+                    "released=${stats.releasedPending}",
                 color = MeshlineColors.TextSecondary,
                 style = MaterialTheme.typography.bodySmall,
             )
