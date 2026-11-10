@@ -208,7 +208,19 @@ budget or quarantine an innocent peer.
 |--------|-------------------------------|
 | Per connection | **5 handshake packets / 10 s**; **20 handshake starts / hour**; cooldown **60 s** after a successful handshake before a *new* start is allowed |
 | Per node | **30 handshake packets / 10 s** accepted; beyond that, drop silently |
+| Per node (**handshake work**) | **300 X25519 operations / minute** across *all* connections — see below |
 | Invalid handshake | **3 strikes in 5 min** per connection → 10 min handshake-quarantine for that connection |
+
+**Why a global work budget (D2):** the per-connection buckets reset whenever a
+peer reconnects under a **new BLE address**, so on their own they do not bound
+the *work* an attacker can make us do — a peer that keeps reconnecting would get
+a fresh budget every time. The global budget is per **node** and survives
+reconnects: one XX handshake costs **5** X25519 operations (the initiator's
+ephemeral key pair, the responder's ephemeral key pair, `ee`, `es`, `se`), so
+300 operations per minute is 60 handshakes per minute — far above what a
+legitimate mesh needs, far below what a flood would ask for. The cost is
+charged **before** the key agreement happens, and a handshake that cannot pay
+is dropped silently like any other over-limit handshake.
 
 Over-limit handshakes are **dropped silently** (no error reply — errors are
 amplifiers). Repeatedly-invalid handshakes (e.g. correct outer packet, garbage

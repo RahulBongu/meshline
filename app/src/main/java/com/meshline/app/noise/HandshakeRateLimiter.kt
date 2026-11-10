@@ -159,6 +159,7 @@ class HandshakeRateLimiter(
 
     private companion object {
         const val WINDOW_10S = 10_000L
+        const val WINDOW_1M = 60_000L
         const val WINDOW_1H = 60L * 60 * 1_000
     }
 }
