@@ -264,6 +264,18 @@ class MeshRouter(
     val delivered: Flow<MeshPacket> = _delivered.asSharedFlow()
 
     /**
+     * Locally delivered packets **with the neighbour they arrived on**.
+     *
+     * The D2 secure-channel layer needs the immediate neighbour: its
+     * handshake rate limits and quarantine are per *connection* (NOISE_DESIGN
+     * §5), never per claimed `senderId` — a spoofed senderId must not be able
+     * to spend another peer's budget. The plain [delivered] flow cannot carry
+     * that information.
+     */
+    private val _deliveredWithPeer = MutableSharedFlow<Pair<ByteArray, MeshPacket>>(extraBufferCapacity = 256)
+    val deliveredWithPeer: Flow<Pair<ByteArray, MeshPacket>> = _deliveredWithPeer.asSharedFlow()
+
+    /**
      * Receive one encoded packet from an immediate neighbour. Returns the
      * decision for observability; relay emission happens through [transport].
      */
@@ -431,6 +443,7 @@ class MeshRouter(
         if (forMe) {
             deliveredHere = _delivered.tryEmit(pkt)
             if (!deliveredHere) { /* buffer full in tests: count anyway */ deliveredHere = true }
+            _deliveredWithPeer.tryEmit(fromPeer to pkt)
             stats.delivered++
         }
 

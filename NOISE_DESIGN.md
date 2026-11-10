@@ -1,7 +1,44 @@
 # Meshline Noise design note — **PROPOSAL, awaiting review (Phase D gate)**
 
-> **Status:** Design proposal. No Noise code exists yet. Phase D should not start
-> until this note is reviewed. It pins the decisions that are hard to change
+> **Status (D2, protocol + storage level):** the design was **approved with
+> amendments** and the **protocol and storage layers are now implemented** on
+> branch `d2-noise`: the Noise state machine, the explicit transport nonce and
+> the 128-nonce replay window, the session store and the handshake rate limits
+> are coded and tested against the simulator. What is **not** done yet is the
+> wiring into `BleTransport` and the UI — that waits for the D1 phone test to
+> pass, so the D2 code is currently reachable only from the tests.
+>
+> **Amendment A2 (D2, library limitation):** §6.1 says a session resumes in
+> `ESTABLISHED` across a restart because the Noise transport cipher state is
+> serialised into Room. `noise-java` 0.1.1 **cannot export that state**:
+> `HandshakeState` has no key getter, `CipherState` only accepts a key, and
+> `SymmetricState` (which computes the transport keys) is a package-private
+> class. We do not reach into the library's internals to fish the keys out.
+> Instead:
+>   - the `noise_sessions` table keeps the identity binding, the state, the
+>     nonce counters and the replay window — everything the library allows —
+>     and has a `transportKey` column ready for a library that can export the
+>     material;
+>   - a session restored from the store is treated as **session loss** and
+>     **silently re-handshakes**, which is exactly the recovery path §6.1
+>     already specifies for a stale or rotated session;
+>   - ephemeral private keys are still never persisted (§3.5) — unchanged.
+>
+> Consequence for the product: after an app restart the peer sees one extra
+> handshake round, not a resumed session. The wire format, the handshake, the
+> nonce window and the store are unaffected.
+>
+> **Amendment A3 (D2, wire):** the handshake payload carries a small Meshline
+> envelope (version, flags, **step**, Noise length, Noise message, optional
+> Ed25519 binding trailer) instead of "one raw Noise message" (§2). The
+> `step` byte is needed because a Noise read that fails **destroys the
+> handshake state machine** — the transcript hash is mixed before the tag
+> check — so the receiver must never guess which message it received. A wrong
+> step can only make the read fail (the packet is then rejected as an invalid
+> handshake); it can never make a bad message look good. See PROTOCOL.md §6.5.
+>
+> **Original status text:** design proposal. Phase D should not start until
+> this note is reviewed. It pins the decisions that are hard to change
 > after code lands: the handshake pattern, how a handshake crosses a multi-hop
 > BLE mesh, when sessions re-key, and how handshake rate limits are enforced.
 > All cryptographic primitives and the Noise framework itself come from

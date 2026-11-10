@@ -50,7 +50,41 @@ interface ContactsDao {
     suspend fun deleteAll()
 }
 
-@Database(entities = [ContactEntity::class], version = 1, exportSchema = false)
+@Database(entities = [ContactEntity::class, NoiseSessionEntity::class], version = 2, exportSchema = false)
 abstract class MeshlineDatabase : RoomDatabase() {
     abstract fun contactsDao(): ContactsDao
+    abstract fun noiseSessionDao(): NoiseSessionDao
+
+    companion object {
+        /**
+         * v1 → v2 adds the `noise_sessions` table (D2). It is a plain
+         * `CREATE TABLE`, so the contacts survive the upgrade — the fallback
+         * destructive migration would have thrown them away.
+         */
+        val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `noise_sessions` (
+                        `peerIdHex` TEXT NOT NULL,
+                        `ed25519PublicKey` BLOB NOT NULL,
+                        `x25519PublicKey` BLOB NOT NULL,
+                        `fingerprint` TEXT NOT NULL,
+                        `state` TEXT NOT NULL,
+                        `sendNonce` INTEGER NOT NULL,
+                        `recvNonce` INTEGER NOT NULL,
+                        `replayWindow` BLOB NOT NULL,
+                        `createdAtMs` INTEGER NOT NULL,
+                        `lastUsedAtMs` INTEGER NOT NULL,
+                        `messagesSent` INTEGER NOT NULL,
+                        `messagesReceived` INTEGER NOT NULL,
+                        `transportKey` BLOB,
+                        `verified` INTEGER NOT NULL,
+                        PRIMARY KEY(`peerIdHex`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+    }
 }

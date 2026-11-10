@@ -295,11 +295,32 @@ text UTF-8, 1..500 characters (NOT bytes — enforced before encode)
 
 ### 6.3 PRIVATE_MESSAGE
 ```
-ciphertext = Noise transport message bytes (Noise_XX_25519_ChaChaPoly_SHA256)
+version(1)   = 1
+flags(1)     = 0
+nonce(8)     the Noise transport nonce, big-endian
+ciphertext   ChaCha20-Poly1305 ciphertext (plaintext + 16-byte tag)
 ```
-- Outer packet: `recipientId` = recipient, `HAS_SIGNATURE` clear.
+- Outer packet: `recipientId` = recipient, `HAS_SIGNATURE` clear (the Noise
+  transport authenticates the content).
+- The nonce is **explicit on the wire** (§4.1 of NOISE_DESIGN.md): the mesh
+  reorders and duplicates packets, so the receiver must know which nonce a
+  ciphertext used before it runs the replay window.
+- **Associated data (normative):** the 32-byte packet header with the **TTL
+  byte zeroed** (relays decrement it, so the ciphertext must survive any
+  number of hops) and the **payload length zeroed** (the payload *is* the
+  ciphertext and cannot be part of its own associated data; a truncated
+  ciphertext fails the Poly1305 tag check anyway). Everything else — version,
+  type, flags, timestamp, sender, recipient — is bound, so a ciphertext cannot
+  be replayed under a different sender, a different recipient or a different
+  timestamp.
+- The receiver runs a **128-nonce replay window** per direction before it
+  decrypts: a nonce below the window is a replay (dropped and counted), a
+  nonce more than 128 ahead of the expectation is refused as a possible gap
+  attack, a nonce inside the window is accepted exactly once.
 - Re-key after the Noise library's recommended message count / interval
-  (Phase D). Message states: Queued → Sent → Delivered → Read (PRD §13).
+  (Phase D). Meshline's own bound is **1 000 messages per direction**, plus
+  24 h of session age and 7 days since the first transport message.
+- Message states: Queued → Sent → Delivered → Read (PRD §13).
 
 ### 6.4 RECEIPT
 ```
@@ -314,11 +335,45 @@ messageId(32)   the private-message ID being acknowledged
   kept so a parser that only reads the payload can still log who left).
   Signed, broadcast. Receivers mark the peer offline immediately instead of
   waiting for the announce timeout.
-- `HANDSHAKE`: payload = one raw Noise handshake message (length is implicit in
-  the Noise spec — no length prefix here; the Noise library parses it).
+- `HANDSHAKE`: the Noise handshake message plus a small Meshline envelope.
   Unsigned, directed. Relayed like a private message so the handshake can
   traverse multi-hop paths. Handshake packets are rate-limited harder than any
   other type (§8).
+
+```
+version(1)   = 1
+flags(1)     bit 0 = an Ed25519 binding trailer follows
+step(1)      1 = "-> e"        (initiator's first message)
+             2 = "<- e, ee, s, es" (responder's answer)
+             3 = "-> s, se"    (initiator's final message)
+noiseLen(2)  length of the Noise message, big-endian
+noise        the raw Noise handshake message
+binding      ed25519Pk(32), present when flags bit 0 is set
+```
+
+- **Why the envelope:** the Noise library parses a handshake message from its
+  own framing, but the mesh needs three things around it: a version, the
+  identity binding, and — importantly — **which step** the message is. A Noise
+  read that fails *destroys the handshake state machine* (the transcript hash
+  is mixed before the tag check), so the receiver must never guess which
+  message it got. The `step` byte says exactly which message to feed in. The
+  step byte is not secret and not authenticated: a wrong step only makes the
+  Noise read fail (the packet is then rejected and counted as an invalid
+  handshake), it can never make a bad message look good.
+- **Binding trailer (§7.1 of NOISE_DESIGN.md):** the *first* message of each
+  side carries the signer's long-term Ed25519 public key. The receiver checks
+  that `SHA-256(ed25519Pk)[0..8)` equals the outer packet's `senderId`; a
+  mismatch is an impersonation attempt (the handshake is aborted and the
+  connection is quarantined). The strong check is the X25519 key the Noise
+  handshake itself reveals: it must equal the key already announced for that
+  `senderId`, otherwise the peer is impersonating somebody.
+- **Prologue:** both sides use the same prologue
+  (`"Meshline-D2-NoiseXX-v1"`), which is hashed into the transcript. It is a
+  wire constant — changing it invalidates every session.
+- **Pattern:** `Noise_XX_25519_ChaChaPoly_SHA256`, implemented by the pinned
+  `org.signal.forks:noise-java:0.1.1`. The official Noise test vectors for
+  that pattern are run as a unit test (`NoiseVectorsTest`) — a non-conformant
+  implementation cannot ship.
 
 ### 6.6 QR payload (draft D1, not coded in Step 0)
 
@@ -437,6 +492,21 @@ nonce window (see `GROUPS_DESIGN.md` §5).
   A DB-only reset keeps the identity and only empties contacts. The app never
   silently presents an undecryptable store as empty without this notice.
 - `senderId` = truncated SHA-256 of the *Ed25519* public key (identity anchor).
+- **Secure sessions (D2, protocol + storage level):** established Noise sessions
+  and the peer records they carry are stored in the `noise_sessions` table of
+  the same SQLCipher-encrypted database (so the rows are ciphertext at rest
+  under the Keystore-wrapped DB key). **Ephemeral private keys are never
+  stored** — only the derived session state, the identity binding, the nonce
+  counters and the replay window. The table was added in DB version 2 with a
+  non-destructive `MIGRATION_1_2` (contacts survive the upgrade).
+  - **Limitation (D2, documented):** `noise-java` 0.1.1 exposes no way to
+    export the Noise transport key material (`HandshakeState` has no key
+    getter and `SymmetricState` is package-private), so the transport cipher
+    state cannot be written to disk. A session restored from the store
+    therefore **re-handshakes silently** — the same recovery path
+    NOISE_DESIGN.md §6.1 prescribes for session loss — instead of resuming in
+    place. The store keeps the column ready for a library that can export it.
+  - A panic wipe (§7) erases every session, every peer record and the outbox.
 - **Fingerprint** shown in the UI = `SHA-256(ed25519Pk ‖ x25519Pk)` as 64 hex chars,
   displayed in groups of 4. Verification by QR / in-person compare (PRD FR-13, P1)
   is *not* in MVP; MVP shows the fingerprint and marks TOFU (trust-on-first-use)

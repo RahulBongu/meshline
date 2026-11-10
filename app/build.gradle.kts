@@ -127,6 +127,13 @@ dependencies {
     // Noise_XX_25519_ChaChaPoly_SHA256 handshake; it is not needed for the codec.
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
+    // Noise framework for the D2 private-chat handshake. Pinned to the Signal
+    // fork of noise-java (NOISE_DESIGN.md §1): MIT, Maven Central, no runtime
+    // dependencies (the jaxb dependency is test-scope only). The Noise_XX
+    // pattern, the ChaChaPoly transport and the X25519 DH all come from the
+    // library — we never implement key agreement ourselves.
+    implementation("org.signal.forks:noise-java:0.1.1")
+
     // Storage: Room runtime + SQLCipher are declared now so the version set is
     // stable, but entities/DAOs (and the KSP plugin they need) land in Phase D.
     implementation("androidx.room:room-runtime:2.6.1")

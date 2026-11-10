@@ -41,6 +41,14 @@
 -keep class org.bouncycastle.asn1.** { *; }
 -dontwarn org.bouncycastle.**
 
+# --- noise-java (Noise_XX_25519_ChaChaPoly_SHA256) --------------------------
+# The Noise library picks its DH / cipher / hash implementations by name
+# inside `Noise.createDH()` / `createCipher()` / `createHash()`, and the
+# handshake pattern table is looked up by the protocol name. Keep the whole
+# (small) package so a minified build cannot break the handshake.
+-keep class com.southernstorm.noise.** { *; }
+-dontwarn com.southernstorm.noise.**
+
 # --- ZXing (QR generation + decode) ----------------------------------------
 -keep class com.google.zxing.** { *; }
 -dontwarn com.google.zxing.**

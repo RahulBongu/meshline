@@ -37,7 +37,7 @@ working crypto.
 | **B** | `MeshRouter` + in-memory mesh simulator (loss/latency/duplicate, 30-node flood test) + Noise design gate | ✅ **Done** (signing input TTL-invariant; dedupe stores highest TTL; signature-first ordering; per-connection rate limits; 20-seed storm measurements) |
 | **C** | Real BLE transport (dual-role GATT, announce, public chat 2+ phones) + frozen UUIDs | ✅ **Done** (`transport/BleTransport.kt`, `BleUuids.kt`, `service/BleMeshService.kt`) — needs physical phones to validate (see below) |
 | **D1** | Identity, profile, QR, contacts (Keystore-backed identity) | ✅ **Done** (Keystore identity + BC primitives, QR strict parser + fuzz, protected tier, contacts DB, My QR / Scan / Contacts screens, ANNOUNCE avatar+signature+interval, router verifier; BLE untouched) |
-| **D2** | Noise + private chat + encrypted storage + panic wipe | Draft (see `NOISE_DESIGN.md`) |
+| **D2** | Noise + private chat + encrypted storage + panic wipe | 🟡 **Protocol + storage layer done** (branch `d2-noise`): Noise state machine (official spec vectors as a gate), explicit transport nonce + 128-nonce replay window, session store in SQLCipher, handshake rate limits + quarantine. **Not wired into BLE or the UI** until the D1 phone test passes. |
 | **E** | Group chat (see `GROUPS_DESIGN.md`) | Draft (design only) |
 | **F** | Foreground-service polish, permission flow, power modes, UI polish, merged-manifest audit | *(was Phase E; renumbered when groups moved in)* |
 
@@ -108,6 +108,10 @@ Expected (D1): `PacketCodecTest` 21, `MeshRouterTest` 12, `MeshSimulatorTest` 2,
 `HoldingBufferTest` 4, `SampleQrGeneratorTest` 1 — **73 tests, 0 failures**. No
 INTERNET permission on the **merged manifest** or in
 `aapt dump permissions app-universal-debug.apk`.
+
+On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
+`ReplayWindowTest` 6, `HandshakeRateLimiterTest` 7, `SessionCodecTest` 4 —
+**99 tests, 0 failures** in total.
 
 > **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
 > typically uninstalls the app (and its data) after the run, and the
@@ -301,18 +305,56 @@ Measured with `:app:assembleRelease` (minified, resource-shrunk, unsigned) on
 
 | Artifact | Bytes | MiB | Budget |
 |---|---:|---:|---|
-| `app-arm64-v8a-release-unsigned.apk` | 5,610,196 | 5.35 | < 25 MB |
-| `app-armeabi-v7a-release-unsigned.apk` | 5,248,290 | 5.01 | < 25 MB |
-| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,621,324 | 5.36 | < 25 MB |
-| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,259,418 | 5.01 | < 25 MB |
+| `app-arm64-v8a-release-unsigned.apk` | 5,673,688 | 5.41 | < 25 MB |
+| `app-armeabi-v7a-release-unsigned.apk` | 5,311,786 | 5.07 | < 25 MB |
+| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,681,764 | 5.42 | < 25 MB |
+| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,319,858 | 5.07 | < 25 MB |
 
 Each release/releaseSmoke APK contains exactly one ABI and
 `lib/.../libsqlcipher.so`, and none of them declares
 `android.permission.INTERNET`. The `releaseSmoke` APKs are signed with the
 local **debug** certificate (`CN=Android Debug`) — they are for the on-phone
 smoke test only, never for distribution. The universal debug APK is
-21,245,086 bytes (20.27 MiB) because it carries all four ABIs for
-emulator/UI testing; it is not a release artifact.
+24,273,208 bytes (23.15 MiB) because it carries all four ABIs for
+emulator/UI testing; it is not a release artifact. (The `d2-noise` branch
+adds ~63 KB of `noise-java` on top of the D1 sizes.)
+
+## D2 integration status (protocol + storage only, branch `d2-noise`)
+
+The D2 layer is **coded and tested, but not wired in**: nothing in
+`BleTransport`, `BleMeshService` or the UI calls it yet, so the shipping app
+behaves exactly like `d1-identity` until the D1 phone test passes.
+
+What exists (all pure JVM, all simulator-tested):
+- **Noise state machine** (`noise/NoiseHandshake.kt`) — `Noise_XX_25519_ChaChaPoly_SHA256`
+  over the pinned `org.signal.forks:noise-java:0.1.1`. The **official Noise
+  test vectors** for that pattern are a test gate (`NoiseVectorsTest`): the
+  handshake messages, the transcript hash and the transport ciphertexts must
+  be byte-exact.
+- **Transport nonce + replay window** (`noise/TransportCipher.kt`,
+  `noise/ReplayWindow.kt`) — the nonce is explicit on the wire, and a
+  128-nonce sliding window per direction refuses replays and nonces that are
+  too far ahead.
+- **Session store** (`storage/NoiseSessionStore.kt`) — the `noise_sessions`
+  table in the SQLCipher database (DB version 2, non-destructive migration),
+  plus a versioned snapshot codec.
+- **Handshake rate limits and quarantine** (`noise/HandshakeRateLimiter.kt`) —
+  per *connection* (never per claimed `senderId`): 5 handshake packets / 10 s,
+  20 starts / hour, 60 s cooldown after a success, 30 packets / 10 s per node,
+  3 invalid strikes in 5 min → 10 min quarantine.
+- **Secure-channel engine** (`noise/SessionManager.kt`) — the per-peer session
+  state machine, the identity binding check (Ed25519 trailer ↔ `senderId`) and
+  the impersonation defence (the X25519 key the handshake reveals must match
+  the announced one), the concurrent-handshake tie-break (lower `senderId`
+  wins) and the silent re-handshake on session loss.
+
+Wire format: `PROTOCOL.md` §6.3 and §6.5. Design and its amendments:
+`NOISE_DESIGN.md`.
+
+**Known limitation:** `noise-java` 0.1.1 cannot export the Noise transport
+keys, so a session cannot be resumed byte-for-byte after a restart — a
+restored session **re-handshakes silently** instead (see `NOISE_DESIGN.md`
+amendment A2). Everything else in the store works as designed.
 
 ## Open issues after D1
 

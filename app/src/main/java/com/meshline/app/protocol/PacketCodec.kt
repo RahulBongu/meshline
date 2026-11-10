@@ -95,6 +95,35 @@ object PacketCodec {
     }
 
     /**
+     * Associated data for the D2 transport AEAD (NOISE_DESIGN §4.1).
+     *
+     * The AD is the 32-byte header with **two** fields neutralised:
+     *  - the **TTL** byte is zeroed, because relays decrement it and the
+     *    ciphertext must survive any number of hops;
+     *  - the **payload length** is zeroed, because the payload *is* the
+     *    ciphertext — it cannot be part of its own associated data. The
+     *    length is authenticated implicitly: a truncated ciphertext fails the
+     *    Poly1305 tag check.
+     *
+     * Everything else (version, type, flags, timestamp, sender, recipient) is
+     * bound, so a ciphertext cannot be replayed under a different sender, a
+     * different recipient or a different timestamp.
+     */
+    fun headerAd(packet: MeshPacket): ByteArray {
+        val buf = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN)
+        buf.put(packet.version.toByte())
+        buf.put(packet.type.code)
+        buf.put(0)                    // TTL: relays decrement it
+        buf.put(buildFlags(packet))
+        buf.putLong(packet.timestampMs)
+        buf.putShort(0)               // reserved
+        buf.putShort(0)               // payload length: not bound
+        buf.put(packet.senderId)
+        buf.put(packet.recipientId)
+        return buf.array()
+    }
+
+    /**
      * Canonical signing input (PROTOCOL.md §3.1): the full wire encoding with the
      * TTL byte (offset 2) set to `0x00` and the trailing 64-byte signature stripped.
      *

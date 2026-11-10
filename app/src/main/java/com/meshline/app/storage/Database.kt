@@ -24,6 +24,7 @@ object DatabaseFactory {
         val factory = SupportOpenHelperFactory(passphrase)
         return Room.databaseBuilder(context, MeshlineDatabase::class.java, "meshline.db")
             .openHelperFactory(factory)
+            .addMigrations(MeshlineDatabase.MIGRATION_1_2)
             .fallbackToDestructiveMigration()
             .build()
     }
