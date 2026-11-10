@@ -290,6 +290,24 @@ class KeyKnowledgeTest {
         else -> 120
     }
 
+    /** Waits until the virtual network stops transmitting (one flood has settled). */
+    private suspend fun awaitQuiescence(network: VirtualNetwork, quietMs: Long = 300L, timeoutMs: Long = 10_000L): Int {
+        val startNs = System.nanoTime()
+        var lastTx = network.stats.transmissions
+        var lastChangeNs = startNs
+        while (true) {
+            delay(25)
+            val nowNs = System.nanoTime()
+            val tx = network.stats.transmissions
+            if (tx != lastTx) {
+                lastTx = tx
+                lastChangeNs = nowNs
+            }
+            if (nowNs - lastChangeNs >= quietMs * 1_000_000L) return tx
+            if (nowNs - startNs >= timeoutMs * 1_000_000L) return tx
+        }
+    }
+
     @org.junit.Test
     fun `tampered announce with valid hash but modified payload is rejected`() = runBlocking {
         val cache = KeyCache(nowProvider = { now })
@@ -319,7 +337,7 @@ class KeyKnowledgeTest {
         val nodes = buildNodes(adjacency, this, SimulatorConfig(seed = 1L), startKnowingNeighbours = true)
         try {
             for (i in 0 until n) nodes[i].router.onLocalSend(announcePacket(i))
-            delay(300)
+            awaitQuiescence(nodes[0].network)
             nodes[0].router.onLocalSend(publicPacket(0, ts = now + 1_000))
             withTimeoutOrNull(5_000) {
                 while (nodes.count { it.delivered.any { p -> p.type == PacketType.PUBLIC_MESSAGE } } < 29) delay(20)
@@ -342,8 +360,10 @@ class KeyKnowledgeTest {
             val nodes = buildNodes(adjacency, this, SimulatorConfig(seed = seed), startKnowingNeighbours = true)
             try {
                 for (i in 0 until 30) nodes[i].router.onLocalSend(announcePacket(i))
-                kotlinx.coroutines.delay(500)
-                val announceTx = nodes[0].network.stats.transmissions
+                // Settled wave: the announce-overhead figure must measure a
+                // *complete* round, not the part that happened to finish in
+                // the first few hundred milliseconds.
+                val announceTx = awaitQuiescence(nodes[0].network)
                 nodes[0].router.onLocalSend(publicPacket(0, ts = now + 1_000))
                 kotlinx.coroutines.withTimeoutOrNull(5_000) {
                     while (nodes.count { it.delivered.any { p -> p.type == PacketType.PUBLIC_MESSAGE } } < 29) delay(20)
@@ -373,8 +393,11 @@ class KeyKnowledgeTest {
             val nodes = buildNodes(adjacency, this, SimulatorConfig(seed = seed), startKnowingNeighbours = true)
             try {
                 for (i in 0 until 30) nodes[i].router.onLocalSend(announcePacket(i))
-                kotlinx.coroutines.delay(500)
-                val announceTx = nodes[0].network.stats.transmissions
+                // Wait for the ANNOUNCE flood to *settle* (quiescence), not a fixed
+                // sleep: a truncated wave leaves part of the mesh without the
+                // origin's key, and the data packet is then dropped as
+                // unknown-sender instead of proving the key-knowledge path.
+                val announceTx = awaitQuiescence(nodes[0].network)
                 val origin = (0 until 30).maxBy { adjacency.getValue(it).size }
                 nodes[origin].router.onLocalSend(publicPacket(origin, ts = now + 1_000))
                 kotlinx.coroutines.withTimeoutOrNull(5_000) {
@@ -408,7 +431,10 @@ class KeyKnowledgeTest {
         val nodes = buildNodes(adjacency, this, SimulatorConfig(seed = 42L), startKnowingNeighbours = true)
         try {
             for (i in 0 until 20) nodes[i].router.onLocalSend(announcePacket(i))
-            kotlinx.coroutines.delay(500)
+            // Settle the ANNOUNCE flood (see the R6 probe): members learn each
+            // other's keys from the flood, so a truncated wave would hide a real
+            // key-knowledge defect behind an unknown-sender drop.
+            awaitQuiescence(nodes[0].network)
             nodes[0].router.onLocalSend(publicPacket(0, ts = now + 1_000))
             kotlinx.coroutines.withTimeoutOrNull(5_000) {
                 while (nodes.take(10).count { it.delivered.any { p -> p.type == PacketType.PUBLIC_MESSAGE } } < 9) delay(20)

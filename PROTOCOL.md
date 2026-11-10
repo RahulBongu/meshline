@@ -602,25 +602,37 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
   full ANNOUNCE round (all 30 nodes flood once) **7,121** linkTx.
   → ~**14,242/min** at 30 s cadence, ~**7,121/min** at 60 s, ~3,560/min at 120 s.
 - **Random degree ~6:** delivery **0.991**, data flood **952** linkTx mean,
-  one ANNOUNCE round **2,276** linkTx.
-  → ~**4,550/min** at 30 s, **2,276/min** at 60 s.
+  one ANNOUNCE round **3,125** linkTx.
+  → ~**6,250/min** at 30 s, **3,125/min** at 60 s.
 - **20-node group flood (10 members / 10 non-member relays):** members
   **9/9 delivered**, non-members relayed normally (130 relay forwards total),
   per-node relay bound holds.
 
+**Measurement method:** an ANNOUNCE round is measured **to quiescence** — the
+test waits until the virtual network stops transmitting (300 ms quiet, 10 s
+cap) instead of sleeping a fixed 500 ms. A fixed sleep truncates the wave:
+at 500 ms only ~70% of the round has been transmitted and 10–27 of 30 nodes
+have the sender's key, so the data packet is dropped as *unknown-sender*
+rather than proving the key-knowledge path. Measuring a settled wave is what
+makes the delivery numbers above reproducible; the earlier 2,276-linkTx /
+0.969-coverage figures were measured on a truncated wave (see §8.3).
+
 **Chosen cadence: every ~60 s ± 10 s jitter** (on connect + periodic, adaptive
 ± hysteresis per rule 8), peer timeout **180 s** (3 missed cadences). Compared
-with 30 s this halves the announce overhead (≈7k linkTx/min FC, ≈2.3k/min
+with 30 s this halves the announce overhead (≈7k linkTx/min FC, ≈3.1k/min
 degree-6 at 30 nodes) while keeping the 420 s cache warm across **three
 slowest** cadences. Interval values are sent as `intervalUnits` (§6.1) and
 are accepted only as **{3, 6, 12}**. A 120 s cadence would halve overhead
 again but leaves only 2–3 refreshes per cache lifetime and risks timeout on
 lossy links, so 60 s (adaptive) is the current balance. The interval is
 behaviour-only (no wire change beyond the one byte).
-**Why degree-6 bytes/s *fell* (590 → 422 B/s) even though ANNOUNCE grew:**
-the announce round's linkTx fell 27% (3,125 → 2,276) because the signed
-ANNOUNCE + per-connection new-identity budget suppressed redundant relay
-copies, outweighing the +1 payload byte.
+**Correction (D1):** the previously recorded "degree-6 bytes/s *fell*
+(590 → 422 B/s)" and the "announce round's linkTx fell 27% (3,125 → 2,276)"
+were a **measurement artifact**, not a saving: the 2,276 figure was taken
+500 ms after the wave started, so it counted only part of the round. A settled
+round is **3,125 linkTx**, i.e. the original figure. The signed ANNOUNCE +
+per-connection new-identity budget do suppress redundant relay copies, but
+they do not change the round's size this much.
 **Amendment (starting values, phone-validated later): adaptive interval that
 grows with known-node count** — ≤10 known → 30 s, 11–30 → 60 s, >30 → 120 s
 (see §8.4). §8.2 numbers are the degree-6 decision case; the top line is the
@@ -639,36 +651,48 @@ flood. The simulator models this: a late joiner starts empty, receives N
 replays, then a non-neighbour flood verifies on first arrival (see
 `KeyKnowledgeTest` late-joiner probe: time-to-first-verified-delivery).
 
-**Known transient (degree-6, first round):** early `KeyKnowledgeTest` measured
-**0.969 key coverage after one announce wave** (843/870 ordered pairs). This is
-*not* a correctness bug: adaptive relay suppression legitimately drops ~3% of
-one-wave announces. After three waves (the real 60 s cadence) coverage was
-**1.000** in every toggle config — the overhead drop is fewer redundant copies,
-not lost keys. The 0.969 number is recorded here so future re-measures do not
-mistake it for a regression.
+**Known transient (degree-6, first round):** an early `KeyKnowledgeTest`
+measured **0.969 key coverage after one announce wave** (843/870 ordered
+pairs). This is *not* a correctness bug: adaptive relay suppression
+legitimately drops ~3% of one-wave announces. After three waves (the real
+60 s cadence) coverage was **1.000** in every toggle config — the overhead
+drop is fewer redundant copies, not lost keys. The 0.969 number is recorded
+here so future re-measures do not mistake it for a regression.
+**Correction (D1):** the 0.969 figure was measured on a wave that was still
+in flight (the test slept a fixed 500 ms, then counted). Measured **to
+quiescence**, one wave reaches **870/870 pairs (1.000)** and the origin's key
+is known by **30/30** nodes in 17 of 20 seeds (29/30 in 3 seeds), so delivery
+is **0.991** (§8.2). The residual gap is not missing keys but adaptive
+suppression on the *data* flood: a node that learned the key can still miss
+the packet itself (27–29 of 29 delivered in the worst seeds).
 
 #### 8.4 Announce overhead in bytes/s/node (degree-6 decision case)
 
 One ANNOUNCE on the wire is **~170 bytes** (32 header + ~70 payload + 64
 signature, avatar included). One full round (30 announces, degree ~6) is
-**2,276 link transmissions** (measured) ≈ 387 KB moved per round
-(`2,276 × 170 B`). Per node (TX + RX = 2 × moved ÷ 30 nodes):
+**3,125 link transmissions** (measured, wave measured to quiescence) ≈ 528 KB
+moved per round (`3,125 × 169 B`). Per node (TX + RX = 2 × moved ÷ 30 nodes):
 
 | cadence | per node per min | per node per sec |
 |---------|------------------|-------------------|
-| 30 s | ~52 KB | **~845 B/s** |
-| 60 s | ~26 KB | **~420 B/s** |
-| 120 s | ~13 KB | **~210 B/s** |
+| 30 s | ~69 KB | **~1,175 B/s** |
+| 60 s | ~34 KB | **~590 B/s** |
+| 120 s | ~17 KB | **~295 B/s** |
 
-At BLE LE-1M rates (~0.7 Mb/s usable) 420 B/s is a **~0.5% radio duty-cycle
+At BLE LE-1M rates (~0.7 Mb/s usable) 590 B/s is a **~0.7% radio duty-cycle
 unvalidated estimate** — duty cycle is not battery drain. It says nothing
 about the PRD battery target (**≤4 %/hour screen-on**) without radio power,
 CPU wake and display measurements. In a fully-connected room the rate is
-~3.1× higher (≈1,320 B/s at 60 s). ANNOUNCE overhead *may* not be the
+~2.3× higher (≈1,340 B/s at 60 s). ANNOUNCE overhead *may* not be the
 battery bottleneck; adaptive spacing is therefore chosen for *storm
 hygiene*, not battery rescue, until measured.
 The adaptive schedule (switch up at 33 known, down at 27; bands 30/60/120 s)
 roughly equalises per-node bytes/s as the mesh grows.
+**Correction (D1):** these figures were previously ~37% lower (2,276 linkTx,
+~420 B/s at 60 s) because the round was measured 500 ms after it started; see
+§8.2. The battery band (**≤4 %/hour**) is unaffected in direction but the
+60 s cadence now costs ~590 B/s per node, so the **30 s band (≈1,175 B/s) is
+the one to keep off** until a phone measures real drain.
 
 ## 9. BLE transport expectations (Phase C — normative for the codec)
 

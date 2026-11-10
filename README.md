@@ -76,22 +76,59 @@ $env:JAVA_HOME = "$env:USERPROFILE\.gradle\jdks\jdk-17" # JDK 17 (your local pat
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 cd meshline
 .\gradlew.bat :app:testDebugUnitTest          # test suite (see below for counts)
-.\gradlew.bat :app:assembleDebug              # app-debug.apk (universal, all ABIs)
+.\gradlew.bat :app:assembleDebug              # app-universal-debug.apk (universal, all ABIs)
 .\gradlew.bat :app:assembleRelease            # per-ABI release APKs (minified, unsigned)
+.\gradlew.bat :app:assembleReleaseSmoke       # release-shaped, signed with the DEBUG keystore
 .\gradlew.bat :app:lintDebug                  # clean
 ```
 
-Debug output is `app/build/outputs/apk/debug/app-debug.apk`. Release output is
-`app/build/outputs/apk/release/app-arm64-v8a-release-unsigned.apk` and
-`app-armeabi-v7a-release-unsigned.apk` (ABI splits, no universal APK). ABI
-splitting is enabled only when a Release task is requested, so the debug APK
-still installs on an x86_64 emulator for UI/DB tests.
+Debug output is `app/build/outputs/apk/debug/app-universal-debug.apk` (one
+universal APK with all four ABIs, so it also installs on an x86_64 emulator).
+Release output is `app/build/outputs/apk/release/app-arm64-v8a-release-unsigned.apk`
+and `app-armeabi-v7a-release-unsigned.apk` (ABI splits, no universal APK).
+`releaseSmoke` is minified/shrunk exactly like release but signed with the local
+debug keystore for on-phone smoke testing:
+`app/build/outputs/apk/releaseSmoke/app-arm64-v8a-releaseSmoke.apk` (and the
+`armeabi-v7a` variant). **Never distribute a `releaseSmoke` APK**; the real
+`release` artifact stays unsigned until you supply a real key.
+
+Which outputs are produced is decided **per build type**, not per command line,
+so `.\gradlew.bat :app:assembleDebug :app:assembleReleaseSmoke` in one
+invocation still gives you the universal debug APK:
+
+| Build type | Outputs | Purpose |
+|---|---|---|
+| `debug` | 1 universal APK (arm64-v8a, armeabi-v7a, x86_64, x86) | emulator UI/DB tests, daily dev |
+| `release` | `arm64-v8a` + `armeabi-v7a` splits, unsigned | real distribution (needs your key) |
+| `releaseSmoke` | `arm64-v8a` + `armeabi-v7a` splits, debug-key-signed | release smoke test on a phone |
 
 Expected (D1): `PacketCodecTest` 21, `MeshRouterTest` 12, `MeshSimulatorTest` 2,
 `KeyKnowledgeTest` 12, `KeyCacheTest` 6, `AnnounceVerifierTest` 5,
-`IdentityTest` 1, `QrPayloadTest` 4, `BleTransportTest` 5 — **68 tests, 0
-failures**. No INTERNET permission on the **merged manifest** or in
-`aapt dump permissions app-debug.apk`.
+`IdentityTest` 1, `QrPayloadTest` 4, `BleTransportTest` 5,
+`SampleQrGeneratorTest` 1 — **69 tests, 0 failures**. No INTERNET permission on
+the **merged manifest** or in `aapt dump permissions app-universal-debug.apk`.
+
+> **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
+> typically uninstalls the app (and its data) after the run, and the
+> Keystore/DB wipe tests (`IdentityStoreInstrumentedTest`,
+> `DbPassphraseInstrumentedTest`, `DatabaseInstrumentedTest`) deliberately
+> destroy the app's identity and contacts. Run instrumented tests **before** any
+> manual phone testing, then reinstall the APK and start with a fresh
+> identity/contacts. They require a connected device:
+> `.\gradlew.bat :app:connectedDebugAndroidTest`.
+
+### Dev-only sample QR (test one phone against a laptop screen)
+
+The JVM test source set contains a generator that writes a scannable QR for a
+throwaway identity:
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest --tests "*SampleQrGeneratorTest*"
+# app/build/reports/sample-contact-qr.png
+```
+
+It is never packaged into any APK (debug/release/releaseSmoke). Scan the PNG from
+the laptop screen with one phone; the contact is intentionally never online.
 
 ## Protocol in one page (full spec: [`PROTOCOL.md`](PROTOCOL.md))
 
@@ -126,7 +163,7 @@ in order with a 30 s timeout, then decoded once (signature verified there).
 
 **You need:** 2 physical phones (any brands; ideally different vendors), both
 Android 8.0+, both with Bluetooth LE and location services on. Install the same
-`app-debug.apk` on both. Keep both on the same desk first (within 1 m).
+`app-universal-debug.apk` on both. Keep both on the same desk first (within 1 m).
 
 1. **Permissions.** On each phone: Settings → Apps → Meshline → Permissions.
    Grant Nearby devices / Bluetooth (and Location on Android ≤ 11). Deny
@@ -230,12 +267,15 @@ The D1 phone checklist above is the gate. **D2 does not start until it passes.**
 
 ### Release smoke-test checklist (run on the release APK)
 
-1. Install the APK for the phone's ABI (`arm64-v8a` for modern phones,
-   `armeabi-v7a` for 32-bit-only devices). Release is minified + resource-shrunk.
+1. Install `app-arm64-v8a-releaseSmoke.apk` (or the `armeabi-v7a` variant). It
+   is minified/shrunk like release but signed with the local debug keystore, so
+   no manual signing is needed. **Never distribute this APK.**
 2. Launch: the contacts DB opens (no crash); Home shows `fruit nickname - 4hex`.
    Confirm the merged manifest has **no INTERNET** permission.
 3. **My QR** renders; on phone B tap **Scan** → camera permission prompt appears
-   only now → scan → confirmation → verified contact appears.
+   only now → scan → confirmation → verified contact appears. With only one
+   phone, scan the sample PNG on your laptop screen instead — see
+   “Dev-only sample QR” above.
 4. Force-stop and relaunch: same fingerprint, contact still listed.
 5. Send a public message between the two phones; both show it (release strips
    `Log.d`, so use the debug build if you want the `BleMeshService up` line).
@@ -251,9 +291,14 @@ Measured with `:app:assembleRelease` (minified, resource-shrunk, unsigned) on
 |---|---:|---:|---|
 | `app-arm64-v8a-release-unsigned.apk` | 5,610,196 | 5.35 | < 25 MB |
 | `app-armeabi-v7a-release-unsigned.apk` | 5,248,290 | 5.01 | < 25 MB |
+| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,618,420 | 5.36 | < 25 MB |
+| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,256,514 | 5.01 | < 25 MB |
 
-Each release APK contains exactly one ABI and `lib/.../libsqlcipher.so`, and
-neither declares `android.permission.INTERNET`. The universal debug APK is
+Each release/releaseSmoke APK contains exactly one ABI and
+`lib/.../libsqlcipher.so`, and none of them declares
+`android.permission.INTERNET`. The `releaseSmoke` APKs are signed with the
+local **debug** certificate (`CN=Android Debug`) — they are for the on-phone
+smoke test only, never for distribution. The universal debug APK is
 21,191,558 bytes (20.21 MiB) because it carries all four ABIs for
 emulator/UI testing; it is not a release artifact.
 

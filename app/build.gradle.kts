@@ -1,16 +1,11 @@
+import com.android.build.api.variant.FilterConfiguration
+import com.android.build.api.variant.VariantOutputConfiguration
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
-}
-
-// Release ships only the two ABIs the test phones use, as split APKs (no
-// universal APK) so each artifact stays well under the 25 MB budget.
-// Debug stays one universal APK so it can also run on an x86_64 emulator
-// for UI/DB tests (BLE itself still needs physical phones).
-val releaseBuildRequested = gradle.startParameter.taskNames.any {
-    it.contains("Release", ignoreCase = true) || it.contains("bundle", ignoreCase = true)
 }
 
 android {
@@ -35,6 +30,15 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+        // Release-shaped (minified + shrunk) but signed with the local DEBUG
+        // keystore so the release smoke test can be installed without manual
+        // signing. NEVER use a real release key here.
+        create("releaseSmoke") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            isDebuggable = false
+        }
         debug {
             isMinifyEnabled = false
         }
@@ -49,12 +53,17 @@ android {
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
 
+    // ABI splits are configured once, then selected per variant below:
+    //  - release / releaseSmoke: only arm64-v8a + armeabi-v7a, NO universal
+    //    APK, so each artifact stays well under the 25 MB budget.
+    //  - debug: one universal APK with every ABI, so it also installs on an
+    //    x86_64 emulator for UI/DB tests (BLE itself still needs real phones).
     splits {
         abi {
-            isEnable = releaseBuildRequested
+            isEnable = true
             reset()
-            include("arm64-v8a", "armeabi-v7a")
-            isUniversalApk = false
+            include("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            isUniversalApk = true
         }
     }
 
@@ -67,6 +76,33 @@ android {
 configurations.configureEach {
     resolutionStrategy {
         force("org.jetbrains:annotations:23.0.0")
+    }
+}
+
+/**
+ * Per-variant ABI output selection (see the `splits` block above).
+ * This keeps the outcome independent of which tasks were requested on the
+ * command line: asking for `assembleDebug` and `assembleReleaseSmoke` in the
+ * same invocation must not strip the emulator-friendly universal debug APK.
+ */
+androidComponents {
+    onVariants { variant ->
+        val isDebugBuild = variant.buildType == "debug"
+        variant.outputs.forEach { output ->
+            val abis = output.filters
+                .filter { it.filterType == FilterConfiguration.FilterType.ABI }
+                .map { it.identifier }
+            when {
+                // Debug: keep only the universal APK.
+                isDebugBuild && output.outputType == VariantOutputConfiguration.OutputType.ONE_OF_MANY ->
+                    output.enabled.set(false)
+                // Release-shaped: no universal APK, no emulator ABIs.
+                !isDebugBuild && output.outputType == VariantOutputConfiguration.OutputType.UNIVERSAL ->
+                    output.enabled.set(false)
+                !isDebugBuild && abis.any { it == "x86_64" || it == "x86" } ->
+                    output.enabled.set(false)
+            }
+        }
     }
 }
 

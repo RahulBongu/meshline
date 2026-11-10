@@ -4,7 +4,7 @@
 
     <!--
       Meshline NEVER declares INTERNET. The no-network promise is verifiable:
-      `aapt dump permissions app-debug.apk` must never list
+      `aapt dump permissions app-universal-debug.apk` must never list
       android.permission.INTERNET. We must also audit the *merged* manifest
       (app/build/intermediates/merged_manifests) because a dependency could
       sneak it in. None of the current dependencies (Compose, Room, BC,
