@@ -131,8 +131,13 @@ class KeyKnowledgeTest {
          *  [isReplay] uses the separate cold-start allowance (49), otherwise the normal 20/5-min budget. */
         @Synchronized
         fun learn(senderId: ByteArray, key: ByteArray, nowMs: Long = nowProvider(), connectionKey: String = currentConnection, isReplay: Boolean = false): Boolean {
-            // Already known in either tier: still refresh if present (no budget cost).
-            if (protected_.containsKey(hex(senderId)) || untrusted.containsKey(hex(senderId))) return true
+            // Already known: refresh recency + expiry (no budget cost).
+            val h = hex(senderId)
+            if (protected_.containsKey(h)) return true
+            untrusted.remove(h)?.let {
+                untrusted[h] = it.first to nowMs
+                return true
+            }
             val hits = if (isReplay) replayHits.getOrPut(connectionKey) { mutableListOf() }
             else budgetHits.getOrPut(connectionKey) { mutableListOf() }
             hits.removeAll { nowMs - it.second > budgetWindowMs }
@@ -243,7 +248,7 @@ class KeyKnowledgeTest {
                 globalCapOn = mech.globalCap,
             )
             val base = RouterConfig(jitterMinMs = 0, jitterMaxMs = 0, nowProvider = { now }, seed = simCfg.seed + i * 7919L)
-            val r = MeshRouter(nid, t, base, neighboursProvider = { network.neighboursOf(nid) }, signatureVerifier = { pkt -> if (verifier(cache, mech)(pkt)) SignatureCheck.OK else SignatureCheck.INVALID })
+            val r = MeshRouter(nid, t, base, neighboursProvider = { network.neighboursOf(nid) }, signatureVerifier = { pkt, _ -> if (verifier(cache, mech)(pkt)) SignatureCheck.OK else SignatureCheck.BAD_SIGNATURE })
             if (startKnowingNeighbours) {
                 for (n in adjacency.getValue(i)) cache.protect(sid(n), edPk(n), nowMs = now)
                 cache.protect(nid, edPk(i), nowMs = now)

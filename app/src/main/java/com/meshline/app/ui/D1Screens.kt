@@ -11,10 +11,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +32,7 @@ import com.meshline.app.protocol.AvatarTable
 import com.meshline.app.profile.Profile
 import com.meshline.app.profile.ProfileStore
 import com.meshline.app.security.QrPayload
+import com.meshline.app.security.SecureStorageStatus
 import com.meshline.app.storage.ContactEntity
 
 fun qrBitmap(text: String, size: Int = 512): Bitmap {
@@ -99,4 +102,30 @@ fun SettingsProfileScreen(store: ProfileStore, initial: Profile, onSaved: () -> 
             Button(onClick = { store.save(Profile(nick, avatar.toByte())); onSaved() }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
     }
+}
+
+/**
+ * Shown once when Keystore/DB unlock failed and the app regenerated its
+ * identity + emptied contacts. Peers will see a new key (D2 key-change warning).
+ */
+@Composable
+fun SecureStorageResetDialog(event: SecureStorageStatus.Event, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Secure storage was reset") },
+        text = {
+            Text(
+                if (event.reason == SecureStorageStatus.Reason.KEYSTORE_INVALIDATED) {
+                    "Meshline could not unlock its identity (the Android Keystore key was " +
+                        "invalidated, usually after an OS update). A new identity was created " +
+                        "and contacts are empty. Peers will see a new key and a key-change warning."
+                } else {
+                    "The encrypted contacts database could not be decrypted and was reset. " +
+                        "Contacts are empty. Your identity is unchanged; if it was also reset, " +
+                        "peers will see a new key and a key-change warning."
+                }
+            )
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } },
+    )
 }

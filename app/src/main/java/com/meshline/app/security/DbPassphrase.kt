@@ -49,9 +49,14 @@ object DbPassphrase {
             // The Keystore key was invalidated (OEM OS upgrade) or the blob is
             // corrupt. The DB is unreadable either way, so discard it and start
             // clean rather than crash or silently keep an undecryptable file.
+            SecureStorageStatus.record(context, SecureStorageStatus.Reason.DB_UNREADABLE)
             deleteDatabaseFiles(context)
         }
 
+        // No usable wrapped passphrase remains. Discard any stale wrap-key
+        // entry first, otherwise keystoreKey(true) could hand back an
+        // unusable/invalidated key and encryption would crash.
+        deleteWrapKey()
         val passphrase = ByteArray(KEY_BYTES).also { SecureRandom().nextBytes(it) }
         val key = keystoreKey(createIfMissing = true)!!
         val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -68,10 +73,14 @@ object DbPassphrase {
     @Synchronized
     fun wipe(context: Context) {
         prefs(context).edit().clear().apply()
+        deleteWrapKey()
+        deleteDatabaseFiles(context)
+    }
+
+    private fun deleteWrapKey() {
         runCatching {
             KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }.deleteEntry(ALIAS)
         }
-        deleteDatabaseFiles(context)
     }
 
     private fun deleteDatabaseFiles(context: Context) {

@@ -34,6 +34,9 @@ interface ContactsDao {
     @Query("SELECT * FROM contacts ORDER BY lastSeenMs DESC")
     fun observeAll(): Flow<List<ContactEntity>>
 
+    @Query("SELECT * FROM contacts ORDER BY lastSeenMs DESC")
+    suspend fun allOnce(): List<ContactEntity>
+
     @Query("SELECT * FROM contacts WHERE senderIdHex = :hex")
     suspend fun find(hex: String): ContactEntity?
 

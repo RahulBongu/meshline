@@ -5,49 +5,68 @@ import com.meshline.app.protocol.MessageIds
 import com.meshline.app.protocol.PacketCodec
 import com.meshline.app.protocol.PacketType
 import com.meshline.app.protocol.Payloads
-import java.security.KeyFactory
-import java.security.Signature
-import java.security.spec.X509EncodedKeySpec
+import com.meshline.app.router.SignatureCheck
 
 /**
- * Production ANNOUNCE verifier (D1, PROTOCOL §8.1).
- * Before caching/relaying/showing: hash check + intervalUnits in {3,6,12} +
- * per-connection/global budgets (inside KeyCache) + valid Ed25519 signature
- * against the announced edPk. Rejected announces are never cached.
+ * Production signature verifier (D1, PROTOCOL §8.1).
+ *
+ * ANNOUNCE: strict payload decode → `SHA256(edPk)[0..8) == senderId` → Ed25519
+ * signature → KeyCache learning. A learn rejection is reported as
+ * [SignatureCheck.BUDGET] (valid packet, per-connection/global budget exhausted),
+ * never as a bad signature.
+ *
+ * Other signed types: the sender's key must already be in the cache. Missing
+ * key is [SignatureCheck.UNKNOWN_SENDER] (post-join transient), a failed
+ * Ed25519 check is [SignatureCheck.BAD_SIGNATURE].
+ *
+ * Rejected announces are never cached or relayed.
  */
 object AnnounceVerifier {
 
-    fun verify(pkt: MeshPacket, cache: KeyCache, connectionKey: String): Boolean {
-        if (pkt.type != PacketType.ANNOUNCE) return cache.knows(pkt.senderId, pkt.timestampMs)
-        val payload = pkt.payload
-        // Interval byte is trailing byte in the D1 wire; legacy packets without it are treated as 6.
-        var payloadForDecode = payload
-        var intervalOk = true
-        try {
-            Payloads.decodeAnnounce(payload)
-        } catch (_: Exception) {
-            if (payload.isNotEmpty()) {
-                val interval = payload.last().toInt() and 0xFF
-                payloadForDecode = payload.copyOfRange(0, payload.size - 1)
-                intervalOk = interval in setOf(3, 6, 12)
+    fun verify(pkt: MeshPacket, cache: KeyCache, fromPeer: ByteArray): SignatureCheck {
+        val sig = pkt.signature ?: return SignatureCheck.BAD_SIGNATURE
+
+        if (pkt.type != PacketType.ANNOUNCE) {
+            val key = cache.get(pkt.senderId) ?: return SignatureCheck.UNKNOWN_SENDER
+            return if (verifyEd(key, PacketCodec.signingInput(pkt), sig)) {
+                SignatureCheck.OK
+            } else {
+                SignatureCheck.BAD_SIGNATURE
             }
         }
-        if (!intervalOk) return false
+
         val ann = try {
-            Payloads.decodeAnnounce(payloadForDecode)
-        } catch (_: Exception) { return false }
+            Payloads.decodeAnnounce(pkt.payload)
+        } catch (_: Exception) {
+            return SignatureCheck.BAD_SIGNATURE
+        }
         val hashOk = MessageIds.idFromPublicKey(ann.ed25519PublicKey).contentEquals(pkt.senderId)
-        val sigOk = pkt.signature != null && verifyEd(ann.ed25519PublicKey, PacketCodec.signingInput(pkt), pkt.signature!!)
-        if (!hashOk || !sigOk) return false
-        val learned = cache.learn(pkt.senderId, ann.ed25519PublicKey, nowMs = pkt.timestampMs, connectionKey = connectionKey)
-        return learned
+        if (!hashOk) return SignatureCheck.BAD_SIGNATURE
+        if (!verifyEd(ann.ed25519PublicKey, PacketCodec.signingInput(pkt), sig)) {
+            return SignatureCheck.BAD_SIGNATURE
+        }
+        // Budget clocks must be local receive time, not the sender's timestamp.
+        val learned = cache.learn(
+            senderId = pkt.senderId,
+            key = ann.ed25519PublicKey,
+            connectionKey = hex(fromPeer),
+        )
+        return if (learned) SignatureCheck.OK else SignatureCheck.BUDGET
     }
 
     fun verifyEd(rawPub: ByteArray, input: ByteArray, sig: ByteArray): Boolean {
         return try {
-            val x509 = byteArrayOf(0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00) + rawPub
-            val pub = KeyFactory.getInstance("Ed25519").generatePublic(X509EncodedKeySpec(x509))
-            Signature.getInstance("Ed25519").apply { initVerify(pub); update(input) }.verify(sig)
-        } catch (_: Exception) { false }
+            // BouncyCastle, not JCA: platform Ed25519 only exists on Android 13+,
+            // and minSdk is 26. This matches Identity.signEd25519 exactly.
+            val pub = org.bouncycastle.crypto.params.Ed25519PublicKeyParameters(rawPub, 0)
+            val verifier = org.bouncycastle.crypto.signers.Ed25519Signer()
+            verifier.init(false, pub)
+            verifier.update(input, 0, input.size)
+            verifier.verifySignature(sig)
+        } catch (_: Exception) {
+            false
+        }
     }
+
+    private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
 }

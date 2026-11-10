@@ -52,24 +52,33 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
     private val prefs: SharedPreferences
         get() = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    override fun load(): Identity? = runCatching {
-        val edPub = prefs.getString("ed_pub", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
-            ?: return null
-        val xPub = prefs.getString("x_pub", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
-            ?: return null
-        val edWrapped = prefs.getString("ed_wrapped", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
-            ?: return null
-        val xWrapped = prefs.getString("x_wrapped", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
-            ?: return null
-        val edIv = prefs.getString("ed_iv", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
-            ?: return null
-        val xIv = prefs.getString("x_iv", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
-            ?: return null
-        val key = keystoreKey(createIfMissing = false) ?: return null
-        val edPriv = decrypt(edWrapped, edIv, key)
-        val xPriv = decrypt(xWrapped, xIv, key)
-        Identity(edPub, xPub, edPriv, xPriv)
-    }.getOrNull()
+    override fun load(): Identity? {
+        // No stored identity at all is a normal first launch, not a reset.
+        if (!prefs.contains("ed_wrapped")) return null
+        val identity = runCatching {
+            val edPub = prefs.getString("ed_pub", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+                ?: error("identity incomplete: ed_pub")
+            val xPub = prefs.getString("x_pub", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+                ?: error("identity incomplete: x_pub")
+            val edWrapped = prefs.getString("ed_wrapped", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+                ?: error("identity incomplete: ed_wrapped")
+            val xWrapped = prefs.getString("x_wrapped", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+                ?: error("identity incomplete: x_wrapped")
+            val edIv = prefs.getString("ed_iv", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+                ?: error("identity incomplete: ed_iv")
+            val xIv = prefs.getString("x_iv", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+                ?: error("identity incomplete: x_iv")
+            val key = keystoreKey(createIfMissing = false) ?: error("Keystore wrap key missing")
+            val edPriv = decrypt(edWrapped, edIv, key)
+            val xPriv = decrypt(xWrapped, xIv, key)
+            Identity(edPub, xPub, edPriv, xPriv)
+        }.getOrNull()
+        if (identity == null) {
+            // Fail closed and tell the UI: a new identity will be created.
+            SecureStorageStatus.record(context, SecureStorageStatus.Reason.KEYSTORE_INVALIDATED)
+        }
+        return identity
+    }
 
     override fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray) {
         val key = keystoreKey(createIfMissing = true)!!
@@ -87,6 +96,11 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
 
     override suspend fun wipe() {
         prefs.edit().clear().apply()
+        deleteWrapKey()
+    }
+
+    /** Deletes the wrapping key; old ciphertext can never be decrypted again. */
+    fun deleteWrapKey() {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         runCatching { ks.deleteEntry(ALIAS) }
     }
@@ -130,8 +144,12 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
         private const val GCM_TAG_BITS = 128
 
         fun generateAndStore(context: Context): Identity {
+            val store = AndroidKeystoreIdentityStore(context)
+            // A reset may leave an unusable entry behind (OEM invalidation);
+            // replace it so the new identity is writable and decryptable.
+            store.deleteWrapKey()
             val (identity, edPriv, xPriv) = IdentityFactory.generate()
-            AndroidKeystoreIdentityStore(context).save(identity, edPriv, xPriv)
+            store.save(identity, edPriv, xPriv)
             return identity
         }
     }

@@ -40,8 +40,15 @@ class KeyCache(
         nowMs: Long = nowProvider(),
         connectionKey: String,
         isReplay: Boolean = false,
-    ): Boolean {
-        if (protected_.containsKey(hex(senderId)) || untrusted.containsKey(hex(senderId))) return true
+    ) : Boolean {
+        val h = hex(senderId)
+        // Already known: refresh recency + expiry so a peer that keeps
+        // announcing never ages out (no budget cost, PROTOCOL §8.1).
+        if (protected_.containsKey(h)) return true
+        untrusted.remove(h)?.let {
+            untrusted[h] = it.first to nowMs
+            return true
+        }
         val hits = if (isReplay) replayHits.getOrPut(connectionKey) { mutableListOf() }
         else budgetHits.getOrPut(connectionKey) { mutableListOf() }
         hits.removeAll { nowMs - it.second > budgetWindowMs }
@@ -65,6 +72,14 @@ class KeyCache(
     fun knows(senderId: ByteArray, nowMs: Long = nowProvider()): Boolean {
         evict(nowMs)
         return protected_.containsKey(hex(senderId)) || untrusted.containsKey(hex(senderId))
+    }
+
+    /** Returns the learned Ed25519 key for [senderId], or null if unknown/expired. */
+    @Synchronized
+    fun get(senderId: ByteArray, nowMs: Long = nowProvider()): ByteArray? {
+        evict(nowMs)
+        val key = hex(senderId)
+        return (protected_[key] ?: untrusted[key])?.first?.copyOf()
     }
 
     @Synchronized fun size(): Int = protected_.size + untrusted.size

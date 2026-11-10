@@ -76,13 +76,22 @@ $env:JAVA_HOME = "$env:USERPROFILE\.gradle\jdks\jdk-17" # JDK 17 (your local pat
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 cd meshline
 .\gradlew.bat :app:testDebugUnitTest          # test suite (see below for counts)
-.\gradlew.bat :app:assembleDebug              # app-debug.apk
+.\gradlew.bat :app:assembleDebug              # app-debug.apk (universal, all ABIs)
+.\gradlew.bat :app:assembleRelease            # per-ABI release APKs (minified, unsigned)
 .\gradlew.bat :app:lintDebug                  # clean
 ```
 
-Expected (as of Step 0): `PacketCodecTest` 21, `MeshRouterTest` 10, `MeshSimulatorTest` 2,
-`BleTransportTest` 5 — 38 tests, 0 failures. No INTERNET permission on the **merged
-manifest** or in `aapt dump permissions app-debug.apk`.
+Debug output is `app/build/outputs/apk/debug/app-debug.apk`. Release output is
+`app/build/outputs/apk/release/app-arm64-v8a-release-unsigned.apk` and
+`app-armeabi-v7a-release-unsigned.apk` (ABI splits, no universal APK). ABI
+splitting is enabled only when a Release task is requested, so the debug APK
+still installs on an x86_64 emulator for UI/DB tests.
+
+Expected (D1): `PacketCodecTest` 21, `MeshRouterTest` 12, `MeshSimulatorTest` 2,
+`KeyKnowledgeTest` 12, `KeyCacheTest` 6, `AnnounceVerifierTest` 5,
+`IdentityTest` 1, `QrPayloadTest` 4, `BleTransportTest` 5 — **68 tests, 0
+failures**. No INTERNET permission on the **merged manifest** or in
+`aapt dump permissions app-debug.apk`.
 
 ## Protocol in one page (full spec: [`PROTOCOL.md`](PROTOCOL.md))
 
@@ -180,7 +189,7 @@ Compute **% per hour** (and mAh if available: `adb shell dumpsys battery`
 before/after). Do this twice: (a) no traffic, (b) one public message every
 5 min. Report both numbers — **duty cycle is not battery drain**.
 
-**D1 phone checklist (BLOCKED — see “D1 integration status” below):**
+**D1 phone checklist (run after installing the `d1-identity` build):**
 1. Two phones on this branch discover each other — signed ANNOUNCEs verify
    (debug overlay shows `ttl` + `hops`; `droppedUnknownKey` stays low).
 2. Public messages still flow between the two phones, and each is **signed and
@@ -192,7 +201,7 @@ before/after). Do this twice: (a) no traffic, (b) one public message every
 ```powershell
 adb -s <serial> logcat -s BleTransport BleMeshService
 ```
-Look for: `BleMeshService up as anonXXXX`, `duplicate link closed`,
+Look for: `BleMeshService up`, `duplicate link closed`,
 `isMultipleAdvertisementSupported=...`, and any GATT error codes in the debug
 overlay's `last GATT error` line.
 
@@ -200,30 +209,69 @@ overlay's `last GATT error` line.
 service `a777356e-7ebc-429e-a847-d52eaeeb1331`, characteristic
 `cf602b5c-31b5-4b91-aa65-9272bd79cd3f`, MTU 512 (payload 509), max connections 6.
 
-## D1 integration status (important)
+## D1 integration status (wired, awaiting phone verification)
 
-The D1 building blocks exist and are unit-tested (`security/Identity*`,
-`security/QrPayload`, `security/KeyCache`, `security/AnnounceVerifier`,
-`profile/`, `storage/` Room+SQLCipher, `ui/D1Screens`). **They are not yet wired
-into the running app:** `BleMeshService` still uses the Phase C ephemeral
-identity and placeholder announce keys, `MainActivity` does not navigate to the
-D1 screens, and the contacts DAO has no repository instance. Therefore the D1
-phone checklist above **cannot pass yet**; wiring the service (load identity,
-sign/verify announces and public messages) and the QR/contacts UI is the
-remaining D1 work.
+D1 is wired into the running app:
+- `BleMeshService` loads the Keystore identity, signs ANNOUNCE and
+  PUBLIC_MESSAGE, verifies every incoming packet through `AnnounceVerifier` +
+  the two-tier `KeyCache`, preloads QR-verified contacts into the protected
+  tier, and runs as a connected-device foreground service.
+- `MainActivity` navigates Home / My QR / Scan / Contacts / Settings, asks for
+  camera permission only when **Scan** is tapped, and sends the public composer
+  text through `ACTION_SEND_PUBLIC`.
+- Room + SQLCipher opens through `SupportOpenHelperFactory`; QR-added contacts
+  persist across restart.
+- If the Keystore wrap key is invalidated or the DB cannot be decrypted, the app
+  fails closed: it creates a new identity / empties contacts and shows the
+  **“secure storage was reset”** dialog. Peers see a new key (D2 adds the
+  key-change warning).
 
-## Open issues after Phase C
+The D1 phone checklist above is the gate. **D2 does not start until it passes.**
 
-- **UI send wiring is partial.** `MainActivity` has the composer + Start button;
-  `BleMeshService.sendPublic` exists but is not yet bound to the composer's Send
-  action with a live router handle — bind it (and the peer list from ANNOUNCE
-  nicknames + signal + hops) at the start of Phase D while Phase E polishes UI.
-- **Identity is ephemeral in Phase C** (random nickname + random senderId per
-  process; placeholder key bytes in ANNOUNCE). Phase D replaces this with
-  Keystore-backed Ed25519/X25519 pairs, real signatures, and fingerprint display.
-- **Signature verification is permissive until Phase D.** The router already
-  *orders* verification before dedupe/rate-limit/relay (PROTOCOL §8) — Phase D
-  only injects the key lookup into the verifier hook.
+### Release smoke-test checklist (run on the release APK)
+
+1. Install the APK for the phone's ABI (`arm64-v8a` for modern phones,
+   `armeabi-v7a` for 32-bit-only devices). Release is minified + resource-shrunk.
+2. Launch: the contacts DB opens (no crash); Home shows `fruit nickname - 4hex`.
+   Confirm the merged manifest has **no INTERNET** permission.
+3. **My QR** renders; on phone B tap **Scan** → camera permission prompt appears
+   only now → scan → confirmation → verified contact appears.
+4. Force-stop and relaunch: same fingerprint, contact still listed.
+5. Send a public message between the two phones; both show it (release strips
+   `Log.d`, so use the debug build if you want the `BleMeshService up` line).
+6. Optional destructive drill: clear the app's data / Keystore entry and relaunch
+   → “secure storage was reset” dialog, **new** 4-hex id, empty contacts, no crash.
+
+### Release artifact size (per ABI, budget < 25 MB)
+
+Measured with `:app:assembleRelease` (minified, resource-shrunk, unsigned) on
+2026-11-10:
+
+| Artifact | Bytes | MiB | Budget |
+|---|---:|---:|---|
+| `app-arm64-v8a-release-unsigned.apk` | 5,610,196 | 5.35 | < 25 MB |
+| `app-armeabi-v7a-release-unsigned.apk` | 5,248,290 | 5.01 | < 25 MB |
+
+Each release APK contains exactly one ABI and `lib/.../libsqlcipher.so`, and
+neither declares `android.permission.INTERNET`. The universal debug APK is
+21,191,558 bytes (20.21 MiB) because it carries all four ABIs for
+emulator/UI testing; it is not a release artifact.
+
+## Open issues after D1
+
+- **Foreground-service permission gate (Phase F).** The service now fails soft
+  (no crash) if Android rejects the FGS start, but the UI should explain which
+  Bluetooth permission is missing instead of silently stopping.
+- **Connection-slot exhaustion (Phase F).** Six GATT slots can be consumed by
+  peers that never send a valid ANNOUNCE; planned mitigation is to close
+  non-Announced connections after ~10 s.
+- **Adaptive announce cadence (Phase E/F).** D1 announces at a fixed 30 s
+  (`intervalUnits = 3`). The 30/60/120 s hysteresis rule (§8.4) is specified but
+  not yet driven by known-node count.
+- **Neighbour set is not wired into the router yet.** `neighboursProvider`
+  returns an empty set, so D1 always floods instead of using the direct-send
+  shortcut and adaptive relay probability. Correct, but more expensive at scale.
+- **D2+**: Noise private chat, encrypted message storage, panic wipe, groups.
 
 ## Compliance notes (PRD §12)
 

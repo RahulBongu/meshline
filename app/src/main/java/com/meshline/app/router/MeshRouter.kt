@@ -51,11 +51,11 @@ sealed interface RouteDecision {
 }
 
 /**
- * Result of the router's signature hook. Distinguishing “key not learned yet”
- * from “bad signature” keeps [MeshStats.droppedUnknownKey] meaningful: it
- * counts the post-join transient, not forgeries.
+ * Result of the router's signature hook. The four states are counted
+ * separately so operators can tell the post-join key transient, real
+ * forgeries, and key-learning budget drops apart.
  */
-enum class SignatureCheck { OK, UNKNOWN_SENDER, INVALID }
+enum class SignatureCheck { OK, UNKNOWN_SENDER, BAD_SIGNATURE, BUDGET }
 
 /** Counters a test or the mesh-status screen reads (all volatile writes via @Volatile ints). */
 class MeshStats {
@@ -68,7 +68,12 @@ class MeshStats {
     @Volatile var droppedRateLimited: Int = 0
     @Volatile var linkTransmissions: Int = 0 // individual sendTo calls (originated + relayed)
     @Volatile var ttlUpgrades: Int = 0 // duplicates with a higher TTL that triggered one extra relay
-    @Volatile var droppedUnknownKey: Int = 0 // signature/key lookup failed after a node joins (before key learned)
+    /** No key for the sender yet (expected transient right after a node joins). */
+    @Volatile var droppedUnknownKey: Int = 0
+    /** Key was known and the Ed25519 signature did not verify (forgery/corruption). */
+    @Volatile var droppedBadSignature: Int = 0
+    /** Valid announce rejected by the KeyCache per-connection/global learning budget. */
+    @Volatile var droppedBudget: Int = 0
 }
 
 data class RouterConfig(
@@ -209,7 +214,7 @@ class MeshRouter(
      * dedupe insertion, rate-limit accounting and relay. Invalid packets are
      * dropped and never cached.
      */
-    private val signatureVerifier: (MeshPacket) -> SignatureCheck = { SignatureCheck.OK },
+    private val signatureVerifier: (MeshPacket, ByteArray) -> SignatureCheck = { _, _ -> SignatureCheck.OK },
 ) {
     private val dedupe = DedupeCache(config.dedupeCapacity, config.dedupeTtlMs, config.nowProvider)
     private val rateLimiter = RateLimiter(nowProvider = config.nowProvider, config = config)
@@ -251,6 +256,11 @@ class MeshRouter(
         return transmit(encoded, targets)
     }
 
+    private fun mustBeSigned(type: PacketType): Boolean = when (type) {
+        PacketType.ANNOUNCE, PacketType.PUBLIC_MESSAGE, PacketType.RECEIPT, PacketType.LEAVE -> true
+        else -> false
+    }
+
     private suspend fun onDecoded(pkt: MeshPacket, fromPeer: ByteArray): RouteDecision {
         // Echo back to ourselves is uninteresting (originated copies looping).
         if (pkt.senderId.contentEquals(ownId)) return RouteDecision.Drop
@@ -270,21 +280,34 @@ class MeshRouter(
     }
 
     private suspend fun process(pkt: MeshPacket, fromPeer: ByteArray): RouteDecision {
-        // Phase D ordering rule: signature verification happens *before*
-        // dedupe insertion, rate-limit accounting and relay. Invalid packets
-        // are dropped and never cached (Phase B/C verifier is permissive).
-        if (pkt.signature != null) {
-            when (signatureVerifier(pkt)) {
+        // Signature verification happens *before* dedupe insertion, rate-limit
+        // accounting and relay. Invalid packets are dropped and never cached.
+        if (pkt.signature == null) {
+            // PROTOCOL §3: ANNOUNCE, PUBLIC_MESSAGE, RECEIPT and LEAVE MUST be
+            // signed. An unsigned one is treated as an invalid signature.
+            if (mustBeSigned(pkt.type)) {
+                stats.droppedInvalid++
+                stats.droppedBadSignature++
+                return RouteDecision.Drop
+            }
+        } else {
+            when (signatureVerifier(pkt, fromPeer)) {
                 SignatureCheck.OK -> Unit
                 SignatureCheck.UNKNOWN_SENDER -> {
                     // Post-join transient: the sender's ANNOUNCE has not been
-                    // learned yet, so the key lookup fails. Counted separately.
+                    // learned yet, so the key lookup fails.
                     stats.droppedInvalid++
                     stats.droppedUnknownKey++
                     return RouteDecision.Drop
                 }
-                SignatureCheck.INVALID -> {
+                SignatureCheck.BAD_SIGNATURE -> {
                     stats.droppedInvalid++
+                    stats.droppedBadSignature++
+                    return RouteDecision.Drop
+                }
+                SignatureCheck.BUDGET -> {
+                    // Valid packet, but the key-learning budget is exhausted.
+                    stats.droppedBudget++
                     return RouteDecision.Drop
                 }
             }

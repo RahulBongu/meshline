@@ -5,6 +5,14 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+// Release ships only the two ABIs the test phones use, as split APKs (no
+// universal APK) so each artifact stays well under the 25 MB budget.
+// Debug stays one universal APK so it can also run on an x86_64 emulator
+// for UI/DB tests (BLE itself still needs physical phones).
+val releaseBuildRequested = gradle.startParameter.taskNames.any {
+    it.contains("Release", ignoreCase = true) || it.contains("bundle", ignoreCase = true)
+}
+
 android {
     namespace = "com.meshline.app"
     // Local SDK has android-36 installed -> target latest available.
@@ -40,6 +48,15 @@ android {
 
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+
+    splits {
+        abi {
+            isEnable = releaseBuildRequested
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
+        }
+    }
 
     packaging {
         resources { excludes += "/META-INF/{DEPENDENCIES,LICENSE,LICENSE.txt,NOTICE,NOTICE.txt}" }

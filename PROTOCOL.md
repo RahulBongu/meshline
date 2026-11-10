@@ -422,6 +422,20 @@ nonce window (see `GROUPS_DESIGN.md` §5).
   `data_extraction_rules.xml` excluding every domain (`database`, `sharedpref`,
   `file`, `root`) from both cloud backup and device transfer, so identity keys,
   contacts, and messages cannot leave the device through backup.
+- **Secure-storage reset (D1, fail-closed):** if the Keystore wrap key is
+  missing/invalidated (OS upgrade, OEM key loss) or the SQLCipher database
+  cannot be opened/decrypted, the app MUST recover without crashing:
+  1. discard the unusable wrap-key entry and generate a **fresh Ed25519+X25519
+     identity** (new `senderId`/fingerprint),
+  2. wipe the wrapped DB key and `meshline.db*` files, so contacts start empty,
+  3. record a one-shot `SecureStorageStatus` reason (`KEYSTORE_INVALIDATED` or
+     `DB_UNREADABLE`) and show a clear **“secure storage was reset”** dialog the
+     next time the UI opens.
+
+  Peers will observe a **key change** (new senderId/fingerprint) after an
+  identity reset; D2 adds the explicit key-change warning for pinned contacts.
+  A DB-only reset keeps the identity and only empties contacts. The app never
+  silently presents an undecryptable store as empty without this notice.
 - `senderId` = truncated SHA-256 of the *Ed25519* public key (identity anchor).
 - **Fingerprint** shown in the UI = `SHA-256(ed25519Pk ‖ x25519Pk)` as 64 hex chars,
   displayed in groups of 4. Verification by QR / in-person compare (PRD FR-13, P1)
@@ -442,9 +456,10 @@ nonce window (see `GROUPS_DESIGN.md` §5).
    accounting and relay (Phase D ordering rule).** A packet whose signature
    fails verification (or is missing where §3 requires one) is dropped and
    **never inserted into the dedupe cache** and never charged to a rate-limit
-   bucket. Until Phase D wires real verification, the router's verifier is
-   permissive (`{ true }`) — the *placement* of the check is pinned now so
-   Phase D only injects the key lookup.
+   bucket. D1 wires the production verifier (`AnnounceVerifier` + two-tier
+   `KeyCache`); there is no permissive fallback in the app. JVM simulator
+   tests may inject a permissive verifier, but that verifier is test-only and
+   never shipped.
 
 1a. **Forward compatibility:** after signature verification, the router
     **relays unknown packet types** instead of dropping them (§2). A packet of
@@ -478,7 +493,10 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
   after signing (nickname, avatar, x25519 key, capabilities, or any header
   byte except TTL) fails `Ed25519.verify` and is dropped, never cached.
   ANNOUNCEs with missing signatures, mismatched hashes or bad signatures are
-  `droppedInvalid`, not `droppedDuplicate`.
+  `droppedInvalid` **and** `droppedBadSignature`, not `droppedDuplicate`. An
+  ANNOUNCE that is cryptographically valid but rejected by the learning budget
+  is counted as `droppedBudget` and is **not** counted as invalid (see §8.1
+  counter table).
 - **Flood:** ANNOUNCE uses TTL 7 (same cap as data, so keys travel as far as
   data will), jitter 10–200 ms per hop, adaptive relay probability (rule 6),
   and its own rate limit (≤ 5/10 s per sender and per connection, same bucket
@@ -527,6 +545,17 @@ need a cache for the N+1th packet — the cache is unavoidable either way.
   lands. Everything else (PUBLIC, PRIVATE, GROUP_*, unknown types) from an
   unknown `senderId` is dropped even if its signature would otherwise verify
   against a key the node does not hold.
+- **Signature counters (normative names in `MeshStats`):**
+
+  | Counter | Meaning |
+  |---|---|
+  | `droppedUnknownKey` | No cached key for the sender yet (expected post-join transient). Also increments `droppedInvalid`. |
+  | `droppedBadSignature` | Key was known but Ed25519 verification failed, or a type that §3 requires to be signed arrived unsigned. Also increments `droppedInvalid`. |
+  | `droppedBudget` | ANNOUNCE is structurally valid and correctly signed, but the `KeyCache` per-connection or global learning budget rejected it. **Not** invalid and **not** charged to `droppedInvalid`; a later announce can still teach the key. |
+
+  Operators use the split to distinguish “the mesh has not converged yet”
+  (`droppedUnknownKey`), “someone is forging/corrupting” (`droppedBadSignature`)
+  and “a flood is being throttled” (`droppedBudget`).
 - **Simulator model (D1 test-only, not production):** nodes start knowing
   **only direct neighbours** (via the adjacency map); all other keys are
   learned exclusively by observing verified ANNOUNCE floods. Measurements in
