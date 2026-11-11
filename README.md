@@ -110,9 +110,9 @@ INTERNET permission on the **merged manifest** or in
 `aapt dump permissions app-universal-debug.apk`.
 
 On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
-`NoiseNonceOrderingTest` 6, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 9,
-`SessionCodecTest` 4, `SessionStoreTest` 2, `OutboxStoreTest` 2 —
-**111 tests, 0 failures** in total.
+`NoiseNonceOrderingTest` 7, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 10,
+`PrivateOutboxTest` 1, `SessionCodecTest` 4, `SessionStoreTest` 2,
+`OutboxStoreTest` 2 — **114 tests, 0 failures** in total.
 
 > **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
 > typically uninstalls the app (and its data) after the run, and the
