@@ -230,8 +230,10 @@ class PrivateOutboxTest {
             assertEquals("the outbox must hold them", count, senderOutbox.size())
 
             // --- run the retry loop ---
+            // A row stays in the outbox after "Sent" (it becomes Delivered),
+            // so the loop runs until every row is acknowledged.
             var rounds = 0
-            while (senderOutbox.size() > 0 && rounds < 300) {
+            while (rowsAwaitingReceipt(senderOutbox) > 0 && rounds < 300) {
                 // A session that aged out needs a re-key; the service would
                 // start a fresh handshake here (the queued messages wait for it).
                 if (a.manager.session(b.id)?.needsRekey == true) {
@@ -246,7 +248,11 @@ class PrivateOutboxTest {
                 rounds++
             }
 
-            assertTrue("the outbox must drain (left=${senderOutbox.size()})", senderOutbox.size() == 0)
+            assertEquals(
+                "every message must be acknowledged",
+                0,
+                rowsAwaitingReceipt(senderOutbox),
+            )
             assertEquals("every message must be shown exactly once", count, shown.size)
             assertEquals(
                 "the messages must be distinct",
@@ -266,4 +272,8 @@ class PrivateOutboxTest {
 
     private fun sign(keyPair: KeyPair, input: ByteArray): ByteArray =
         java.security.Signature.getInstance("Ed25519").apply { initSign(keyPair.private); update(input) }.sign()
+
+    /** The rows that still wait for a receipt (the acknowledged ones stay behind). */
+    private suspend fun rowsAwaitingReceipt(outbox: MemoryOutbox): Int =
+        outbox.rows().count { it.state == OutboxState.QUEUED || it.state == OutboxState.SENT }
 }

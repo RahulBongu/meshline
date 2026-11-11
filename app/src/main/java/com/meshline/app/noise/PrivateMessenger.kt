@@ -66,6 +66,12 @@ enum class OutboxState {
 
     /** Handed to the router; waiting for the receipt. */
     SENT,
+
+    /** The peer acknowledged it (RECEIPT Delivered). */
+    DELIVERED,
+
+    /** The peer opened it (RECEIPT Read). */
+    READ,
 }
 
 /**
@@ -128,6 +134,9 @@ class PrivateMessenger(
         val now = nowProvider()
         val packets = mutableListOf<MeshPacket>()
         for (row in outbox.rows()) {
+            // A message that was acknowledged is done: it stays in the outbox
+            // so the chat can show its state, but it is never retried.
+            if (row.state == OutboxState.DELIVERED || row.state == OutboxState.READ) continue
             val due = retrySchedule[row.id] ?: now
             if (due > now) continue
             val peerId = row.peerIdHex.hexToBytes()
@@ -141,16 +150,18 @@ class PrivateMessenger(
     }
 
     /**
-     * Handles a receipt: the row is done and leaves the outbox.
-     * Returns true when a row was actually removed.
+     * Handles a receipt: the row leaves the *retry* queue and records the
+     * state the user sees (Delivered / Read). The row itself stays until the
+     * outbox expiry, so the chat still shows the message with its state.
+     * Returns true when a row was updated.
      */
-    suspend fun onReceipt(peerIdHex: String, messageId: ByteArray): Boolean {
+    suspend fun onReceipt(peerIdHex: String, messageId: ByteArray, kind: OutboxState = OutboxState.DELIVERED): Boolean {
         val id = hex(messageId)
         val row = outbox.rows().firstOrNull { r ->
             r.peerIdHex == peerIdHex && runCatching { hex(PrivateEnvelope.decode(r.envelope).messageId) }
                 .getOrNull() == id
         } ?: return false
-        outbox.delete(row.id)
+        outbox.markAttempt(row.id, kind, row.attempts)
         retrySchedule.remove(row.id)
         return true
     }

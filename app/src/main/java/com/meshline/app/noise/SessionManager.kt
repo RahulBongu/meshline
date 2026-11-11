@@ -77,6 +77,14 @@ class SessionManager(
 
         /** The session must be replaced by a fresh handshake (§6.1). */
         data class RehandshakeNeeded(val peerId: ByteArray) : Event
+
+        /**
+         * The peer presented a valid handshake with a **different static key**
+         * than the one we know. The app decides what it means: for a verified
+         * contact it is a key change to warn about (§7.2), for an unknown peer
+         * it is an impersonation attempt.
+         */
+        data class KeyMismatch(val peerId: ByteArray, val learnedX25519PublicKey: ByteArray) : Event
     }
 
     // ------------------------------------------------------------- sessions
@@ -373,8 +381,12 @@ class SessionManager(
         session.remoteX25519PublicKey = remoteStatic
         val known = knownX25519(session.peerId)
         if (known != null && !known.contentEquals(remoteStatic)) {
-            limiter.recordViolation(connectionKey)
-            strike(connectionKey, session.peerId, "static key does not match the announced key", events)
+            // The peer presented a *valid* Noise handshake with a different
+            // static key. That is either an impersonation or a legitimate key
+            // change — the decision belongs to the app, not to us: we report it
+            // and let the caller hold the traffic and ask the user (§7.2).
+            // No strike: the peer's handshake was valid, only its key differs.
+            events += Event.KeyMismatch(session.peerId.copyOf(), remoteStatic)
             return
         }
 

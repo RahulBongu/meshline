@@ -28,6 +28,12 @@ class ContactsRepository(private val context: Context) {
     private fun open(): MeshlineDatabase =
         db ?: DatabaseFactory.create(context).also { db = it }
 
+    /**
+     * The D2 stores (sessions, outbox, inbox, seen ids) — the **same** Room
+     * handle, so the app opens the encrypted database once.
+     */
+    val secure: SecureStores by lazy { SecureStores(open()) }
+
     fun observeAll(): Flow<List<ContactEntity>> = flow {
         emitAll(open().contactsDao().observeAll())
     }.catch { t ->
@@ -50,6 +56,49 @@ class ContactsRepository(private val context: Context) {
     }.getOrElse {
         resetStorage()
         false
+    }
+
+    /** The X25519 key we know for this peer (from a QR-verified contact). */
+    suspend fun x25519For(peerIdHex: String): ByteArray? =
+        runCatching { open().contactsDao().find(peerIdHex)?.x25519PublicKey }.getOrNull()
+
+    /** Is this peer a QR-verified contact? */
+    suspend fun isVerified(peerIdHex: String): Boolean =
+        runCatching { open().contactsDao().find(peerIdHex)?.verified == true }.getOrDefault(false)
+
+    /** Is this peer blocked? */
+    suspend fun isBlocked(peerIdHex: String): Boolean =
+        runCatching { open().contactsDao().find(peerIdHex)?.blocked == true }.getOrDefault(false)
+
+    /**
+     * A contact's keys changed and the user accepted the new identity: the
+     * contact loses the QR-verified badge (the scanned fingerprint no longer
+     * matches) and becomes TOFU.
+     */
+    suspend fun acceptNewKeys(peerIdHex: String, ed25519PublicKey: ByteArray, x25519PublicKey: ByteArray) {
+        runCatching {
+            val dao = open().contactsDao()
+            val existing = dao.find(peerIdHex) ?: return
+            dao.upsert(
+                existing.copy(
+                    ed25519PublicKey = ed25519PublicKey,
+                    x25519PublicKey = x25519PublicKey,
+                    fingerprint = MessageIds.fingerprint(ed25519PublicKey, x25519PublicKey),
+                    verified = false,
+                    lastSeenMs = System.currentTimeMillis(),
+                )
+            )
+        }
+    }
+
+    /** Blocks a peer (the user rejected a key change). */
+    suspend fun block(peerIdHex: String) {
+        runCatching { open().contactsDao().setBlocked(peerIdHex, true) }
+    }
+
+    /** Panic wipe: every contact goes with the identity. */
+    suspend fun deleteAll() {
+        runCatching { open().contactsDao().deleteAll() }
     }
 
     fun close() {

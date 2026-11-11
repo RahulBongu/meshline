@@ -2,6 +2,7 @@ package com.meshline.app.ui
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -74,13 +75,17 @@ fun ScanConfirmScreen(card: QrPayload.ContactCard, fingerprintShort: String, onC
 }
 
 @Composable
-fun ContactsScreen(contacts: List<ContactEntity>) {
+fun ContactsScreen(contacts: List<ContactEntity>, onOpen: (ContactEntity) -> Unit = {}) {
     Surface(modifier = Modifier.fillMaxSize()) {
         LazyColumn(modifier = Modifier.padding(16.dp)) {
             items(contacts) { c ->
                 Text(
                     "${AvatarTable.name(c.avatarIndex)} ${c.nickname} - ${c.fingerprint.substring(0, 4).uppercase()}" +
-                        (if (c.verified) " ✓ verified" else "") + (if (c.blocked) " blocked" else "")
+                        (if (c.verified) " ✓ verified" else "") + (if (c.blocked) " blocked" else ""),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpen(c) }
+                        .padding(vertical = 6.dp),
                 )
             }
         }
@@ -119,6 +124,10 @@ fun SecureStorageResetDialog(event: SecureStorageStatus.Event, onDismiss: () -> 
                     "Meshline could not unlock its identity (the Android Keystore key was " +
                         "invalidated, usually after an OS update). A new identity was created " +
                         "and contacts are empty. Peers will see a new key and a key-change warning."
+                } else if (event.reason == SecureStorageStatus.Reason.PANIC_WIPE) {
+                    "You wiped this device. A new identity was created and every contact, " +
+                        "session and message is gone. Peers will see a new key and a " +
+                        "key-change warning."
                 } else {
                     "The encrypted contacts database could not be decrypted and was reset. " +
                         "Contacts are empty. Your identity is unchanged; if it was also reset, " +

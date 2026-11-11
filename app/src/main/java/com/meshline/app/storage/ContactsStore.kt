@@ -56,8 +56,9 @@ interface ContactsDao {
         NoiseSessionEntity::class,
         OutboxEntity::class,
         SeenMessageEntity::class,
+        InboxEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class MeshlineDatabase : RoomDatabase() {
@@ -65,6 +66,7 @@ abstract class MeshlineDatabase : RoomDatabase() {
     abstract fun noiseSessionDao(): NoiseSessionDao
     abstract fun outboxDao(): OutboxDao
     abstract fun seenMessageDao(): SeenMessageDao
+    abstract fun inboxDao(): InboxDao
 
     companion object {
         /**
@@ -132,6 +134,26 @@ abstract class MeshlineDatabase : RoomDatabase() {
                         `messageIdHex` TEXT NOT NULL,
                         `peerIdHex` TEXT NOT NULL,
                         `seenAtMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageIdHex`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+        /**
+         * v4 → v5 adds the `inbox` table: the private messages we received
+         * (plaintext, protected by SQLCipher).
+         */
+        val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `inbox` (
+                        `messageIdHex` TEXT NOT NULL,
+                        `peerIdHex` TEXT NOT NULL,
+                        `text` BLOB NOT NULL,
+                        `createdAtMs` INTEGER NOT NULL,
+                        `read` INTEGER NOT NULL,
                         PRIMARY KEY(`messageIdHex`)
                     )
                     """.trimIndent()

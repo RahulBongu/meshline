@@ -19,8 +19,10 @@ import com.meshline.app.router.MeshRouter
 import com.meshline.app.router.RouterConfig
 import com.meshline.app.security.AndroidKeystoreIdentityStore
 import com.meshline.app.security.AnnounceVerifier
+import com.meshline.app.security.DbPassphrase
 import com.meshline.app.security.Identity
 import com.meshline.app.security.KeyCache
+import com.meshline.app.security.SecureStorageStatus
 import com.meshline.app.storage.ContactsRepository
 import com.meshline.app.transport.BleTransport
 import com.meshline.app.transport.PeerInfo
@@ -33,6 +35,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlin.random.Random
@@ -81,6 +84,13 @@ class BleMeshService : Service() {
     /** Peers we are currently linked to (transport view) — drives the settle window. */
     @Volatile private var connectedPeers: Set<ByteArray> = emptySet()
 
+    /** The D2 secure channel (Noise sessions, private messages, receipts). */
+    @Volatile private var secureChannel: SecureChannel? = null
+
+    /** The connected peers as hex ids (the D2 layer's view). */
+    private fun connectedPeersHex(): Set<String> =
+        connectedPeers.map { it.joinToString("") { b -> "%02x".format(b) } }.toSet()
+
     /** Keystore-backed identity; a reset creates a new one (see SecureStorageStatus). */
     val identity: Identity by lazy {
         identityStore.load() ?: AndroidKeystoreIdentityStore.generateAndStore(applicationContext)
@@ -114,12 +124,42 @@ class BleMeshService : Service() {
         transport = t
         router = r
 
+        // The D2 secure channel: Noise handshakes, private messages, receipts.
+        val channel = SecureChannel(
+            identity = id,
+            router = r,
+            keyCache = keyCache,
+            contacts = contacts,
+            store = contacts.secure,
+            connectedPeers = { connectedPeersHex() },
+        )
+        secureChannel = channel
+
+        jobs += scope.launch { channel.messages.collect { setPrivateMessages(it) } }
+        jobs += scope.launch { channel.peers.collect { setPrivatePeers(it) } }
+        jobs += scope.launch { channel.keyChange.collect { setKeyChange(it) } }
+
         jobs += scope.launch {
             t.incoming.collect { (from, bytes) -> runCatching { r.onReceive(bytes, from) } }
         }
         // Track the connected peers (transport view) for the settle window.
         jobs += scope.launch {
             t.neighbours.collect { set -> connectedPeers = set.map { it.copyOf() }.toSet() }
+        }
+        // D2: every packet the router delivers to us goes through the secure
+        // channel (handshakes, private messages, receipts).
+        jobs += scope.launch {
+            r.deliveredWithPeer.collect { (from, pkt) ->
+                runCatching { channel.onPacket(pkt, from) }
+            }
+        }
+        // D2: the periodic work — handshake retransmits, outbox retries,
+        // re-keys, expiry.
+        jobs += scope.launch {
+            while (true) {
+                runCatching { channel.tick() }
+                delay(2_000)
+            }
         }
         jobs += scope.launch { t.debugPeers.collect { setPeers(it) } }
         jobs += scope.launch { t.lastGattError.collect { if (it != null) setGattError(it) } }
@@ -247,12 +287,58 @@ class BleMeshService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_SEND_PUBLIC) {
-            intent.getStringExtra(EXTRA_TEXT)?.let { text ->
-                scope.launch { sendPublic(text) }
+        when (intent?.action) {
+            ACTION_SEND_PUBLIC -> {
+                intent.getStringExtra(EXTRA_TEXT)?.let { text ->
+                    scope.launch { sendPublic(text) }
+                }
             }
+            ACTION_SEND_PRIVATE -> {
+                val peer = intent.getStringExtra(EXTRA_PEER_ID)
+                val text = intent.getStringExtra(EXTRA_TEXT)
+                if (peer != null && text != null) {
+                    scope.launch { secureChannel?.send(peer, text) }
+                }
+            }
+            ACTION_MARK_READ -> {
+                val peer = intent.getStringExtra(EXTRA_PEER_ID)
+                if (peer != null) scope.launch { secureChannel?.markRead(peer) }
+            }
+            ACTION_OPEN_CHAT -> {
+                val peer = intent.getStringExtra(EXTRA_PEER_ID)
+                if (peer != null) {
+                    scope.launch {
+                        secureChannel?.ensureSession(peer)
+                        secureChannel?.markRead(peer)
+                    }
+                }
+            }
+            ACTION_ACCEPT_KEY -> {
+                val peer = intent.getStringExtra(EXTRA_PEER_ID)
+                if (peer != null) scope.launch { secureChannel?.acceptKeyChange(peer) }
+            }
+            ACTION_REJECT_KEY -> {
+                val peer = intent.getStringExtra(EXTRA_PEER_ID)
+                if (peer != null) scope.launch { secureChannel?.rejectKeyChange(peer) }
+            }
+            ACTION_PANIC_WIPE -> scope.launch { panicWipe() }
         }
         return START_STICKY
+    }
+
+    /**
+     * Panic wipe: the identity, the contacts, every session and every message
+     * go. The app comes back with a **new** identity on the next launch.
+     */
+    private suspend fun panicWipe() {
+        val channel = secureChannel
+        channel?.wipe()
+        runCatching { identityStore.wipe() }
+        runCatching { DbPassphrase.wipe(applicationContext) }
+        // The UI asks for a fresh identity the next time it opens.
+        SecureStorageStatus.record(applicationContext, SecureStorageStatus.Reason.PANIC_WIPE)
+        setPrivateMessages(emptyList())
+        setPrivatePeers(emptyList())
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -269,7 +355,14 @@ class BleMeshService : Service() {
     /** Debug overlay flows (Phase C #1) + send action for the composer. */
     companion object Bridge {
         const val ACTION_SEND_PUBLIC = "com.meshline.app.action.SEND_PUBLIC"
+        const val ACTION_SEND_PRIVATE = "com.meshline.app.action.SEND_PRIVATE"
+        const val ACTION_MARK_READ = "com.meshline.app.action.MARK_READ"
+        const val ACTION_OPEN_CHAT = "com.meshline.app.action.OPEN_CHAT"
+        const val ACTION_ACCEPT_KEY = "com.meshline.app.action.ACCEPT_KEY"
+        const val ACTION_REJECT_KEY = "com.meshline.app.action.REJECT_KEY"
+        const val ACTION_PANIC_WIPE = "com.meshline.app.action.PANIC_WIPE"
         const val EXTRA_TEXT = "text"
+        const val EXTRA_PEER_ID = "peerIdHex"
 
         private const val CHANNEL_ID = "meshline_mesh"
         private const val NOTIFICATION_ID = 1
@@ -287,11 +380,22 @@ class BleMeshService : Service() {
         private val _stats = MutableStateFlow(MeshStatsSnapshot())
         val stats: Flow<MeshStatsSnapshot> = _stats.asStateFlow()
 
+        // ---- D2: the private-chat state the UI reads ----
+        private val _privateMessages = MutableStateFlow<List<PrivateChatMessage>>(emptyList())
+        val privateMessages: StateFlow<List<PrivateChatMessage>> = _privateMessages.asStateFlow()
+        private val _privatePeers = MutableStateFlow<List<PrivatePeer>>(emptyList())
+        val privatePeers: StateFlow<List<PrivatePeer>> = _privatePeers.asStateFlow()
+        private val _keyChange = MutableStateFlow<KeyChangeEvent?>(null)
+        val keyChange: StateFlow<KeyChangeEvent?> = _keyChange.asStateFlow()
+
         internal fun setPeers(v: List<PeerInfo>) { _peers.value = v }
         internal fun pushMessage(m: ReceivedMessageInfo) { _messages.value = (_messages.value + m).takeLast(50) }
         internal fun setGattError(c: Int) { _lastGattError.value = c }
         internal fun setAdvertiseSupported(b: Boolean) { _advertiseSupported.value = b }
         internal fun setStats(s: MeshStatsSnapshot) { _stats.value = s }
+        internal fun setPrivateMessages(v: List<PrivateChatMessage>) { _privateMessages.value = v }
+        internal fun setPrivatePeers(v: List<PrivatePeer>) { _privatePeers.value = v }
+        internal fun setKeyChange(v: KeyChangeEvent?) { _keyChange.value = v }
 
         private fun String.hexToBytes(): ByteArray =
             chunked(2).map { it.toInt(16).toByte() }.toByteArray()
