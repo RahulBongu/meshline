@@ -184,6 +184,16 @@ The mesh loses, reorders and duplicates packets, so transport messages carry an
   beyond `nextExpected + 128` is too far ahead — drop and count as protocol
   violation (possible forging/gap attack). A nonce older than the window is a
   replay (drop, count).
+- **Authenticate first (D2, review item 1):** the AEAD tag is verified
+  **before** the window or any drift logic may act. A forged packet (bad tag)
+  is dropped **silently** — it does not move the window, is not counted as a
+  violation, does not change the session and does **not** ask for a re-handshake.
+  Otherwise anyone could force a re-handshake (and burn the handshake budget)
+  with a single made-up packet. Only an **authenticated** message whose nonce
+  is beyond the window may trigger the clean re-handshake of §6.1. Because the
+  associated data binds the timestamp, a ciphertext re-wrapped in a fresh
+  outer packet does not authenticate either — the AEAD catches that replay,
+  and the window is the second line of defence and the drift detector.
 - **Interaction with dedupe:** the outer dedupe cache and the replay window
   are independent. Dedupe stops the *same packet bytes* being processed
   twice; the replay window stops a *different packet* (fresh outer header)
@@ -208,7 +218,7 @@ budget or quarantine an innocent peer.
 |--------|-------------------------------|
 | Per connection | **5 handshake packets / 10 s**; **20 handshake starts / hour**; cooldown **60 s** after a successful handshake before a *new* start is allowed |
 | Per node | **30 handshake packets / 10 s** accepted; beyond that, drop silently |
-| Per node (**handshake work**) | **300 X25519 operations / minute** across *all* connections — see below |
+| Per node (**handshake work**) | **300 X25519 operations / minute** across *all* connections — half of it reserved for protected-tier senders (see below) |
 | Invalid handshake | **3 strikes in 5 min** per connection → 10 min handshake-quarantine for that connection |
 
 **Why a global work budget (D2):** the per-connection buckets reset whenever a
@@ -221,6 +231,13 @@ ephemeral key pair, the responder's ephemeral key pair, `ee`, `es`, `se`), so
 legitimate mesh needs, far below what a flood would ask for. The cost is
 charged **before** the key agreement happens, and a handshake that cannot pay
 is dropped silently like any other over-limit handshake.
+
+**Reservation for the protected tier (D2, review item 3):** half of that
+budget (**150 operations / minute**) is **reserved for senders in the
+protected key tier** (QR-verified contacts, connected neighbours). A sender in
+the protected tier may spend either half; an unknown sender may only spend
+the general half. Junk handshakes therefore cannot starve the people the
+user actually talks to — the reserve is untouched by them.
 
 Over-limit handshakes are **dropped silently** (no error reply — errors are
 amplifiers). Repeatedly-invalid handshakes (e.g. correct outer packet, garbage
@@ -294,6 +311,21 @@ are still never written; only the derived session state is stored.
     **sender-side** feature only.
   - *Lifetime:* a queued message waits up to **12 h** (configurable) and is
     then dropped rather than arriving as a stale surprise.
+  - *Reliability (D2, review item 2):* a row stays in the outbox after
+    **Sent** until a signed **RECEIPT (Delivered)** arrives or the 12 h
+    expiry drops it — BLE offers no delivery guarantee, so "Sent" only means
+    "handed to the mesh". Until then the message is **retried with an
+    exponential backoff** (2 s, doubling, capped at 30 min).
+  - *Re-encrypted on every retry:* each attempt encrypts the plaintext
+    **again**, under the session that is live *then*, with a **fresh nonce**
+    (a nonce must never be reused under the same key). The
+    **application-level message id** (32 bytes, carried *inside* the
+    ciphertext, so the AEAD authenticates it) stays the same across retries.
+    That id is what makes the receiver show the message **exactly once** even
+    though the mesh duplicates it and the sender retries it.
+  - *The receipt is idempotent:* a repeat of a message the receiver already
+    showed is not shown again, but it **is** acknowledged again — the sender
+    needs that receipt to clean its outbox.
   - *User-visible states (see §8):*
 
     | state | meaning |

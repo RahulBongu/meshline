@@ -289,19 +289,26 @@ class MeshRouter(
         return onDecoded(pkt, fromPeer)
     }
 
-    /** Origin-side entry point: validate, dedupe-mark, then transmit. */
-    suspend fun onLocalSend(packet: MeshPacket): RouteDecision {
+    /**
+     * Origin-side entry point: validate, dedupe-mark, then transmit.
+     *
+     * [retransmit] re-sends a packet we already sent. The dedupe check is
+     * skipped (the packet was sent before), but the packet keeps its message
+     * id — so the *receiver* still recognises it as the same handshake step
+     * and treats it as the idempotent duplicate it is (NOISE_DESIGN §3.3).
+     */
+    suspend fun onLocalSend(packet: MeshPacket, retransmit: Boolean = false): RouteDecision {
         if (!packet.senderId.contentEquals(ownId)) {
             stats.droppedInvalid++
             return RouteDecision.Drop
         }
         // Even originator dedupes its own id so its own relayed copies are ignored later.
         val id = packet.messageId
-        if (dedupe.isSeen(id)) return RouteDecision.Drop
+        if (!retransmit && dedupe.isSeen(id)) return RouteDecision.Drop
         dedupe.mark(id, packet.ttl)
         val encoded = PacketCodec.encode(packet)
         val targets = chooseTargets(packet, exclude = ownId)
-        stats.originatedSends++
+        if (!retransmit) stats.originatedSends++
         return transmit(encoded, targets, originSend = true, packetType = packet.type)
     }
 

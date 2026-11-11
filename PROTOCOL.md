@@ -327,6 +327,22 @@ ciphertext   ChaCha20-Poly1305 ciphertext (plaintext + 16-byte tag)
   decrypts: a nonce below the window is a replay (dropped and counted), a
   nonce more than 128 ahead of the expectation is refused as a possible gap
   attack, a nonce inside the window is accepted exactly once.
+- **Authenticate first (normative).** The order is: **decrypt (verify the AEAD
+  tag) → then judge the nonce.** The replay window and the drift/re-handshake
+  logic may only ever act on an **authenticated** message.
+  - A **forged** packet (bad tag) is dropped **silently**: it does not move the
+    replay window, does not count as a violation, does not change the session
+    and does **not** ask for a re-handshake. Without this, anyone could force
+    a re-handshake (and burn the handshake budget) with a single made-up
+    packet.
+  - A **genuine** message whose nonce is more than 128 ahead of the expectation
+    is the only thing that triggers the clean re-handshake of §6.1 — our state
+    and the peer's have drifted, and the message is authenticated, so we can
+    trust that it really came from that peer.
+  - Because the associated data binds the timestamp, a ciphertext **re-wrapped
+    in a fresh outer packet** (a new timestamp, a new message id) no longer
+    authenticates: the AEAD catches that replay. The replay window remains
+    the second line of defence and the drift detector.
 - Re-key after the Noise library's recommended message count / interval
   (Phase D). Meshline's own bound is **1 000 messages per direction**, plus
   24 h of session age and 7 days since the first transport message.

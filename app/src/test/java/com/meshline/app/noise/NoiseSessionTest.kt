@@ -173,7 +173,8 @@ class NoiseSessionTest {
             // Deliver it twice. The second copy is re-wrapped in a *fresh*
             // outer packet (new timestamp, new message id) — exactly what an
             // attacker does, and exactly what the outer dedupe cannot catch.
-            // Only the replay window stops it.
+            // The associated data binds the timestamp, so the copy no longer
+            // authenticates: it is dropped silently and never decrypted again.
             b.router.onReceive(PacketCodec.encode(packet), nodes[1].id)
             settle()
             val afterFirst = b.events.count { it is SessionManager.Event.Plaintext }
@@ -183,7 +184,14 @@ class NoiseSessionTest {
 
             assertEquals("the message must be delivered exactly once", 1, afterFirst)
             assertEquals("the replay must not be delivered again", 1, b.events.count { it is SessionManager.Event.Plaintext })
-            assertTrue("the replay must be counted", b.manager.counters.replaysRejected > 0)
+            assertTrue(
+                "the replay must be dropped (unauthenticated copy)",
+                b.manager.counters.decryptFailures > 0 || b.manager.counters.replaysRejected > 0,
+            )
+            assertTrue(
+                "a replay must not request a re-handshake",
+                b.events.none { it is SessionManager.Event.RehandshakeNeeded },
+            )
         } finally {
             nodes.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
         }
@@ -211,8 +219,18 @@ class NoiseSessionTest {
             settle()
 
             assertEquals("a tampered message must not be delivered", 0, b.events.count { it is SessionManager.Event.Plaintext })
-            assertTrue("the decryption failure must be counted", b.manager.counters.decryptFailures > 0)
-            assertTrue("a silent re-handshake must be requested", b.events.any { it is SessionManager.Event.RehandshakeNeeded })
+            assertTrue("the failed tag must be counted", b.manager.counters.decryptFailures > 0)
+            // A bad tag is dropped silently: it must not ask for a re-handshake
+            // (otherwise anyone could force one with a single made-up packet).
+            assertTrue(
+                "a forged packet must not request a re-handshake",
+                b.events.none { it is SessionManager.Event.RehandshakeNeeded },
+            )
+            assertEquals(
+                "a forged packet must not change the session",
+                false,
+                b.manager.session(a.id)?.needsRekey,
+            )
         } finally {
             nodes.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
         }

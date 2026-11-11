@@ -37,6 +37,13 @@ class SessionManager(
      * somebody (NOISE_DESIGN §7.1) and the handshake is aborted.
      */
     private val knownX25519: (ByteArray) -> ByteArray? = { null },
+    /**
+     * Is this sender in the **protected key tier** (QR-verified contact,
+     * connected neighbour)? Protected senders may spend the reserved half of
+     * the global handshake budget, so a flood of unknown senders cannot starve
+     * the people the user actually talks to.
+     */
+    private val isProtectedSender: (ByteArray) -> Boolean = { false },
 ) {
     /** Our own id (the outer packets' senderId). */
     val ownId: ByteArray = MessageIds.idFromPublicKey(localEd25519PublicKey)
@@ -101,7 +108,10 @@ class SessionManager(
         val existing = sessions[key]
         if (existing != null) {
             when (existing.state) {
-                SecureSession.State.ESTABLISHED -> return null
+                SecureSession.State.ESTABLISHED ->
+                    // An established session is only replaced when it needs a
+                    // re-key (age, message count, or a drift we detected).
+                    if (!existing.needsRekey) return null
                 SecureSession.State.INITIATING, SecureSession.State.RESP_AWAIT ->
                     // A handshake is already running: retransmit the last message.
                     return existing.pendingHandshakePacket
@@ -118,7 +128,7 @@ class SessionManager(
         }
         // The global work budget: a peer that reconnects under a new BLE
         // address must not be able to make us do endless key agreement.
-        if (!limiter.allowDhWork(NoiseProtocol.DH_COST_START)) {
+        if (!limiter.allowDhWork(NoiseProtocol.DH_COST_START, isProtectedSender(peerId))) {
             counters.handshakeBudgetExhausted++
             return null
         }
@@ -209,8 +219,9 @@ class SessionManager(
         // Global work budget: charge the X25519 operations this step will
         // cost *before* doing them. A peer that reconnects under a new BLE
         // address gets a fresh per-connection bucket, but not a fresh work
-        // budget (NOISE_DESIGN §5).
-        if (!limiter.allowDhWork(NoiseProtocol.dhCost(payload.step))) {
+        // budget (NOISE_DESIGN §5). Senders in the protected key tier may
+        // also spend the reserved half of that budget.
+        if (!limiter.allowDhWork(NoiseProtocol.dhCost(payload.step), isProtectedSender(packet.senderId))) {
             counters.handshakeBudgetExhausted++
             return events
         }
@@ -421,7 +432,30 @@ class SessionManager(
             events += Event.Violation(packet.senderId.copyOf(), connectionKey, "malformed transport payload")
             return events
         }
-        // Replay window first (§4.1): never decrypt a nonce twice.
+        val recv = session.recv
+        if (recv == null) {
+            events += Event.Violation(packet.senderId.copyOf(), connectionKey, "no receive cipher")
+            return events
+        }
+
+        // **Authenticate first (§4.1).** The AEAD tag must verify *before* the
+        // replay window or any drift logic may act on the packet:
+        //  - a forged packet (bad tag) is dropped silently. It must not move
+        //    the replay window, must not count as a violation and must not ask
+        //    for a re-handshake — otherwise anyone could force us to re-handshake
+        //    (and burn the handshake budget) with a single made-up packet.
+        //  - only an **authenticated** message may tell us that our state has
+        //    drifted (a nonce beyond the window). That is the one case where a
+        //    clean re-handshake is the right answer (NOISE_DESIGN §6.1).
+        val plaintext = try {
+            recv.decrypt(payload.ciphertext, PacketCodec.headerAd(packet), payload.nonce)
+        } catch (e: Exception) {
+            // Bad tag: dropped silently. No session state change, no event.
+            counters.decryptFailures++
+            return events
+        }
+
+        // The tag verified: now the nonce may be judged.
         when (session.replayWindow.accept(payload.nonce)) {
             ReplayWindow.Decision.REPLAY -> {
                 counters.replaysRejected++
@@ -434,28 +468,15 @@ class SessionManager(
                 // The counter drifted further than the replay window allows:
                 // our session state and the peer's have diverged (too many
                 // messages lost, or the peer re-keyed). NOISE_DESIGN §6.1 says
-                // recover with a *silent re-handshake*, not with an error.
+                // recover with a *silent re-handshake*, not with an error. This
+                // is only reachable for an **authenticated** message, so it
+                // cannot be triggered by a forgery.
                 session.needsRekey = true
                 events += Event.RehandshakeNeeded(packet.senderId.copyOf())
                 events += Event.Violation(packet.senderId.copyOf(), connectionKey, "nonce beyond the replay window")
                 return events
             }
             ReplayWindow.Decision.ACCEPTED -> Unit
-        }
-        val recv = session.recv
-        if (recv == null) {
-            events += Event.Violation(packet.senderId.copyOf(), connectionKey, "no receive cipher")
-            return events
-        }
-        val plaintext = try {
-            recv.decrypt(payload.ciphertext, PacketCodec.headerAd(packet), payload.nonce)
-        } catch (e: Exception) {
-            // Authentication failed: stale session state or tampering. The
-            // protocol recovers with a silent re-handshake (§6.1).
-            counters.decryptFailures++
-            session.needsRekey = true
-            events += Event.RehandshakeNeeded(packet.senderId.copyOf())
-            return events
         }
         session.messagesReceived++
         session.lastUsedAtMs = nowProvider()

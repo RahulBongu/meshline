@@ -66,6 +66,17 @@ object NoiseProtocol {
      */
     const val MAX_X25519_OPS_PER_MINUTE: Int = 300
 
+    /**
+     * Part of [MAX_X25519_OPS_PER_MINUTE] that is reserved for senders in the
+     * **protected key tier** (QR-verified contacts, connected neighbours).
+     *
+     * Junk handshakes cannot spend this half, so a flood of unknown senders
+     * can never starve the handshake budget of the people you actually talk
+     * to. A protected sender may use either half; an unknown sender only the
+     * general one.
+     */
+    const val RESERVED_X25519_OPS_PER_MINUTE: Int = 150
+
     /** X25519 operations spent when *starting* a handshake (the ephemeral key pair). */
     const val DH_COST_START: Int = 1
 

@@ -85,8 +85,8 @@ interface OutboxDao {
     @Query("SELECT * FROM outbox ORDER BY createdAtMs ASC")
     suspend fun all(): List<OutboxEntity>
 
-    @Query("UPDATE outbox SET state = :state, attempts = attempts + 1 WHERE id = :id")
-    suspend fun updateState(id: Long, state: String)
+    @Query("UPDATE outbox SET state = :state, attempts = :attempts WHERE id = :id")
+    suspend fun updateState(id: Long, state: String, attempts: Int)
 
     @Query("DELETE FROM outbox WHERE id = :id")
     suspend fun delete(id: Long)
@@ -114,23 +114,12 @@ class OutboxRepository(
     private val dao: OutboxDao,
     /** How long a queued message may wait before it is dropped. */
     private val maxAgeMs: Long = MAX_AGE_MS,
-) {
-    /** Queues a plaintext for [peerIdHex]; returns the row id. */
-    suspend fun queue(peerIdHex: String, plaintext: ByteArray, nowMs: Long): Long =
-        dao.insert(
-            OutboxEntity(
-                peerIdHex = peerIdHex,
-                plaintext = plaintext.copyOf(),
-                createdAtMs = nowMs,
-                state = OutboxState.QUEUED.name,
-            )
-        )
-
+) : com.meshline.app.noise.Outbox {
     /** The rows waiting for a session for [peerIdHex], oldest first. */
     suspend fun queuedFor(peerIdHex: String): List<OutboxEntity> = dao.queuedFor(peerIdHex)
 
     /** Marks a row as handed to the router. */
-    suspend fun markSent(id: Long) = dao.updateState(id, OutboxState.SENT.name)
+    suspend fun markSent(id: Long) = dao.updateState(id, OutboxState.SENT.name, 1)
 
     /** Drops a row (expired, or the user cancelled it). */
     suspend fun drop(id: Long) = dao.delete(id)
@@ -143,6 +132,38 @@ class OutboxRepository(
 
     /** Panic wipe (§7): the outbox goes with the identity. */
     suspend fun wipe() = dao.deleteAll()
+
+    // ---- com.meshline.app.noise.Outbox (the private-message layer) ----
+
+    override suspend fun queue(peerIdHex: String, envelope: ByteArray, nowMs: Long): Long =
+        dao.insert(
+            OutboxEntity(
+                peerIdHex = peerIdHex,
+                plaintext = envelope.copyOf(),
+                createdAtMs = nowMs,
+                state = OutboxState.QUEUED.name,
+            )
+        )
+
+    override suspend fun rows(): List<com.meshline.app.noise.OutboxRow> = dao.all().map { row ->
+        com.meshline.app.noise.OutboxRow(
+            id = row.id,
+            peerIdHex = row.peerIdHex,
+            envelope = row.plaintext.copyOf(),
+            createdAtMs = row.createdAtMs,
+            state = runCatching { com.meshline.app.noise.OutboxState.valueOf(row.state) }
+                .getOrDefault(com.meshline.app.noise.OutboxState.QUEUED),
+            attempts = row.attempts,
+        )
+    }
+
+    override suspend fun markAttempt(id: Long, state: com.meshline.app.noise.OutboxState, attempts: Int) {
+        dao.updateState(id, state.name, attempts)
+    }
+
+    override suspend fun delete(id: Long) = dao.delete(id)
+
+    override suspend fun deleteOlderThan(cutoffMs: Long): Int = dao.deleteOlderThan(cutoffMs)
 
     companion object {
         /** 12 h — the MVP store-and-forward window (NOISE_DESIGN §6.1). */
