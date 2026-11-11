@@ -66,6 +66,12 @@ enum class OutboxState {
 
     /** Handed to the router; waiting for the receipt. */
     SENT,
+
+    /** The peer acknowledged it (RECEIPT Delivered). */
+    DELIVERED,
+
+    /** The peer opened it (RECEIPT Read). */
+    READ,
 }
 
 /**
@@ -96,12 +102,15 @@ class PrivateMessenger(
     private val randomBytes: (Int) -> ByteArray = { size ->
         java.security.SecureRandom().let { rnd -> ByteArray(size).also { rnd.nextBytes(it) } }
     },
+    /**
+     * The receiver's record of the message ids it already showed. It must
+     * survive a process restart, otherwise a retry that arrives after the
+     * restart would be shown a second time.
+     */
+    private val dedupe: MessageDedupe = InMemoryMessageDedupe(),
 ) {
     /** The backoff schedule for retries. */
     private val retrySchedule = HashMap<Long, Long>()
-
-    /** The application-level ids we have already shown, per peer. */
-    private val shownIds = HashMap<String, LinkedHashSet<String>>()
 
     /** Queues a message for [peerId] and returns the outbox row id. */
     suspend fun send(peerId: ByteArray, peerIdHex: String, text: ByteArray): Long {
@@ -125,6 +134,9 @@ class PrivateMessenger(
         val now = nowProvider()
         val packets = mutableListOf<MeshPacket>()
         for (row in outbox.rows()) {
+            // A message that was acknowledged is done: it stays in the outbox
+            // so the chat can show its state, but it is never retried.
+            if (row.state == OutboxState.DELIVERED || row.state == OutboxState.READ) continue
             val due = retrySchedule[row.id] ?: now
             if (due > now) continue
             val peerId = row.peerIdHex.hexToBytes()
@@ -138,16 +150,18 @@ class PrivateMessenger(
     }
 
     /**
-     * Handles a receipt: the row is done and leaves the outbox.
-     * Returns true when a row was actually removed.
+     * Handles a receipt: the row leaves the *retry* queue and records the
+     * state the user sees (Delivered / Read). The row itself stays until the
+     * outbox expiry, so the chat still shows the message with its state.
+     * Returns true when a row was updated.
      */
-    suspend fun onReceipt(peerIdHex: String, messageId: ByteArray): Boolean {
+    suspend fun onReceipt(peerIdHex: String, messageId: ByteArray, kind: OutboxState = OutboxState.DELIVERED): Boolean {
         val id = hex(messageId)
         val row = outbox.rows().firstOrNull { r ->
             r.peerIdHex == peerIdHex && runCatching { hex(PrivateEnvelope.decode(r.envelope).messageId) }
                 .getOrNull() == id
         } ?: return false
-        outbox.delete(row.id)
+        outbox.markAttempt(row.id, kind, row.attempts)
         retrySchedule.remove(row.id)
         return true
     }
@@ -166,35 +180,24 @@ class PrivateMessenger(
      *
      * Returns the envelope the first time an application-level id is seen and
      * a repeat (with [PlaintextResult.isNew] false) for a message we already
-     * showed — that is what makes the message appear exactly once.
+     * showed — that is what makes the message appear exactly once. The dedupe
+     * record is persisted, so a retry that arrives after a **process restart**
+     * is recognised as well.
      */
-    fun onPlaintext(peerIdHex: String, plaintext: ByteArray): PlaintextResult? {
+    suspend fun onPlaintext(peerIdHex: String, plaintext: ByteArray): PlaintextResult? {
         val envelope = try {
             PrivateEnvelope.decode(plaintext)
         } catch (e: PrivateEnvelope.MalformedEnvelope) {
             return null
         }
-        val seen = shownIds.getOrPut(peerIdHex) { LinkedHashSet() }
-        val id = hex(envelope.messageId)
-        val isNew = seen.add(id)
-        if (isNew) {
-            // Bound the memory: the oldest ids fall out first.
-            while (seen.size > MAX_SHOWN_IDS) {
-                val oldest = seen.firstOrNull() ?: break
-                seen.remove(oldest)
-            }
-        }
+        val isNew = dedupe.isNew(peerIdHex, hex(envelope.messageId), nowProvider())
         return PlaintextResult(envelope, isNew)
     }
-
-    /** The number of application-level ids we remember per peer. */
-    fun shownCount(peerIdHex: String): Int = shownIds[peerIdHex]?.size ?: 0
 
     /**
      * When the next retry is due (the earliest scheduled attempt), or null when
      * nothing is queued.
-     */
-    suspend fun nextDueAtMs(): Long? {
+     */    suspend fun nextDueAtMs(): Long? {
         val now = nowProvider()
         return outbox.rows().mapNotNull { retrySchedule[it.id] }.filter { it > now }.minOrNull()
     }
@@ -211,7 +214,6 @@ class PrivateMessenger(
     /** Forgets every session and every outbox row (panic wipe). */
     suspend fun wipe() {
         retrySchedule.clear()
-        shownIds.clear()
         outbox.deleteOlderThan(Long.MAX_VALUE)
     }
 
@@ -229,8 +231,5 @@ class PrivateMessenger(
 
         /** The backoff never grows past this. */
         const val MAX_BACKOFF_MS: Long = 30 * 60 * 1_000
-
-        /** How many application-level ids we remember per peer. */
-        const val MAX_SHOWN_IDS: Int = 256
     }
 }

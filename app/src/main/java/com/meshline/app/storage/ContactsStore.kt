@@ -51,14 +51,22 @@ interface ContactsDao {
 }
 
 @Database(
-    entities = [ContactEntity::class, NoiseSessionEntity::class, OutboxEntity::class],
-    version = 3,
+    entities = [
+        ContactEntity::class,
+        NoiseSessionEntity::class,
+        OutboxEntity::class,
+        SeenMessageEntity::class,
+        InboxEntity::class,
+    ],
+    version = 5,
     exportSchema = false,
 )
 abstract class MeshlineDatabase : RoomDatabase() {
     abstract fun contactsDao(): ContactsDao
     abstract fun noiseSessionDao(): NoiseSessionDao
     abstract fun outboxDao(): OutboxDao
+    abstract fun seenMessageDao(): SeenMessageDao
+    abstract fun inboxDao(): InboxDao
 
     companion object {
         /**
@@ -107,6 +115,46 @@ abstract class MeshlineDatabase : RoomDatabase() {
                         `createdAtMs` INTEGER NOT NULL,
                         `state` TEXT NOT NULL,
                         `attempts` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+        /**
+         * v3 → v4 adds the `seen_message_ids` table: the receiver's record of
+         * the application-level message ids it has shown. The retention (30
+         * days) is longer than the sender's outbox expiry (12 h), so a late
+         * retry is acknowledged but not shown twice.
+         */
+        val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `seen_message_ids` (
+                        `messageIdHex` TEXT NOT NULL,
+                        `peerIdHex` TEXT NOT NULL,
+                        `seenAtMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageIdHex`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+        /**
+         * v4 → v5 adds the `inbox` table: the private messages we received
+         * (plaintext, protected by SQLCipher).
+         */
+        val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `inbox` (
+                        `messageIdHex` TEXT NOT NULL,
+                        `peerIdHex` TEXT NOT NULL,
+                        `text` BLOB NOT NULL,
+                        `createdAtMs` INTEGER NOT NULL,
+                        `read` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageIdHex`)
                     )
                     """.trimIndent()
                 )

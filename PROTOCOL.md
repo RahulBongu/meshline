@@ -550,6 +550,19 @@ nonce window (see `GROUPS_DESIGN.md` §5).
   peer is away shows *Queued* until the silent re-handshake completes, then
   flips to *Sent*.
   - A panic wipe (§7) erases every session, every peer record and the outbox.
+- **Handshake tiers (D2, FR-12 review):** the reserved half of the global
+  handshake budget is split **per sender**: a QR-verified contact may take
+  **60 X25519 operations / minute**, a connected neighbour that has delivered
+  a **verified ANNOUNCE** may take **30**, and everybody else only the general
+  half. A connected neighbour is protected **only after** it has delivered a
+  verified ANNOUNCE — being linked is not enough, otherwise a peer that
+  connects and stays silent could spend the reserved budget. One peer can
+  therefore never starve a contact's handshake.
+- **Receiver-side dedupe (D2):** the application-level message ids the
+  receiver has shown are persisted in the `seen_message_ids` table (DB version
+  4, `MIGRATION_3_4`) with a **30-day retention** — longer than the sender's
+  12 h outbox expiry. A retry that arrives after a process restart is
+  acknowledged again but **not shown twice**.
 - **Fingerprint** shown in the UI = `SHA-256(ed25519Pk ‖ x25519Pk)` as 64 hex chars,
   displayed in groups of 4. Verification by QR / in-person compare (PRD FR-13, P1)
   is *not* in MVP; MVP shows the fingerprint and marks TOFU (trust-on-first-use)

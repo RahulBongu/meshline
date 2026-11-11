@@ -64,14 +64,8 @@ data class OutboxEntity(
     }
 }
 
-/** The user-visible state of an outbox row. */
-enum class OutboxState {
-    /** Waiting for a usable session (the message is not on the wire yet). */
-    QUEUED,
-
-    /** Handed to the router (encrypted under the live session). */
-    SENT,
-}
+/** The user-visible state of an outbox row (see `com.meshline.app.noise.OutboxState`). */
+typealias OutboxState = com.meshline.app.noise.OutboxState
 
 @Dao
 interface OutboxDao {

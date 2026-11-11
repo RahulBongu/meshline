@@ -128,8 +128,12 @@ class HandshakeRateLimiterTest {
         val limiter = HandshakeRateLimiter { now }
         val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
         repeat(generalCap) { assertTrue(limiter.allowDhWork(1)) }
-        repeat(NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE) { assertTrue(limiter.allowDhWork(1, protectedSender = true)) }
-        assertFalse("the budget must be spent", limiter.allowDhWork(1, protectedSender = true))
+        // The reserve is shared but capped per sender, so spend it with
+        // several distinct contacts.
+        var contact = 0
+        while (limiter.allowDhWork(1, HandshakeTier.CONTACT, "contact-$contact")) contact++
+        assertTrue("the reserve must be spendable", contact > 0)
+        assertFalse("the budget must be spent", limiter.allowDhWork(1, HandshakeTier.CONTACT, "contact-x"))
         advance(61_000)
         assertTrue("the budget must refill after a minute", limiter.allowDhWork(1))
         // Everything is available again: the general half (minus the one op we
@@ -138,21 +142,5 @@ class HandshakeRateLimiterTest {
             generalCap - 1 + NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE,
             limiter.remainingDhOps(),
         )
-    }
-
-    @Test
-    fun `the reserved half keeps room for protected senders`() {
-        val limiter = HandshakeRateLimiter { now }
-        val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
-        // A junk sender may only spend the general half.
-        repeat(generalCap) { assertTrue("junk op $it", limiter.allowDhWork(1, protectedSender = false)) }
-        assertFalse("the junk sender must not touch the reserve", limiter.allowDhWork(1, protectedSender = false))
-
-        // A protected sender (QR contact, connected neighbour) still has the
-        // reserved half — junk cannot starve it.
-        repeat(NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE) {
-            assertTrue("protected op $it", limiter.allowDhWork(1, protectedSender = true))
-        }
-        assertFalse("the reserve is finite too", limiter.allowDhWork(1, protectedSender = true))
     }
 }

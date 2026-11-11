@@ -110,9 +110,14 @@ INTERNET permission on the **merged manifest** or in
 `aapt dump permissions app-universal-debug.apk`.
 
 On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
-`NoiseNonceOrderingTest` 6, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 9,
+`NoiseNonceOrderingTest` 7, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 9,
+`HandshakeTierTest` 4, `MessageDedupeTest` 3, `PrivateOutboxTest` 1,
 `SessionCodecTest` 4, `SessionStoreTest` 2, `OutboxStoreTest` 2 —
-**111 tests, 0 failures** in total.
+**120 tests, 0 failures** in total. The instrumented suite (device only) is
+`DatabaseInstrumentedTest` 1, `IdentityStoreInstrumentedTest` 4,
+`DbPassphraseInstrumentedTest` 1, `SecureStorageStatusTest` 2,
+`SecureStoresInstrumentedTest` 4 — **12 tests, compiled only** (no device is
+attached in this checkout).
 
 > **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
 > typically uninstalls the app (and its data) after the run, and the
@@ -308,8 +313,8 @@ Measured with `:app:assembleRelease` (minified, resource-shrunk, unsigned) on
 |---|---:|---:|---|
 | `app-arm64-v8a-release-unsigned.apk` | 5,673,688 | 5.41 | < 25 MB |
 | `app-armeabi-v7a-release-unsigned.apk` | 5,311,786 | 5.07 | < 25 MB |
-| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,682,204 | 5.42 | < 25 MB |
-| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,320,302 | 5.07 | < 25 MB |
+| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,722,844 | 5.45 | < 25 MB |
+| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,360,938 | 5.11 | < 25 MB |
 
 Each release/releaseSmoke APK contains exactly one ABI and
 `lib/.../libsqlcipher.so`, and none of them declares
@@ -320,11 +325,12 @@ smoke test only, never for distribution. The universal debug APK is
 emulator/UI testing; it is not a release artifact. (The `d2-noise` branch
 adds ~63 KB of `noise-java` on top of the D1 sizes.)
 
-## D2 integration status (protocol + storage only, branch `d2-noise`)
+## D2 integration status (wired, awaiting phone verification)
 
-The D2 layer is **coded and tested, but not wired in**: nothing in
-`BleTransport`, `BleMeshService` or the UI calls it yet, so the shipping app
-behaves exactly like `d1-identity` until the D1 phone test passes.
+The D2 layer is **wired into the running app** on this branch: `BleMeshService`
+owns the secure channel, the router delivers the handshake and private-message
+packets to it, and the UI shows the private chats. It is still **unverified on
+real phones** — the checklist above is the gate.
 
 What exists (all pure JVM, all simulator-tested):
 - **Noise state machine** (`noise/NoiseHandshake.kt`) — `Noise_XX_25519_ChaChaPoly_SHA256`
@@ -357,6 +363,15 @@ What exists (all pure JVM, all simulator-tested):
 - **Global handshake work budget** (`noise/HandshakeRateLimiter.kt`) — 300
   X25519 operations per minute across *all* connections, because the
   per-connection buckets reset when a peer reconnects under a new BLE address.
+  Half of it is reserved for protected-tier senders (QR contacts and connected
+  neighbours that have delivered a verified ANNOUNCE).
+- **Wiring** (`service/SecureChannel.kt`): the router's delivered packets feed
+  the Noise engine; the engine's outgoing packets go back into the router; the
+  service ticks the handshake retransmits, the outbox retries, the re-keys and
+  the expiry every 2 s. The UI has **Chats** tabs (Nearby / Private), a
+  private chat with the honest **Queued / Sent / Delivered / Read** states, a
+  key-change warning that needs an explicit accept, the verified badge (QR
+  contacts only) and the panic wipe behind three taps plus a confirmation.
 
 Wire format: `PROTOCOL.md` §6.3 and §6.5. Design and its amendments:
 `NOISE_DESIGN.md`.
@@ -368,6 +383,24 @@ amendment A2). Everything else in the store works as designed. The
 `noise_sessions.transportKey` column is **never written** (the store's
 mapping always stores NULL), so there is no key material on disk that the app
 cannot use — and no second secret for a panic wipe to chase.
+
+### Review round 3 (D2)
+
+- **Protected handshake tier, split per sender.** The reserved half of the
+  global handshake budget is split per sender: a QR-verified contact may take
+  **60 X25519 ops/min**, a connected neighbour that has delivered a **verified
+  ANNOUNCE** may take **30**, everybody else only the general half. Being
+  *connected* is not enough for protection — a peer that connects and stays
+  silent must not be able to spend the reserved budget. A malicious peer can
+  no longer starve a contact's handshake.
+- **The receiver's dedupe is persisted.** The application-level message ids
+  the receiver has shown live in the `seen_message_ids` table (SQLCipher,
+  DB version 4) with a **30-day retention** — longer than the sender's 12 h
+  outbox expiry. A retry that arrives after a process restart is acknowledged
+  again but **not shown twice**.
+- **`git show --stat 970785b`** was audited: 15 files, all source, tests and
+  docs — nothing that should not be tracked. The repository tracks 100 files
+  and contains no build output, APK, log, keystore or `local.properties`.
 
 ### Review round 2 (D2)
 
@@ -417,6 +450,55 @@ Four review items were closed on this branch:
    all connections, because the per-connection buckets reset when a peer
    reconnects under a new BLE address.
 4. **The transport key column is never written** — see above.
+
+**D2 phone checklist (private chat, run after installing the `d2-noise` build):**
+
+> Install the **`releaseSmoke`** APK (signed with the debug key, so no manual
+> signing): `app/build/outputs/apk/releaseSmoke/app-arm64-v8a-releaseSmoke.apk`
+> (or the `armeabi-v7a` variant). Both phones must run the **same** build.
+> Run this **after** any instrumented-test run (they wipe the app data).
+
+1. **A messages B → handshake → Delivered.**
+   1. Start the mesh on both phones; wait until both show each other in the
+      **Nearby** tab's peer list.
+   2. On A: **Private (encrypted)** tab → tap B (or open **Contacts** and tap
+      B) → type `hello from A` → **Send (encrypted)**.
+   3. The message shows **Queued** first (no session yet), then **Sent** once
+      the Noise handshake finished, then **Delivered** when B's receipt arrives.
+   4. On B: the **Private** tab shows B's chat with A and the message text.
+   5. Open B's chat → A's message flips to **Read**.
+   *Expect:* the handshake takes a moment (three messages over the mesh); the
+   state goes Queued → Sent → Delivered → Read. The public tab says nothing
+   about the private message — it is encrypted end to end.
+2. **B is force-stopped, then relaunched.**
+   1. On B: force-stop Meshline (Settings → Apps → Meshline → Force stop).
+   2. On A: send another private message to B. It stays **Queued** (or
+      **Sent**, retrying) — B is not there to acknowledge it.
+   3. Relaunch B (it comes back with a **new** session — the transport keys
+      cannot be persisted, so B silently re-handshakes).
+   4. The message now goes out and A's state moves to **Sent** and then
+      **Delivered**; B shows it once.
+   *Expect:* A's message survives the restart (the outbox is in the encrypted
+   database) and is delivered after B is back. B must **not** show it twice.
+3. **Wipe on one phone, then re-add by QR.**
+   1. On A: **Nearby** tab → scroll to **Danger zone** → tap **Panic wipe**
+      three times → **Wipe everything** → confirm.
+   2. A now has a **new identity** (new 4-hex id, new QR code); its contacts
+      and chats are gone.
+   3. On B: A appears with a different id. B's chat with A shows the
+      **key-change warning** ("Identity changed — possible impersonation").
+      Choose **Accept new key** (or **Reject & block**).
+   4. On B: scan A's **new** QR code → **Add verified** → the verified badge
+      returns.
+   5. Send a private message both ways again → it is delivered.
+   *Expect:* the wipe is complete and irreversible; the old peer sees a new
+   key and is asked to accept it explicitly — never silently.
+4. **Logcat privacy check (both phones).**
+   ```powershell
+   adb -s <serial> logcat -s BleTransport BleMeshService
+   ```
+   *Expect:* no keys, no fingerprints, no message text — only connection and
+   GATT state.
 
 ## Open issues after D1
 

@@ -47,10 +47,19 @@ import com.meshline.app.security.Identity
 import com.meshline.app.security.QrPayload
 import com.meshline.app.security.SecureStorageStatus
 import com.meshline.app.service.BleMeshService
+import com.meshline.app.service.KeyChangeEvent
 import com.meshline.app.service.MeshStatsSnapshot
+import com.meshline.app.service.PrivateChatMessage
+import com.meshline.app.service.PrivatePeer
 import com.meshline.app.storage.ContactsRepository
+import com.meshline.app.ui.ChatsScreen
 import com.meshline.app.ui.ContactsScreen
+import com.meshline.app.ui.KeyChangeDialog
 import com.meshline.app.ui.MyProfileScreen
+import com.meshline.app.ui.PanicWipeButton
+import com.meshline.app.ui.PanicWipeDialog
+import com.meshline.app.ui.PrivateChatScreen
+import com.meshline.app.ui.PrivatePeerList
 import com.meshline.app.ui.ScanConfirmScreen
 import com.meshline.app.ui.ScanQRScreen
 import com.meshline.app.ui.SecureStorageResetDialog
@@ -71,6 +80,11 @@ class MainActivity : ComponentActivity() {
                 App(
                     onStart = { startMesh() },
                     onSendPublic = { text -> sendPublic(text) },
+                    onSendPrivate = { peer, text -> sendPrivate(peer, text) },
+                    onOpenChat = { peer -> openChat(peer) },
+                    onAcceptKey = { peer -> acceptKey(peer) },
+                    onRejectKey = { peer -> rejectKey(peer) },
+                    onPanicWipe = { panicWipe() },
                 )
             }
         }
@@ -87,6 +101,45 @@ class MainActivity : ComponentActivity() {
         val intent = Intent(this, BleMeshService::class.java)
             .setAction(BleMeshService.ACTION_SEND_PUBLIC)
             .putExtra(BleMeshService.EXTRA_TEXT, text)
+        startForegroundService(intent)
+    }
+
+    /** Queues a private message (it stays Queued until a session exists). */
+    private fun sendPrivate(peerIdHex: String, text: String) {
+        if (text.isBlank()) return
+        val intent = Intent(this, BleMeshService::class.java)
+            .setAction(BleMeshService.ACTION_SEND_PRIVATE)
+            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+            .putExtra(BleMeshService.EXTRA_TEXT, text)
+        startForegroundService(intent)
+    }
+
+    /** Opens a chat: start the handshake if needed and mark what we read. */
+    private fun openChat(peerIdHex: String) {
+        val intent = Intent(this, BleMeshService::class.java)
+            .setAction(BleMeshService.ACTION_OPEN_CHAT)
+            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+        startForegroundService(intent)
+    }
+
+    private fun acceptKey(peerIdHex: String) {
+        val intent = Intent(this, BleMeshService::class.java)
+            .setAction(BleMeshService.ACTION_ACCEPT_KEY)
+            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+        startForegroundService(intent)
+    }
+
+    private fun rejectKey(peerIdHex: String) {
+        val intent = Intent(this, BleMeshService::class.java)
+            .setAction(BleMeshService.ACTION_REJECT_KEY)
+            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+        startForegroundService(intent)
+    }
+
+    /** The panic wipe: the identity, the contacts and every message go. */
+    private fun panicWipe() {
+        val intent = Intent(this, BleMeshService::class.java)
+            .setAction(BleMeshService.ACTION_PANIC_WIPE)
         startForegroundService(intent)
     }
 
@@ -109,10 +162,10 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { HOME, MY_QR, SCAN, CONTACTS, SETTINGS }
+private enum class Screen { HOME, MY_QR, SCAN, CONTACTS, SETTINGS, PRIVATE_CHAT }
 
 @Composable
-private fun App(onStart: () -> Unit, onSendPublic: (String) -> Unit) {
+private fun App(onStart: () -> Unit, onSendPublic: (String) -> Unit, onSendPrivate: (String, String) -> Unit, onOpenChat: (String) -> Unit, onAcceptKey: (String) -> Unit, onRejectKey: (String) -> Unit, onPanicWipe: () -> Unit) {
     val app = LocalContext.current.applicationContext
     val identityStore = remember { AndroidKeystoreIdentityStore(app) }
     val profileStore = remember { ProfileStore(app) }
@@ -125,6 +178,12 @@ private fun App(onStart: () -> Unit, onSendPublic: (String) -> Unit) {
     var screen by remember { mutableStateOf(Screen.HOME) }
     var pendingCard by remember { mutableStateOf<QrPayload.ContactCard?>(null) }
     var scanError by remember { mutableStateOf<String?>(null) }
+    var openPeerId by remember { mutableStateOf<String?>(null) }
+    var wipeArmed by remember { mutableStateOf(false) }
+
+    val privateMessages by BleMeshService.privateMessages.collectAsState()
+    val privatePeers by BleMeshService.privatePeers.collectAsState()
+    val keyChange by BleMeshService.keyChange.collectAsState()
 
     val contacts by remember(contactsRepo) { contactsRepo.observeAll() }
         .collectAsState(initial = emptyList())
@@ -153,6 +212,26 @@ private fun App(onStart: () -> Unit, onSendPublic: (String) -> Unit) {
 
     resetEvent?.let { event ->
         SecureStorageResetDialog(event) { resetEvent = null }
+    }
+
+    // A key change needs an explicit decision (§7.2) — it is never applied
+    // silently, and it is never dismissed by a tap outside.
+    keyChange?.let { event ->
+        KeyChangeDialog(
+            event = event,
+            onAccept = { onAcceptKey(event.peerIdHex) },
+            onReject = { onRejectKey(event.peerIdHex) },
+        )
+    }
+
+    if (wipeArmed) {
+        PanicWipeDialog(
+            onConfirm = {
+                wipeArmed = false
+                onPanicWipe()
+            },
+            onCancel = { wipeArmed = false },
+        )
     }
 
     val id = identity
@@ -206,7 +285,10 @@ private fun App(onStart: () -> Unit, onSendPublic: (String) -> Unit) {
                 )
             ),
         )
-        screen == Screen.CONTACTS -> ContactsScreen(contacts)
+        screen == Screen.CONTACTS -> ContactsScreen(
+            contacts = contacts,
+            onOpen = { c -> onOpenChat(c.senderIdHex) },
+        )
         screen == Screen.SETTINGS -> SettingsProfileScreen(
             store = profileStore,
             initial = prof,
@@ -215,24 +297,53 @@ private fun App(onStart: () -> Unit, onSendPublic: (String) -> Unit) {
                 screen = Screen.HOME
             },
         )
-        else -> Home(
-            profileLabel = ProfileStore.displayName(prof, id.fingerprintShort),
-            contactsCount = contacts.size,
-            onStart = onStart,
-            onMyQr = { screen = Screen.MY_QR },
-            onScan = {
-                if (ContextCompat.checkSelfPermission(app, Manifest.permission.CAMERA) ==
-                    PackageManager.PERMISSION_GRANTED
-                ) {
-                    scanError = null
-                    screen = Screen.SCAN
-                } else {
-                    cameraPermission.launch(Manifest.permission.CAMERA)
-                }
+        screen == Screen.PRIVATE_CHAT -> {
+            val peerId = openPeerId
+            val peer = privatePeers.firstOrNull { it.peerIdHex == peerId }
+            if (peer == null) {
+                screen = Screen.HOME
+            } else {
+                PrivateChatScreen(
+                    peer = peer,
+                    messages = privateMessages.filter { it.peerIdHex == peer.peerIdHex },
+                    onSend = { text -> onSendPrivate(peer.peerIdHex, text) },
+                    onBack = { screen = Screen.HOME },
+                )
+            }
+        }
+        else -> ChatsScreen(
+            nearby = {
+                Home(
+                    profileLabel = ProfileStore.displayName(prof, id.fingerprintShort),
+                    contactsCount = contacts.size,
+                    onStart = onStart,
+                    onMyQr = { screen = Screen.MY_QR },
+                    onScan = {
+                        if (ContextCompat.checkSelfPermission(app, Manifest.permission.CAMERA) ==
+                            PackageManager.PERMISSION_GRANTED
+                        ) {
+                            scanError = null
+                            screen = Screen.SCAN
+                        } else {
+                            cameraPermission.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                    onContacts = { screen = Screen.CONTACTS },
+                    onSettings = { screen = Screen.SETTINGS },
+                    onSend = onSendPublic,
+                    onPanicWipeArmed = { wipeArmed = true },
+                )
             },
-            onContacts = { screen = Screen.CONTACTS },
-            onSettings = { screen = Screen.SETTINGS },
-            onSend = onSendPublic,
+            private = {
+                PrivatePeerList(
+                    peers = privatePeers,
+                    onOpen = { peer ->
+                        openPeerId = peer.peerIdHex
+                        onOpenChat(peer.peerIdHex)
+                        screen = Screen.PRIVATE_CHAT
+                    },
+                )
+            },
         )
     }
 }
@@ -247,6 +358,7 @@ private fun Home(
     onContacts: () -> Unit,
     onSettings: () -> Unit,
     onSend: (String) -> Unit,
+    onPanicWipeArmed: () -> Unit,
 ) {
     var msg by remember { mutableStateOf("") }
     val peers by BleMeshService.peers.collectAsState(initial = emptyList())
@@ -335,6 +447,8 @@ private fun Home(
             )
             Text("last GATT error: ${lastGattError?.let { "code $it" } ?: "none"}", color = MeshlineColors.TextSecondary)
             Text("See README: physical checklist incl. 500-char, screen-off, permission-deny, logcat.", color = MeshlineColors.TextSecondary, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(8.dp))
+            PanicWipeButton(onArmed = onPanicWipeArmed)
         }
     }
 }

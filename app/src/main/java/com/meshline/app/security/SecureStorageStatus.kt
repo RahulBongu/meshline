@@ -26,6 +26,9 @@ object SecureStorageStatus {
 
         /** The SQLCipher DB (or its wrapped passphrase) could not be read. */
         DB_UNREADABLE,
+
+        /** The user wiped the device on purpose (panic wipe). */
+        PANIC_WIPE,
     }
 
     data class Event(val reason: Reason, val atMs: Long)

@@ -40,4 +40,12 @@ class Identity(
         agreement.calculateAgreement(pub, out, 0)
         return out
     }
+
+    /**
+     * The long-term **X25519 private key** — the Noise static key.
+     *
+     * The D2 secure channel needs it to run the Noise_XX handshake; it never
+     * leaves the device and is never logged.
+     */
+    fun x25519PrivateKey(): ByteArray = xPrivate.copyOf()
 }

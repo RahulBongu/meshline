@@ -38,12 +38,14 @@ class SessionManager(
      */
     private val knownX25519: (ByteArray) -> ByteArray? = { null },
     /**
-     * Is this sender in the **protected key tier** (QR-verified contact,
-     * connected neighbour)? Protected senders may spend the reserved half of
-     * the global handshake budget, so a flood of unknown senders cannot starve
-     * the people the user actually talks to.
+     * The tier of a sender for the handshake budget (see [HandshakeTier]).
+     *
+     * A **connected neighbour is protected only after it has delivered a
+     * verified ANNOUNCE** — being linked is not enough, otherwise a peer that
+     * connects and stays silent could spend the reserved budget. QR-verified
+     * contacts rank above plain neighbours.
      */
-    private val isProtectedSender: (ByteArray) -> Boolean = { false },
+    private val handshakeTier: (ByteArray) -> HandshakeTier = { HandshakeTier.JUNK },
 ) {
     /** Our own id (the outer packets' senderId). */
     val ownId: ByteArray = MessageIds.idFromPublicKey(localEd25519PublicKey)
@@ -75,6 +77,14 @@ class SessionManager(
 
         /** The session must be replaced by a fresh handshake (§6.1). */
         data class RehandshakeNeeded(val peerId: ByteArray) : Event
+
+        /**
+         * The peer presented a valid handshake with a **different static key**
+         * than the one we know. The app decides what it means: for a verified
+         * contact it is a key change to warn about (§7.2), for an unknown peer
+         * it is an impersonation attempt.
+         */
+        data class KeyMismatch(val peerId: ByteArray, val learnedX25519PublicKey: ByteArray) : Event
     }
 
     // ------------------------------------------------------------- sessions
@@ -128,7 +138,7 @@ class SessionManager(
         }
         // The global work budget: a peer that reconnects under a new BLE
         // address must not be able to make us do endless key agreement.
-        if (!limiter.allowDhWork(NoiseProtocol.DH_COST_START, isProtectedSender(peerId))) {
+        if (!limiter.allowDhWork(NoiseProtocol.DH_COST_START, handshakeTier(peerId), hex(peerId))) {
             counters.handshakeBudgetExhausted++
             return null
         }
@@ -219,9 +229,10 @@ class SessionManager(
         // Global work budget: charge the X25519 operations this step will
         // cost *before* doing them. A peer that reconnects under a new BLE
         // address gets a fresh per-connection bucket, but not a fresh work
-        // budget (NOISE_DESIGN §5). Senders in the protected key tier may
-        // also spend the reserved half of that budget.
-        if (!limiter.allowDhWork(NoiseProtocol.dhCost(payload.step), isProtectedSender(packet.senderId))) {
+        // budget (NOISE_DESIGN §5). Only the tiers that earned it may spend
+        // the reserved half, and only up to their per-sender allowance.
+        val tier = handshakeTier(packet.senderId)
+        if (!limiter.allowDhWork(NoiseProtocol.dhCost(payload.step), tier, hex(packet.senderId))) {
             counters.handshakeBudgetExhausted++
             return events
         }
@@ -370,8 +381,12 @@ class SessionManager(
         session.remoteX25519PublicKey = remoteStatic
         val known = knownX25519(session.peerId)
         if (known != null && !known.contentEquals(remoteStatic)) {
-            limiter.recordViolation(connectionKey)
-            strike(connectionKey, session.peerId, "static key does not match the announced key", events)
+            // The peer presented a *valid* Noise handshake with a different
+            // static key. That is either an impersonation or a legitimate key
+            // change — the decision belongs to the app, not to us: we report it
+            // and let the caller hold the traffic and ask the user (§7.2).
+            // No strike: the peer's handshake was valid, only its key differs.
+            events += Event.KeyMismatch(session.peerId.copyOf(), remoteStatic)
             return
         }
 

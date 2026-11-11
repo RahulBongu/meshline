@@ -288,7 +288,10 @@ class NoiseSessionTest {
             settle(500)
 
             assertNull("the session must not be established", a.manager.session(b.id)?.takeIf { it.state == SecureSession.State.ESTABLISHED })
-            assertTrue("the mismatch must be reported", a.events.any { it is SessionManager.Event.HandshakeFailed })
+            assertTrue(
+                "the mismatch must be reported so the app can decide (§7.2)",
+                a.events.any { it is SessionManager.Event.KeyMismatch },
+            )
         } finally {
             nodes.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
         }
