@@ -82,6 +82,29 @@ class KeyCache(
         return (protected_[key] ?: untrusted[key])?.first?.copyOf()
     }
 
+    /**
+     * Is this sender in the **protected tier** (QR-verified contact, or a peer
+     * the app decided to trust)? The protected tier is never expired or
+     * evicted by unauthenticated announces.
+     *
+     * Used to rank a sender in the handshake budget (see `HandshakeTier`): a
+     * QR-verified contact outranks a plain connected neighbour.
+     */
+    @Synchronized
+    fun isProtected(senderId: ByteArray): Boolean = protected_.containsKey(hex(senderId))
+
+    /**
+     * Has this sender delivered a **verified ANNOUNCE**? Only a verified
+     * announce teaches a key, so "the key is cached" means "it announced and
+     * the signature checked out".
+     */
+    @Synchronized
+    fun hasAnnounced(senderId: ByteArray, nowMs: Long = nowProvider()): Boolean {
+        evict(nowMs)
+        val key = hex(senderId)
+        return protected_.containsKey(key) || untrusted.containsKey(key)
+    }
+
     @Synchronized fun size(): Int = protected_.size + untrusted.size
     @Synchronized fun sizeUntrusted(): Int = untrusted.size
 

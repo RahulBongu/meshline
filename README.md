@@ -110,9 +110,10 @@ INTERNET permission on the **merged manifest** or in
 `aapt dump permissions app-universal-debug.apk`.
 
 On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
-`NoiseNonceOrderingTest` 7, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 10,
-`PrivateOutboxTest` 1, `SessionCodecTest` 4, `SessionStoreTest` 2,
-`OutboxStoreTest` 2 — **114 tests, 0 failures** in total.
+`NoiseNonceOrderingTest` 7, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 9,
+`HandshakeTierTest` 4, `MessageDedupeTest` 3, `PrivateOutboxTest` 1,
+`SessionCodecTest` 4, `SessionStoreTest` 2, `OutboxStoreTest` 2 —
+**120 tests, 0 failures** in total.
 
 > **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
 > typically uninstalls the app (and its data) after the run, and the
@@ -368,6 +369,24 @@ amendment A2). Everything else in the store works as designed. The
 `noise_sessions.transportKey` column is **never written** (the store's
 mapping always stores NULL), so there is no key material on disk that the app
 cannot use — and no second secret for a panic wipe to chase.
+
+### Review round 3 (D2)
+
+- **Protected handshake tier, split per sender.** The reserved half of the
+  global handshake budget is split per sender: a QR-verified contact may take
+  **60 X25519 ops/min**, a connected neighbour that has delivered a **verified
+  ANNOUNCE** may take **30**, everybody else only the general half. Being
+  *connected* is not enough for protection — a peer that connects and stays
+  silent must not be able to spend the reserved budget. A malicious peer can
+  no longer starve a contact's handshake.
+- **The receiver's dedupe is persisted.** The application-level message ids
+  the receiver has shown live in the `seen_message_ids` table (SQLCipher,
+  DB version 4) with a **30-day retention** — longer than the sender's 12 h
+  outbox expiry. A retry that arrives after a process restart is acknowledged
+  again but **not shown twice**.
+- **`git show --stat 970785b`** was audited: 15 files, all source, tests and
+  docs — nothing that should not be tracked. The repository tracks 100 files
+  and contains no build output, APK, log, keystore or `local.properties`.
 
 ### Review round 2 (D2)
 

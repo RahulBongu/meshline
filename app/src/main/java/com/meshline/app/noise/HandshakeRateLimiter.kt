@@ -42,29 +42,43 @@ class HandshakeRateLimiter(
     private val globalDhOps = ArrayDeque<Long>()
     private val protectedDhOps = ArrayDeque<Long>()
 
+    /** Per-sender usage of the reserved pool, keyed by the sender's id. */
+    private val reservedBySender = HashMap<String, MutableList<Long>>()
+
     /**
      * Charges [cost] X25519 operations against the global per-minute budget.
      * Returns false when the budget is exhausted — the caller must then drop
      * the handshake instead of doing the key agreement.
      *
-     * [protectedSender] may spend the reserved half as well; an unknown sender
-     * may not.
+     * The budget has two halves: a general one that anybody may spend, and a
+     * **reserved** one that only protected senders may spend. The reserved
+     * half is further capped **per sender** ([HandshakeTier]) so one peer
+     * cannot take all of it, and a QR-verified contact outranks a plain
+     * neighbour.
      */
-    fun allowDhWork(cost: Int, protectedSender: Boolean = false): Boolean {
+    fun allowDhWork(cost: Int, tier: HandshakeTier = HandshakeTier.JUNK, senderKey: String = ""): Boolean {
         if (cost <= 0) return true
         val now = nowProvider()
         prune(globalDhOps, now, WINDOW_1M)
         prune(protectedDhOps, now, WINDOW_1M)
         val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
+        // 1. The general pool: anybody may spend it.
         if (globalDhOps.size + cost <= generalCap) {
             repeat(cost) { globalDhOps.add(now) }
             return true
         }
-        if (protectedSender && protectedDhOps.size + cost <= NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE) {
-            repeat(cost) { protectedDhOps.add(now) }
-            return true
+        // 2. The reserved pool: protected tiers only, and only up to the
+        //    per-sender allowance of their tier.
+        if (tier.reservedOpsPerMinute <= 0) return false
+        val used = reservedBySender.getOrPut(senderKey) { mutableListOf() }
+        prune(used, now, WINDOW_1M)
+        if (used.size + cost > tier.reservedOpsPerMinute) return false
+        if (protectedDhOps.size + cost > NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE) return false
+        repeat(cost) {
+            used.add(now)
+            protectedDhOps.add(now)
         }
-        return false
+        return true
     }
 
     /** X25519 operations still available in the current minute. */
@@ -170,6 +184,7 @@ class HandshakeRateLimiter(
         nodePacketBucket.clear()
         globalDhOps.clear()
         protectedDhOps.clear()
+        reservedBySender.clear()
     }
 
     private fun prune(bucket: MutableList<Long>, now: Long, windowMs: Long) {

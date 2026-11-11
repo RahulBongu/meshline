@@ -239,6 +239,26 @@ the protected tier may spend either half; an unknown sender may only spend
 the general half. Junk handshakes therefore cannot starve the people the
 user actually talks to — the reserve is untouched by them.
 
+**The tiers and their per-sender allowances (D2, review item 1):** the reserved
+half is split **per sender**, so one peer cannot take all of it, and a
+QR-verified contact outranks a plain neighbour:
+
+| tier | who | reserved ops / minute / sender | handshakes / minute / peer |
+|---|---|---:|---:|
+| `CONTACT` | QR-verified contact | **60** | 12 |
+| `NEIGHBOUR` | connected **and** it has delivered a verified ANNOUNCE | **30** | 6 |
+| `JUNK` | everybody else | **0** (general pool only) | — |
+
+(One handshake costs 5 X25519 operations, hence "handshakes per minute".)
+
+**A connected neighbour is protected only after it has delivered a verified
+ANNOUNCE.** Being linked is not enough: a peer that connects and then stays
+silent must not be able to spend the reserved budget. "Delivered a verified
+ANNOUNCE" means its key is in the key cache — the cache only learns keys from
+verified announces, so the check is exactly "it announced and the signature
+checked out". A peer that announced but has since disconnected drops back to
+`JUNK`.
+
 Over-limit handshakes are **dropped silently** (no error reply — errors are
 amplifiers). Repeatedly-invalid handshakes (e.g. correct outer packet, garbage
 Noise bytes) increment a separate "protocol violations" counter per connection;
@@ -326,6 +346,14 @@ are still never written; only the derived session state is stored.
   - *The receipt is idempotent:* a repeat of a message the receiver already
     showed is not shown again, but it **is** acknowledged again — the sender
     needs that receipt to clean its outbox.
+  - *The dedupe survives a restart (D2, review item 2):* the receiver's record
+    of the application-level ids it has shown lives in the database
+    (`seen_message_ids`, SQLCipher-encrypted) with a **30-day retention** —
+    deliberately **longer than the sender's 12 h outbox expiry**, so a retry
+    that arrives after a process restart is still recognised: it is
+    acknowledged again, but **not shown a second time**. The transport's
+    replay window cannot do this job: a retry is re-encrypted with a fresh
+    nonce, so the receiver sees a perfectly valid new transport message.
   - *User-visible states (see §8):*
 
     | state | meaning |

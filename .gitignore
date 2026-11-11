@@ -3,6 +3,7 @@
 build/
 app/build/
 local.properties
+.kotlin/
 
 # Keystores & signing secrets - never commit
 *.jks
