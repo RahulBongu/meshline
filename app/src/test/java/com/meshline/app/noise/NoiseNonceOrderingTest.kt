@@ -149,7 +149,7 @@ class NoiseNonceOrderingTest {
     }
 
     @Test
-    fun `a duplicate is rejected by the replay window`() = runBlocking {
+    fun `a duplicate is never delivered twice`() = runBlocking {
         val nodes = buildMesh(mapOf(0 to setOf(1), 1 to setOf(0)), this)
         try {
             val (a, b) = establish(nodes)
@@ -159,12 +159,26 @@ class NoiseNonceOrderingTest {
             delay(120)
             assertEquals(1, plaintexts(b).size)
 
-            // The same ciphertext again — re-wrapped in a fresh outer packet so
-            // the router's dedupe cannot catch it.
+            // The same bytes again: the router's dedupe stops it.
+            deliver(b, a, packet)
+            delay(120)
+            assertEquals("the duplicate must not be delivered again", 1, plaintexts(b).size)
+
+            // Re-wrapped in a fresh outer packet (a new timestamp): the
+            // associated data binds the timestamp, so the copy no longer
+            // authenticates and is dropped silently — it is not decrypted a
+            // second time either.
             deliver(b, a, packet.copy(timestampMs = packet.timestampMs + 1))
             delay(120)
-            assertEquals("the duplicate must not be decrypted twice", 1, plaintexts(b).size)
-            assertTrue("the duplicate must be counted", b.manager.counters.replaysRejected > 0)
+            assertEquals("the re-wrapped duplicate must not be delivered", 1, plaintexts(b).size)
+            assertTrue(
+                "the re-wrapped copy must be dropped as unauthenticated",
+                b.manager.counters.decryptFailures > 0,
+            )
+            assertTrue(
+                "a re-handshake must not be requested for a duplicate",
+                b.events.none { it is SessionManager.Event.RehandshakeNeeded },
+            )
         } finally {
             nodes.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
         }
@@ -255,6 +269,49 @@ class NoiseNonceOrderingTest {
             delay(120)
             assertEquals("the message must not be delivered", 0, plaintexts(b).size)
             assertTrue("it must be counted as a violation", b.manager.counters.protocolViolations > 0)
+        } finally {
+            nodes.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
+        }
+    }
+
+    @Test
+    fun `a forged packet with a far future nonce changes nothing`() = runBlocking {
+        val nodes = buildMesh(mapOf(0 to setOf(1), 1 to setOf(0)), this)
+        try {
+            val (a, b) = establish(nodes)
+            val session = b.manager.session(a.id)!!
+
+            // A forgery: the right sender id, a nonce far beyond the replay
+            // window, and a tag that does not verify.
+            val forged = MeshPacket(
+                version = PacketCodec.PROTOCOL_VERSION,
+                type = PacketType.PRIVATE_MESSAGE,
+                ttl = PacketCodec.MAX_TTL,
+                flags = 0x01,
+                timestampMs = 1_700_000_100_000L,
+                payload = NoisePayloads.encodeTransport(1000, ByteArray(48)),
+                senderId = a.id,
+                recipientId = b.id,
+                signature = null,
+            )
+            deliver(b, a, forged)
+            delay(150)
+
+            assertEquals("nothing may be delivered", 0, plaintexts(b).size)
+            assertTrue(
+                "a forgery must not ask for a re-handshake",
+                b.events.none { it is SessionManager.Event.RehandshakeNeeded },
+            )
+            assertEquals("a forgery must not change the session", false, session.needsRekey)
+            assertEquals(
+                "a forgery must not move the replay window",
+                0L,
+                session.replayWindow.nextExpected,
+            )
+            assertEquals("a forgery must not count as a violation", 0, b.manager.counters.protocolViolations)
+            assertEquals("a forgery must not count as a replay", 0, b.manager.counters.replaysRejected)
+            // The only trace is the telemetry counter for failed tags.
+            assertTrue("the failed tag must be counted", b.manager.counters.decryptFailures > 0)
         } finally {
             nodes.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
         }

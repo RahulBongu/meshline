@@ -105,17 +105,18 @@ class HandshakeRateLimiterTest {
         // One full handshake costs 5 X25519 operations.
         assertEquals(5, NoiseProtocol.DH_COST_START + NoiseProtocol.dhCost(NoisePayloads.Step.RESPONDER) +
             NoiseProtocol.dhCost(NoisePayloads.Step.INITIATOR_FINAL))
-        // Spend the whole budget, spread over many *different* connections —
-        // exactly what a peer that reconnects under a new BLE address does.
+        // Spend the whole *general* half of the budget, spread over many
+        // *different* connections — exactly what a peer that reconnects under a
+        // new BLE address does.
+        val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
         var spent = 0
         var connection = 0
-        while (spent < NoiseProtocol.MAX_X25519_OPS_PER_MINUTE) {
+        while (spent < generalCap) {
             val cost = NoiseProtocol.dhCost(NoisePayloads.Step.RESPONDER)
             assertTrue("connection $connection must be allowed", limiter.allowDhWork(cost))
             spent += cost
             connection++
         }
-        assertEquals(0, limiter.remainingDhOps())
         // A brand new connection does not get a fresh budget.
         assertFalse("a new connection must not reset the global budget", limiter.allowDhWork(1))
         // The per-connection buckets are a different thing and do reset.
@@ -125,12 +126,33 @@ class HandshakeRateLimiterTest {
     @Test
     fun `the global work budget refills after a minute`() {
         val limiter = HandshakeRateLimiter { now }
-        repeat(NoiseProtocol.MAX_X25519_OPS_PER_MINUTE) {
-            assertTrue(limiter.allowDhWork(1))
-        }
-        assertFalse("the budget must be spent", limiter.allowDhWork(1))
+        val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
+        repeat(generalCap) { assertTrue(limiter.allowDhWork(1)) }
+        repeat(NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE) { assertTrue(limiter.allowDhWork(1, protectedSender = true)) }
+        assertFalse("the budget must be spent", limiter.allowDhWork(1, protectedSender = true))
         advance(61_000)
         assertTrue("the budget must refill after a minute", limiter.allowDhWork(1))
-        assertEquals(NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - 1, limiter.remainingDhOps())
+        // Everything is available again: the general half (minus the one op we
+        // just spent) plus the reserved half.
+        assertEquals(
+            generalCap - 1 + NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE,
+            limiter.remainingDhOps(),
+        )
+    }
+
+    @Test
+    fun `the reserved half keeps room for protected senders`() {
+        val limiter = HandshakeRateLimiter { now }
+        val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
+        // A junk sender may only spend the general half.
+        repeat(generalCap) { assertTrue("junk op $it", limiter.allowDhWork(1, protectedSender = false)) }
+        assertFalse("the junk sender must not touch the reserve", limiter.allowDhWork(1, protectedSender = false))
+
+        // A protected sender (QR contact, connected neighbour) still has the
+        // reserved half — junk cannot starve it.
+        repeat(NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE) {
+            assertTrue("protected op $it", limiter.allowDhWork(1, protectedSender = true))
+        }
+        assertFalse("the reserve is finite too", limiter.allowDhWork(1, protectedSender = true))
     }
 }

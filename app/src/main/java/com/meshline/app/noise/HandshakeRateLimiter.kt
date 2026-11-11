@@ -33,27 +33,49 @@ class HandshakeRateLimiter(
      * The per-connection buckets reset when a peer reconnects under a new BLE
      * address, so they cannot bound the *work* an attacker can make us do.
      * This bucket is per node and survives reconnects.
+     *
+     * The budget has two halves: a general one that anybody may spend, and a
+     * **reserved** half that only senders in the protected key tier (QR
+     * contacts, connected neighbours) may spend. Junk handshakes therefore
+     * cannot starve the people you actually talk to.
      */
     private val globalDhOps = ArrayDeque<Long>()
+    private val protectedDhOps = ArrayDeque<Long>()
 
     /**
      * Charges [cost] X25519 operations against the global per-minute budget.
      * Returns false when the budget is exhausted — the caller must then drop
      * the handshake instead of doing the key agreement.
+     *
+     * [protectedSender] may spend the reserved half as well; an unknown sender
+     * may not.
      */
-    fun allowDhWork(cost: Int): Boolean {
+    fun allowDhWork(cost: Int, protectedSender: Boolean = false): Boolean {
         if (cost <= 0) return true
         val now = nowProvider()
         prune(globalDhOps, now, WINDOW_1M)
-        if (globalDhOps.size + cost > NoiseProtocol.MAX_X25519_OPS_PER_MINUTE) return false
-        repeat(cost) { globalDhOps.add(now) }
-        return true
+        prune(protectedDhOps, now, WINDOW_1M)
+        val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
+        if (globalDhOps.size + cost <= generalCap) {
+            repeat(cost) { globalDhOps.add(now) }
+            return true
+        }
+        if (protectedSender && protectedDhOps.size + cost <= NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE) {
+            repeat(cost) { protectedDhOps.add(now) }
+            return true
+        }
+        return false
     }
 
     /** X25519 operations still available in the current minute. */
     fun remainingDhOps(): Int {
-        prune(globalDhOps, nowProvider(), WINDOW_1M)
-        return (NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - globalDhOps.size).coerceAtLeast(0)
+        val now = nowProvider()
+        prune(globalDhOps, now, WINDOW_1M)
+        prune(protectedDhOps, now, WINDOW_1M)
+        val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
+        val general = (generalCap - globalDhOps.size).coerceAtLeast(0)
+        val reserved = (NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE - protectedDhOps.size).coerceAtLeast(0)
+        return general + reserved
     }
 
     /**
@@ -147,6 +169,7 @@ class HandshakeRateLimiter(
         lastSuccessAt.clear()
         nodePacketBucket.clear()
         globalDhOps.clear()
+        protectedDhOps.clear()
     }
 
     private fun prune(bucket: MutableList<Long>, now: Long, windowMs: Long) {

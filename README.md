@@ -369,6 +369,33 @@ amendment A2). Everything else in the store works as designed. The
 mapping always stores NULL), so there is no key material on disk that the app
 cannot use — and no second secret for a panic wipe to chase.
 
+### Review round 2 (D2)
+
+Three more review items were closed on this branch:
+
+1. **Authenticate before acting.** The AEAD tag is now verified **before** the
+   replay window or any drift logic may act. A forged packet (bad tag) is
+   dropped silently: it does not move the replay window, is not counted as a
+   violation, does not change the session and does **not** ask for a
+   re-handshake — otherwise anyone could force one with a single made-up
+   packet. Only a **genuine, authenticated** message whose nonce is beyond
+   the window triggers the clean re-handshake. (This also means a ciphertext
+   re-wrapped in a fresh outer packet fails authentication rather than
+   reaching the replay window — the AEAD catches it, the window is the second
+   line of defence.)
+2. **Outbox reliability.** A row stays in the outbox after *Sent* until a
+   signed receipt (Delivered) or the 12 h expiry; retries use an exponential
+   backoff and are **re-encrypted** under the live session with a **fresh
+   nonce** each time, while an **application-level message id** (inside the
+   ciphertext) makes the receiver show the message exactly once. The receipt
+   is idempotent, so a repeat is acknowledged again. Proven by a simulator
+   test with **30 % link loss**: every one of 20 messages is delivered exactly
+   once.
+3. **Reserved handshake budget.** Half of the global X25519 budget
+   (150 operations / minute) is reserved for senders in the protected key
+   tier (QR contacts, connected neighbours), so junk handshakes cannot starve
+   real friends.
+
 ### Review round 1 (D2)
 
 Four review items were closed on this branch:

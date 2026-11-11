@@ -22,7 +22,7 @@ class OutboxStoreTest {
         override suspend fun insert(entity: OutboxEntity): Long = 1L
         override suspend fun queuedFor(hex: String): List<OutboxEntity> = emptyList()
         override suspend fun all(): List<OutboxEntity> = emptyList()
-        override suspend fun updateState(id: Long, state: String) = Unit
+        override suspend fun updateState(id: Long, state: String, attempts: Int) = Unit
         override suspend fun delete(id: Long) = Unit
         override suspend fun deleteOlderThan(cutoffMs: Long): Int = 0
         override suspend fun deleteAll() = Unit
