@@ -1,5 +1,15 @@
 package com.meshline.app.service
 
+import com.meshline.app.noise.HandshakeTier
+import com.meshline.app.noise.HandshakeTiers
+import com.meshline.app.noise.MessageDedupe
+import com.meshline.app.noise.Outbox
+import com.meshline.app.noise.OutboxState
+import com.meshline.app.noise.PrivateEnvelope
+import com.meshline.app.noise.PrivateMessenger
+import com.meshline.app.noise.SessionManager
+import com.meshline.app.noise.SecureSession
+import com.meshline.app.protocol.MessageIds
 import com.meshline.app.protocol.MeshPacket
 import com.meshline.app.protocol.PacketCodec
 import com.meshline.app.protocol.PacketType
@@ -7,16 +17,10 @@ import com.meshline.app.protocol.Payloads
 import com.meshline.app.router.MeshRouter
 import com.meshline.app.security.Identity
 import com.meshline.app.security.KeyCache
-import com.meshline.app.storage.ContactsRepository
-import com.meshline.app.storage.InboxEntity
-import com.meshline.app.storage.OutboxState
-import com.meshline.app.storage.SecureStores
-import com.meshline.app.noise.HandshakeTier
-import com.meshline.app.noise.HandshakeTiers
-import com.meshline.app.noise.PrivateEnvelope
-import com.meshline.app.noise.PrivateMessenger
-import com.meshline.app.noise.SessionManager
-import com.meshline.app.noise.SecureSession
+import com.meshline.app.storage.ContactDirectory
+import com.meshline.app.storage.MessageEntity
+import com.meshline.app.storage.MessageStore
+import com.meshline.app.storage.SessionDirectory
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -27,9 +31,11 @@ data class PrivateChatMessage(
     /** True for a message we sent, false for one we received. */
     val outgoing: Boolean,
     val text: String,
-    /** QUEUED / SENT / DELIVERED / READ (outgoing only; incoming is shown as DELIVERED). */
-    val state: OutboxState,
+    /** QUEUED / SENT / DELIVERED / READ / NOT_DELIVERED. */
+    val state: String,
     val createdAtMs: Long,
+    /** True when the user can send it again (it was never delivered). */
+    val resendable: Boolean = false,
 )
 
 /** A peer we can open a private chat with. */
@@ -59,42 +65,53 @@ data class KeyChangeEvent(
  * The D2 secure channel, wired into the running app.
  *
  * It owns the [SessionManager] (Noise handshakes + transport), the
- * [PrivateMessenger] (the outbox, the retries, the application-level dedupe)
- * and turns router packets into the two things the UI cares about: private
- * chats and key-change warnings.
+ * [PrivateMessenger] (the delivery queue, the retries, the application-level
+ * dedupe) and the chat history, and turns router packets into the two things
+ * the UI cares about: private chats and key-change warnings.
  *
  * Rules that hold everywhere in here:
  *  - **nothing sensitive is logged**: no keys, no message text, no nicknames;
- *  - a message is only handed to the router when a session exists — until
- *    then it stays **Queued** in the encrypted outbox;
+ *  - a message is only handed to the router when a session exists �?" until
+ *    then it stays **Queued**;
+ *  - a message nobody ever acknowledged ends as **Not delivered**, never as
+ *    "Sent" �?" and it can be sent again;
  *  - a key change is never applied silently: the traffic is held until the
  *    user explicitly accepts it (NOISE_DESIGN §7.2).
+ *
+ * The class has **no Android dependency** (the stores are interfaces), so the
+ * whole flow can be driven on the JVM over the mesh simulator.
  */
 class SecureChannel(
     private val identity: Identity,
     private val router: MeshRouter,
     private val keyCache: KeyCache,
-    private val contacts: ContactsRepository,
-    private val store: SecureStores,
+    private val contacts: ContactDirectory,
+    private val outbox: Outbox,
+    private val dedupe: MessageDedupe,
+    private val messageStore: MessageStore,
+    private val sessionDirectory: SessionDirectory,
     /** The peers we are currently linked to (hex ids). */
     private val connectedPeers: () -> Set<String>,
+    /** The message retention in days (0 = keep everything, FR-15). */
+    private val retentionDays: () -> Int = { 0 },
+    private val nowProvider: () -> Long = { System.currentTimeMillis() },
 ) {
     /** The Noise session engine. */
     val sessions = SessionManager(
         localStaticX25519 = identity.x25519PrivateKey(),
         localEd25519PublicKey = identity.ed25519PublicKey,
-        nowProvider = { System.currentTimeMillis() },
+        nowProvider = nowProvider,
         isBlocked = { peerId -> blockedPeers.contains(hex(peerId)) },
-        handshakeTier = { peerId -> tierOf(peerId) },
+        handshakeTier = { peerId, fromPeer -> tierOf(peerId, fromPeer) },
         knownX25519 = { peerId -> knownX25519(peerId) },
     )
 
-    /** The private-message layer (outbox, retries, dedupe). */
+    /** The private-message layer (the delivery queue, the retries, the dedupe). */
     private val messenger = PrivateMessenger(
         sessions = sessions,
-        outbox = store.outbox,
-        nowProvider = { System.currentTimeMillis() },
-        dedupe = store.seen,
+        outbox = outbox,
+        nowProvider = nowProvider,
+        dedupe = dedupe,
     )
 
     private val _messages = MutableStateFlow<List<PrivateChatMessage>>(emptyList())
@@ -113,6 +130,9 @@ class SecureChannel(
     /** Peers the user blocked. */
     private val blockedPeers = mutableSetOf<String>()
 
+    /** Handshake attempts we started, so we do not spam a peer. */
+    private val handshakeStartedAt = mutableMapOf<String, Long>()
+
     /**
      * What we know about the peers we have contacts for: the X25519 key we
      * trust (the impersonation check, §7.1) and whether the contact is
@@ -121,9 +141,6 @@ class SecureChannel(
      */
     private val knownKeys = mutableMapOf<String, ByteArray>()
     private val verifiedPeers = mutableSetOf<String>()
-
-    /** Handshake attempts we started, so we do not spam a peer. */
-    private val handshakeStartedAt = mutableMapOf<String, Long>()
 
     // ------------------------------------------------------------- inbound
 
@@ -147,7 +164,7 @@ class SecureChannel(
         when (event) {
             is SessionManager.Event.Outgoing -> router.onLocalSend(event.packet)
             is SessionManager.Event.Plaintext -> onPlaintext(event.peerId, event.bytes)
-            is SessionManager.Event.SessionEstablished -> onSessionEstablished(event.peerId)
+            is SessionManager.Event.SessionEstablished -> refresh()
             is SessionManager.Event.KeyMismatch -> onKeyMismatch(event, connectionKey)
             is SessionManager.Event.RehandshakeNeeded -> {
                 // The session drifted: replace it silently (§6.1). The queued
@@ -156,6 +173,27 @@ class SecureChannel(
             }
             is SessionManager.Event.Violation -> Unit   // counters only
             is SessionManager.Event.HandshakeFailed -> Unit   // counters only
+        }
+    }
+
+    private suspend fun onPlaintext(peerId: ByteArray, plaintext: ByteArray) {
+        val peerHex = hex(peerId)
+        val result = messenger.onPlaintext(peerHex, plaintext) ?: return
+        // The receipt is idempotent: a repeat is acknowledged again, but only
+        // the first copy is stored and shown.
+        sendReceipt(peerId, result.envelope.messageId, Payloads.Receipt.KIND_DELIVERED)
+        if (result.isNew) {
+            messageStore.upsert(
+                MessageEntity(
+                    messageIdHex = hex(result.envelope.messageId),
+                    peerIdHex = peerHex,
+                    outgoing = false,
+                    text = result.envelope.text.copyOf(),
+                    createdAtMs = result.envelope.sentAtMs,
+                    state = OutboxState.DELIVERED.name,
+                )
+            )
+            refresh()
         }
     }
 
@@ -184,32 +222,6 @@ class SecureChannel(
         }
     }
 
-    private suspend fun onPlaintext(peerId: ByteArray, plaintext: ByteArray) {
-        val peerHex = hex(peerId)
-        val result = messenger.onPlaintext(peerHex, plaintext) ?: return
-        // The receipt is idempotent: a repeat is acknowledged again, but only
-        // the first copy is stored and shown.
-        sendReceipt(peerId, result.envelope.messageId, Payloads.Receipt.KIND_DELIVERED)
-        if (result.isNew) {
-            store.inbox.insert(
-                InboxEntity(
-                    messageIdHex = hex(result.envelope.messageId),
-                    peerIdHex = peerHex,
-                    text = result.envelope.text.copyOf(),
-                    createdAtMs = result.envelope.sentAtMs,
-                    read = false,
-                )
-            )
-            refresh()
-        }
-    }
-
-    private suspend fun onSessionEstablished(peerId: ByteArray) {
-        // The key-change check happens in the engine (it knows the key the
-        // handshake revealed); here we only refresh the UI state.
-        refresh()
-    }
-
     private suspend fun handleReceipt(packet: MeshPacket) {
         val receipt = runCatching { Payloads.decodeReceipt(packet.payload) }.getOrNull() ?: return
         val peerHex = hex(packet.senderId)
@@ -218,7 +230,8 @@ class SecureChannel(
         } else {
             OutboxState.DELIVERED
         }
-        messenger.onReceipt(peerHex, receipt.messageId, state)
+        val messageIdHex = messenger.onReceipt(peerHex, receipt.messageId, state) ?: return
+        messageStore.setState(messageIdHex, state.name)
         refresh()
     }
 
@@ -233,16 +246,50 @@ class SecureChannel(
         val peerId = peerIdHex.hexToBytes()
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return false
-        // A peer whose key changed is held until the user accepts (§7.2): the
-        // message is queued and stays Queued.
-        messenger.send(peerId, peerIdHex, trimmed.toByteArray())
+        val envelope = messenger.send(peerId, peerIdHex, trimmed.toByteArray())
+        // The chat history keeps the message; the outbox only tracks delivery.
+        messageStore.upsert(
+            MessageEntity(
+                messageIdHex = hex(envelope.messageId),
+                peerIdHex = peerIdHex,
+                outgoing = true,
+                text = envelope.text.copyOf(),
+                createdAtMs = envelope.sentAtMs,
+                state = OutboxState.QUEUED.name,
+            )
+        )
         refresh()
         return true
     }
 
     /**
-     * The periodic work: handshake retransmits, outbox retries, expiry and
-     * re-keys. Called by the service on a timer.
+     * Sends a message that was never delivered again: a **fresh outbox entry**
+     * with the same application-level id (so the receiver still shows it once).
+     */
+    suspend fun resend(messageIdHex: String): Boolean {
+        val message = messageStore.all().firstOrNull { it.messageIdHex == messageIdHex } ?: return false
+        if (!message.outgoing) return false
+        val envelope = PrivateEnvelope(
+            messageId = messageIdHex.hexToBytes(),
+            sentAtMs = message.createdAtMs,
+            text = message.text.copyOf(),
+        )
+        outbox.queue(message.peerIdHex, envelope.encode(), nowProvider())
+        messageStore.setState(messageIdHex, OutboxState.QUEUED.name)
+        refresh()
+        return true
+    }
+
+    /** "Clear chat": the history of one peer goes, and so do its pending sends. */
+    suspend fun clearChat(peerIdHex: String) {
+        messenger.clearPeer(peerIdHex)
+        messageStore.clearPeer(peerIdHex)
+        refresh()
+    }
+
+    /**
+     * The periodic work: handshake retransmits, outbox retries, expiry,
+     * re-keys and the retention purge. Called by the service on a timer.
      */
     suspend fun tick() {
         // 1. Handshake retransmits (the same message id, so the receiver
@@ -251,8 +298,11 @@ class SecureChannel(
             router.onLocalSend(packet, retransmit = true)
         }
         // 2. Outbox retries: encrypt under the live session, fresh nonce.
-        for (packet in messenger.tick()) {
-            router.onLocalSend(packet)
+        for (outgoing in messenger.tick()) {
+            router.onLocalSend(outgoing.packet)
+            if (outgoing.messageIdHex.isNotEmpty()) {
+                messageStore.setState(outgoing.messageIdHex, OutboxState.SENT.name)
+            }
         }
         // 3. Re-key when a session is due for one.
         for (session in sessions.sessions()) {
@@ -261,15 +311,28 @@ class SecureChannel(
             val due = session.needsRekey || sessions.rekeyDue(session)
             if (!due) continue
             val last = handshakeStartedAt[peerHex] ?: 0L
-            if (System.currentTimeMillis() - last < HANDSHAKE_RETRY_COOLDOWN_MS) continue
+            if (nowProvider() - last < HANDSHAKE_RETRY_COOLDOWN_MS) continue
             val packet = sessions.startHandshake(session.peerId)
             if (packet != null) {
-                handshakeStartedAt[peerHex] = System.currentTimeMillis()
+                handshakeStartedAt[peerHex] = nowProvider()
                 router.onLocalSend(packet)
             }
         }
-        // 4. Expire what nobody ever acknowledged.
-        messenger.expire()
+        // 4. A message nobody acknowledged ends as "Not delivered" �?" never as
+        //    "Sent". It can be sent again from the chat.
+        for (row in messenger.expire()) {
+            val messageIdHex = runCatching {
+                hex(PrivateEnvelope.decode(row.envelope).messageId)
+            }.getOrDefault("")
+            if (messageIdHex.isNotEmpty()) {
+                messageStore.setState(messageIdHex, "NOT_DELIVERED")
+            }
+        }
+        // 5. The retention purge (FR-15): off = keep everything.
+        val days = retentionDays()
+        if (days > 0) {
+            messageStore.deleteOlderThan(nowProvider() - days * 24L * 60 * 60 * 1_000)
+        }
         refresh()
     }
 
@@ -283,10 +346,10 @@ class SecureChannel(
         if (session != null && session.state == SecureSession.State.ESTABLISHED) return
         if (heldPeers.contains(peerIdHex)) return
         val last = handshakeStartedAt[peerIdHex] ?: 0L
-        if (System.currentTimeMillis() - last < HANDSHAKE_RETRY_COOLDOWN_MS) return
+        if (nowProvider() - last < HANDSHAKE_RETRY_COOLDOWN_MS) return
         val packet = sessions.startHandshake(peerId)
         if (packet != null) {
-            handshakeStartedAt[peerIdHex] = System.currentTimeMillis()
+            handshakeStartedAt[peerIdHex] = nowProvider()
             router.onLocalSend(packet)
         }
     }
@@ -294,11 +357,11 @@ class SecureChannel(
     /** Marks the peer's messages read and sends the READ receipts. */
     suspend fun markRead(peerIdHex: String) {
         val peerId = peerIdHex.hexToBytes()
-        for (row in store.inbox.forPeer(peerIdHex)) {
-            if (row.read) continue
-            store.inbox.markRead(row.messageIdHex)
-            val id = row.messageIdHex.hexToBytes()
-            sendReceipt(peerId, id, Payloads.Receipt.KIND_READ)
+        for (row in messageStore.forPeer(peerIdHex)) {
+            if (!row.outgoing && row.state != OutboxState.READ.name) {
+                messageStore.setState(row.messageIdHex, OutboxState.READ.name)
+                sendReceipt(peerId, row.messageIdHex.hexToBytes(), Payloads.Receipt.KIND_READ)
+            }
         }
         refresh()
     }
@@ -328,18 +391,20 @@ class SecureChannel(
         refresh()
     }
 
-    /** Panic wipe: the identity, the contacts, the sessions and every message. */
+    /** Panic wipe: every session, every message and every contact goes. */
     suspend fun wipe() {
         sessions.wipe()
         messenger.wipe()
-        store.sessions.wipe()
-        store.outbox.wipe()
-        store.seen.wipe()
-        store.inbox.deleteAll()
+        sessionDirectory.wipe()
+        outbox.deleteOlderThan(Long.MAX_VALUE)
+        dedupe.deleteOlderThan(Long.MAX_VALUE)
+        messageStore.deleteAll()
         contacts.deleteAll()
         heldPeers.clear()
         blockedPeers.clear()
         handshakeStartedAt.clear()
+        knownKeys.clear()
+        verifiedPeers.clear()
         _messages.value = emptyList()
         _peers.value = emptyList()
     }
@@ -353,7 +418,7 @@ class SecureChannel(
             type = PacketType.RECEIPT,
             ttl = PacketCodec.MAX_TTL,
             flags = 0x01,
-            timestampMs = System.currentTimeMillis(),
+            timestampMs = nowProvider(),
             payload = payload,
             senderId = identity.senderId,
             recipientId = peerId.copyOf(),
@@ -366,48 +431,49 @@ class SecureChannel(
         runCatching { router.onLocalSend(signed) }
     }
 
-    /** The peer's known X25519 key (QR contacts) — the impersonation check. */
+    /** The peer's known X25519 key (QR contacts) �?" the impersonation check. */
     private fun knownX25519(peerId: ByteArray): ByteArray? = knownKeys[hex(peerId)]
 
     /**
-     * The handshake tier of a sender: a QR-verified contact first, then a
-     * connected neighbour that has delivered a verified ANNOUNCE.
+     * The handshake tier of a sender:
+     *  - `CONTACT`: a QR-verified contact (the reserved pool, per sender);
+     *  - `NEIGHBOUR`: the handshake arrived **directly** from one of our
+     *    linked neighbours, which has announced (the reserved pool, **per
+     *    connection** �?" one link cannot spend more than its allowance, no
+     *    matter how many identities it announces);
+     *  - `JUNK`: everything else, including a peer that only reached us
+     *    through a relay (the general pool only).
      */
-    private fun tierOf(peerId: ByteArray): HandshakeTier {
+    private fun tierOf(peerId: ByteArray, fromPeer: ByteArray): HandshakeTier {
         val peerHex = hex(peerId)
+        val fromHex = hex(fromPeer)
         val verified = verifiedPeers.contains(peerHex)
-        val announced = keyCache.hasAnnounced(peerId)
-        val connected = connectedPeers().contains(peerHex)
-        return HandshakeTiers.tierOf(verified = verified, announced = announced, connected = connected)
+        // "Direct peer only": the packet must have come straight from one of
+        // our linked neighbours. A handshake relayed by somebody else is not a
+        // neighbour handshake — it uses the general pool only, so a peer cannot
+        // launder its budget through a friendly relay.
+        val direct = connectedPeers().contains(fromHex)
+        val announced = keyCache.hasAnnounced(fromPeer)
+        return HandshakeTiers.tierOf(verified = verified, announced = announced, connected = direct)
     }
 
     private fun fingerprintOf(x25519PublicKey: ByteArray): String =
-        com.meshline.app.protocol.MessageIds.fingerprint(identity.ed25519PublicKey, x25519PublicKey)
+        MessageIds.fingerprint(identity.ed25519PublicKey, x25519PublicKey)
 
     /** Reloads the chat list and the peer list for the UI. */
     suspend fun refresh() {
-        val outgoing = store.outbox.rows().mapNotNull { row ->
-            val envelope = runCatching { PrivateEnvelope.decode(row.envelope) }.getOrNull() ?: return@mapNotNull null
-            PrivateChatMessage(
-                messageIdHex = hex(envelope.messageId),
-                peerIdHex = row.peerIdHex,
-                outgoing = true,
-                text = envelope.text.toString(Charsets.UTF_8),
-                state = row.state,
-                createdAtMs = row.createdAtMs,
-            )
-        }
-        val incoming = store.inbox.all().map { row ->
+        val list = messageStore.all().map { row ->
             PrivateChatMessage(
                 messageIdHex = row.messageIdHex,
                 peerIdHex = row.peerIdHex,
-                outgoing = false,
+                outgoing = row.outgoing,
                 text = row.text.toString(Charsets.UTF_8),
-                state = OutboxState.DELIVERED,
+                state = row.state,
                 createdAtMs = row.createdAtMs,
+                resendable = row.outgoing && row.state == NOT_DELIVERED,
             )
         }
-        _messages.value = (outgoing + incoming).sortedBy { it.createdAtMs }
+        _messages.value = list.sortedBy { it.createdAtMs }
 
         val connected = connectedPeers()
         val known = mutableMapOf<String, PrivatePeer>()
@@ -417,7 +483,7 @@ class SecureChannel(
         for (contact in contacts.all()) {
             knownKeys[contact.senderIdHex] = contact.x25519PublicKey
             if (contact.verified) verifiedPeers.add(contact.senderIdHex)
-            known[contact.senderIdHex] = PrivatePeer(
+            val peer = PrivatePeer(
                 peerIdHex = contact.senderIdHex,
                 nickname = contact.nickname,
                 avatarIndex = contact.avatarIndex,
@@ -427,6 +493,7 @@ class SecureChannel(
                     ?.state == SecureSession.State.ESTABLISHED,
                 onHold = heldPeers.contains(contact.senderIdHex),
             )
+            known[contact.senderIdHex] = peer
         }
         for (session in sessions.sessions()) {
             val peerHex = hex(session.peerId)
@@ -469,5 +536,8 @@ class SecureChannel(
     private companion object {
         /** Do not start a new handshake for the same peer more often than this. */
         const val HANDSHAKE_RETRY_COOLDOWN_MS = 20_000L
+
+        /** The state of a message that was never delivered. */
+        const val NOT_DELIVERED = "NOT_DELIVERED"
     }
 }

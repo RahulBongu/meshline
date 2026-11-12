@@ -239,17 +239,33 @@ the protected tier may spend either half; an unknown sender may only spend
 the general half. Junk handshakes therefore cannot starve the people the
 user actually talks to — the reserve is untouched by them.
 
-**The tiers and their per-sender allowances (D2, review item 1):** the reserved
-half is split **per sender**, so one peer cannot take all of it, and a
-QR-verified contact outranks a plain neighbour:
+**The tiers and their allowances (D2, review item 1):** the reserved half is
+split so that one peer can never take it all:
 
-| tier | who | reserved ops / minute / sender | handshakes / minute / peer |
-|---|---|---:|---:|
-| `CONTACT` | QR-verified contact | **60** | 12 |
-| `NEIGHBOUR` | connected **and** it has delivered a verified ANNOUNCE | **30** | 6 |
+| tier | who | reserved ops / minute | scoped by |
+|---|---|---:|---|
+| `CONTACT` | QR-verified contact | **60** | the **sender** |
+| `NEIGHBOUR` | a **direct** neighbour that delivered a verified ANNOUNCE | **30** | the **connection** |
 | `JUNK` | everybody else | **0** (general pool only) | — |
 
 (One handshake costs 5 X25519 operations, hence "handshakes per minute".)
+
+**Per connection, not per identity:** a neighbour's allowance belongs to the
+**link**, not to the identity it claims. One connection announcing six fake
+identities therefore cannot spend more than **one** allowance — the six
+handshakes share it. That matters because the per-connection buckets reset
+whenever a peer reconnects under a new BLE address.
+
+**Direct peer only:** the allowance is only available to a handshake that
+arrived **straight** from one of our linked neighbours. A handshake that was
+relayed through somebody else uses the general pool only, so a peer cannot
+launder its budget through a friendly relay.
+
+**A neighbour is protected only after it has delivered a verified ANNOUNCE** —
+being linked is not enough, otherwise a peer that connects and stays silent
+could spend the reserved budget. "Delivered a verified ANNOUNCE" means its key
+is in the key cache, because the cache only learns keys from verified
+announces.
 
 **A connected neighbour is protected only after it has delivered a verified
 ANNOUNCE.** Being linked is not enough: a peer that connects and then stays
@@ -318,7 +334,8 @@ are still never written; only the derived session state is stored.
 - **Store-and-forward (FR-12, amended for non-persistent sessions):** the
   sender's **outbox stores the PLAINTEXT**, protected by the SQLCipher
   database, and the message is **encrypted at send time**, under the session
-  that is live *then*.
+  that is live *then*. The **outbox tracks delivery only**; the **chat
+  history** is a separate table that holds both directions.
   - *Why plaintext and not ciphertext:* a stored ciphertext would belong to a
     session that no longer exists after a restart (the transport keys cannot be
     exported, A2), and it would carry a nonce that must never be reused under
@@ -329,8 +346,13 @@ are still never written; only the derived session state is stored.
     message and forgets it; it never stores it, and never re-sends it under a
     different session. Store-and-forward for private messages is a
     **sender-side** feature only.
+  - *Retention (FR-15):* **off (keep everything, the default) / 1 day / 7
+    days**, purged with the service's periodic tick. **"Clear chat"** empties
+    one conversation (and cancels its pending sends) whatever the retention is.
   - *Lifetime:* a queued message waits up to **12 h** (configurable) and is
-    then dropped rather than arriving as a stale surprise.
+    then dropped rather than arriving as a stale surprise. It is **Not
+    delivered** at that point — never "Sent" — and the user can **Resend** it
+    (a fresh outbox entry, a fresh nonce, the same application-level id).
   - *Reliability (D2, review item 2):* a row stays in the outbox after
     **Sent** until a signed **RECEIPT (Delivered)** arrives or the 12 h
     expiry drops it — BLE offers no delivery guarantee, so "Sent" only means

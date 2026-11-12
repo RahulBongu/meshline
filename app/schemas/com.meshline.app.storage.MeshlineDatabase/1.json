@@ -1,0 +1,82 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "481311b0b8a03aba720c9066788fb201",
+    "entities": [
+      {
+        "tableName": "contacts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`senderIdHex` TEXT NOT NULL, `nickname` TEXT NOT NULL, `avatarIndex` INTEGER NOT NULL, `ed25519PublicKey` BLOB NOT NULL, `x25519PublicKey` BLOB NOT NULL, `fingerprint` TEXT NOT NULL, `verified` INTEGER NOT NULL, `lastSeenMs` INTEGER NOT NULL, `blocked` INTEGER NOT NULL, PRIMARY KEY(`senderIdHex`))",
+        "fields": [
+          {
+            "fieldPath": "senderIdHex",
+            "columnName": "senderIdHex",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nickname",
+            "columnName": "nickname",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "avatarIndex",
+            "columnName": "avatarIndex",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ed25519PublicKey",
+            "columnName": "ed25519PublicKey",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "x25519PublicKey",
+            "columnName": "x25519PublicKey",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fingerprint",
+            "columnName": "fingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "verified",
+            "columnName": "verified",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSeenMs",
+            "columnName": "lastSeenMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "blocked",
+            "columnName": "blocked",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "senderIdHex"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '481311b0b8a03aba720c9066788fb201')"
+    ]
+  }
+}

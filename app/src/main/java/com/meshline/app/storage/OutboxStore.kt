@@ -85,6 +85,10 @@ interface OutboxDao {
     @Query("DELETE FROM outbox WHERE id = :id")
     suspend fun delete(id: Long)
 
+    /** "Clear chat": the pending deliveries of one peer are cancelled. */
+    @Query("DELETE FROM outbox WHERE peerIdHex = :hex")
+    suspend fun deleteForPeer(hex: String): Int
+
     @Query("DELETE FROM outbox WHERE createdAtMs < :cutoffMs")
     suspend fun deleteOlderThan(cutoffMs: Long): Int
 
@@ -156,6 +160,8 @@ class OutboxRepository(
     }
 
     override suspend fun delete(id: Long) = dao.delete(id)
+
+    override suspend fun deleteForPeer(peerIdHex: String): Int = dao.deleteForPeer(peerIdHex)
 
     override suspend fun deleteOlderThan(cutoffMs: Long): Int = dao.deleteOlderThan(cutoffMs)
 

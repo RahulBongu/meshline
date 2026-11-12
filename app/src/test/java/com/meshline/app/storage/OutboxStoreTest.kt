@@ -24,6 +24,7 @@ class OutboxStoreTest {
         override suspend fun all(): List<OutboxEntity> = emptyList()
         override suspend fun updateState(id: Long, state: String, attempts: Int) = Unit
         override suspend fun delete(id: Long) = Unit
+        override suspend fun deleteForPeer(hex: String): Int = 0
         override suspend fun deleteOlderThan(cutoffMs: Long): Int = 0
         override suspend fun deleteAll() = Unit
     }

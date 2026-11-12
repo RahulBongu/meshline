@@ -21,5 +21,8 @@ keystore.properties
 *.apk
 *.aab
 
+# Test-day build output (tools/test-day.ps1)
+test-apks/
+
 # Misc local files
 *.log

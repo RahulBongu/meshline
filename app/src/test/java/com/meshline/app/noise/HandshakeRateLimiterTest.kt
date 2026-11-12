@@ -143,4 +143,63 @@ class HandshakeRateLimiterTest {
             limiter.remainingDhOps(),
         )
     }
+
+    @Test
+    fun `the reserved half keeps room for protected senders`() {
+        val limiter = HandshakeRateLimiter { now }
+        val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
+        // A junk sender may only spend the general half.
+        repeat(generalCap) { assertTrue("junk op $it", limiter.allowDhWork(1, HandshakeTier.JUNK, "junk")) }
+        assertFalse("the junk sender must not touch the reserve", limiter.allowDhWork(1, HandshakeTier.JUNK, "junk"))
+
+        // A protected sender (a QR contact) may spend the reserved half — up
+        // to its **own per-sender allowance**.
+        val contactAllowance = HandshakeTier.CONTACT.reservedOpsPerMinute
+        repeat(contactAllowance) {
+            assertTrue("contact op $it", limiter.allowDhWork(1, HandshakeTier.CONTACT, "contact-1"))
+        }
+        assertFalse(
+            "the contact must not spend more than its own allowance",
+            limiter.allowDhWork(1, HandshakeTier.CONTACT, "contact-1"),
+        )
+        // ...but the reserve is still there for somebody else.
+        assertTrue(
+            "another contact must not be starved",
+            limiter.allowDhWork(1, HandshakeTier.CONTACT, "contact-2"),
+        )
+    }
+
+    @Test
+    fun `one connection announcing six fake identities spends at most one allowance`() {
+        val limiter = HandshakeRateLimiter { now }
+        val generalCap = NoiseProtocol.MAX_X25519_OPS_PER_MINUTE - NoiseProtocol.RESERVED_X25519_OPS_PER_MINUTE
+        // The general pool is spent first (by anyone).
+        repeat(generalCap) { assertTrue(limiter.allowDhWork(1, HandshakeTier.JUNK, "junk")) }
+
+        // Now one connection announces six fake identities. Each handshake costs
+        // 5 operations, and they all draw on **the same connection allowance**.
+        val allowance = HandshakeTier.NEIGHBOUR.reservedOpsPerMinute
+        var spent = 0
+        repeat(6) {
+            if (limiter.allowDhWork(5, HandshakeTier.NEIGHBOUR, "conn-1")) {
+                spent += 5
+            } else {
+                assertTrue(
+                    "the connection must be refused once its allowance is spent",
+                    spent >= allowance,
+                )
+            }
+        }
+        assertTrue(
+            "one connection must not spend more than one allowance (spent=$spent, allowance=$allowance)",
+            spent <= allowance,
+        )
+        assertEquals("the connection may use its whole allowance", allowance, spent)
+
+        // A *different* connection has its own allowance.
+        assertTrue(
+            "another connection must not be starved by the first",
+            limiter.allowDhWork(5, HandshakeTier.NEIGHBOUR, "conn-2"),
+        )
+    }
 }

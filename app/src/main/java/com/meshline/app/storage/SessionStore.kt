@@ -16,7 +16,7 @@ package com.meshline.app.storage
  * the snapshot handed in carries a key. The column exists only so a future
  * library with an export path can fill it in without a schema change.
  */
-class SessionStore(private val dao: NoiseSessionDao) {
+class SessionStore(private val dao: NoiseSessionDao) : SessionDirectory {
 
     /** Stores (or replaces) a session. */
     suspend fun save(snapshot: SessionSnapshot) {
@@ -33,7 +33,9 @@ class SessionStore(private val dao: NoiseSessionDao) {
     suspend fun delete(peerIdHex: String) = dao.delete(peerIdHex)
 
     /** Panic wipe (§7): every session goes. */
-    suspend fun wipe() = dao.deleteAll()
+    override suspend fun wipe() {
+        dao.deleteAll()
+    }
 
     companion object {
         /**

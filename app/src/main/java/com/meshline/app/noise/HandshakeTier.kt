@@ -25,7 +25,12 @@ enum class HandshakeTier(
     /** QR-verified contact — the highest rank. */
     CONTACT(60),
 
-    /** A connected neighbour that has delivered a verified ANNOUNCE. */
+    /**
+     * A **direct** neighbour that has delivered a verified ANNOUNCE.
+     *
+     * Its allowance is spent **per connection**: one link can never use more
+     * than one allowance, however many identities it announces.
+     */
     NEIGHBOUR(30),
 
     /** Unknown sender: the general pool only, never the reserve. */
@@ -35,18 +40,18 @@ enum class HandshakeTier(
 /**
  * Decides the handshake tier of a sender.
  *
- * The rule the project cares about: **a connected neighbour is protected
- * only after it has delivered a verified ANNOUNCE.** Being connected is not
- * enough — a peer that connects and stays silent must not be able to spend
- * the reserved budget. "Delivered a verified ANNOUNCE" means its key is in
- * the key cache, because the cache only learns keys from verified announces.
+ * The rule the project cares about: **a neighbour is protected only after it
+ * has delivered a verified ANNOUNCE, and only when it is a *direct* peer.**
+ * Being relayed through somebody else is not being a neighbour — a handshake
+ * that arrives via a relay uses the general pool only, so a peer cannot
+ * launder its budget through a friendly relay.
  */
 object HandshakeTiers {
 
     /**
      * @param verified the peer is a QR-verified contact.
-     * @param announced the peer delivered a verified ANNOUNCE (its key is cached).
-     * @param connected the peer is currently linked to us.
+     * @param announced the direct neighbour delivered a verified ANNOUNCE.
+     * @param connected the handshake arrived **directly** from that neighbour.
      */
     fun tierOf(verified: Boolean, announced: Boolean, connected: Boolean): HandshakeTier = when {
         verified -> HandshakeTier.CONTACT

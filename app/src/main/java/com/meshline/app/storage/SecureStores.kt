@@ -14,6 +14,6 @@ class SecureStores(private val db: MeshlineDatabase) {
     /** The receiver's record of the application-level ids it already showed. */
     val seen = SeenMessageStore(db.seenMessageDao())
 
-    /** The private messages we received. */
-    val inbox = db.inboxDao()
+    /** The chat history (both directions). */
+    val messages: MessageStore = RoomMessageStore(db.messagesDao())
 }

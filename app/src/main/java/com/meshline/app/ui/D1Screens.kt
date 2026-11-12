@@ -3,7 +3,9 @@ package com.meshline.app.ui
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,12 +31,14 @@ import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.common.BitMatrix
+import com.meshline.app.MeshlineColors
 import com.meshline.app.protocol.AvatarTable
 import com.meshline.app.profile.Profile
 import com.meshline.app.profile.ProfileStore
 import com.meshline.app.security.QrPayload
 import com.meshline.app.security.SecureStorageStatus
 import com.meshline.app.storage.ContactEntity
+import com.meshline.app.storage.MessageRetention
 
 fun qrBitmap(text: String, size: Int = 512): Bitmap {
     val writer = QRCodeWriter()
@@ -93,7 +97,13 @@ fun ContactsScreen(contacts: List<ContactEntity>, onOpen: (ContactEntity) -> Uni
 }
 
 @Composable
-fun SettingsProfileScreen(store: ProfileStore, initial: Profile, onSaved: () -> Unit) {
+fun SettingsProfileScreen(
+    store: ProfileStore,
+    initial: Profile,
+    retention: MessageRetention = MessageRetention.OFF,
+    onRetention: (MessageRetention) -> Unit = {},
+    onSaved: () -> Unit,
+) {
     var nick by remember(initial.nickname) { mutableStateOf(initial.nickname) }
     var avatar by remember(initial.avatarIndex) { mutableStateOf(initial.avatarIndex.toInt()) }
     Surface(modifier = Modifier.fillMaxSize()) {
@@ -104,9 +114,37 @@ fun SettingsProfileScreen(store: ProfileStore, initial: Profile, onSaved: () -> 
             Text("Fruit: ${AvatarTable.name(avatar)}")
             Button(onClick = { avatar = (avatar + 1) % 16 }, modifier = Modifier.fillMaxWidth()) { Text("Next fruit") }
             Spacer(Modifier.height(16.dp))
+            Text("Message retention", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "How long the chat history is kept. \"Off\" keeps everything; " +
+                    "\"Clear chat\" always empties one conversation.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (option in MessageRetention.entries) {
+                    Button(
+                        onClick = { onRetention(option) },
+                        modifier = Modifier.weight(1f),
+                    ) { Text(retentionLabel(option)) }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Currently: ${retentionLabel(retention)}",
+                color = MeshlineColors.TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(16.dp))
             Button(onClick = { store.save(Profile(nick, avatar.toByte())); onSaved() }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
     }
+}
+
+/** The retention label the user sees. */
+fun retentionLabel(retention: MessageRetention): String = when (retention) {
+    MessageRetention.OFF -> "Off"
+    MessageRetention.ONE_DAY -> "1 day"
+    MessageRetention.SEVEN_DAYS -> "7 days"
 }
 
 /**

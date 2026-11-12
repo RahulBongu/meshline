@@ -135,6 +135,8 @@ fun PrivateChatScreen(
     peer: PrivatePeer,
     messages: List<PrivateChatMessage>,
     onSend: (String) -> Unit,
+    onResend: (String) -> Unit,
+    onClearChat: () -> Unit,
     onBack: () -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
@@ -151,6 +153,8 @@ fun PrivateChatScreen(
                     Spacer(Modifier.padding(horizontal = 4.dp))
                     Text("✓ verified", color = MeshlineColors.Accent, style = MaterialTheme.typography.bodySmall)
                 }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onClearChat) { Text("Clear chat") }
             }
             if (peer.onHold) {
                 Text(
@@ -173,11 +177,16 @@ fun PrivateChatScreen(
                             color = if (m.outgoing) MeshlineColors.TextPrimary else MeshlineColors.Accent,
                             style = MaterialTheme.typography.bodyMedium,
                         )
-                        Text(
-                            stateLabel(m),
-                            color = MeshlineColors.TextSecondary,
-                            style = MaterialTheme.typography.labelSmall,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                stateLabel(m),
+                                color = MeshlineColors.TextSecondary,
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                            if (m.resendable) {
+                                TextButton(onClick = { onResend(m.messageIdHex) }) { Text("Resend") }
+                            }
+                        }
                     }
                 }
             }
@@ -200,13 +209,13 @@ fun PrivateChatScreen(
 }
 
 /** The honest label for a message state. */
-private fun stateLabel(m: PrivateChatMessage): String = when {
-    !m.outgoing -> "received"
-    m.state == OutboxState.QUEUED -> "Queued — waiting for a secure session"
-    m.state == OutboxState.SENT -> "Sent — handed to the mesh"
-    m.state == OutboxState.DELIVERED -> "Delivered"
-    m.state == OutboxState.READ -> "Read"
-    else -> m.state.name
+private fun stateLabel(m: PrivateChatMessage): String = when (m.state) {
+    "QUEUED" -> "Queued — waiting for a secure session"
+    "SENT" -> "Sent — handed to the mesh"
+    "DELIVERED" -> "Delivered"
+    "READ" -> "Read"
+    "NOT_DELIVERED" -> "Not delivered — nobody acknowledged it"
+    else -> if (m.outgoing) m.state else "received"
 }
 
 /**

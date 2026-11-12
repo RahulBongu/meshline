@@ -110,14 +110,20 @@ INTERNET permission on the **merged manifest** or in
 `aapt dump permissions app-universal-debug.apk`.
 
 On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
-`NoiseNonceOrderingTest` 7, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 9,
+`NoiseNonceOrderingTest` 7, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 11,
 `HandshakeTierTest` 4, `MessageDedupeTest` 3, `PrivateOutboxTest` 1,
-`SessionCodecTest` 4, `SessionStoreTest` 2, `OutboxStoreTest` 2 —
-**120 tests, 0 failures** in total. The instrumented suite (device only) is
-`DatabaseInstrumentedTest` 1, `IdentityStoreInstrumentedTest` 4,
-`DbPassphraseInstrumentedTest` 1, `SecureStorageStatusTest` 2,
-`SecureStoresInstrumentedTest` 4 — **12 tests, compiled only** (no device is
-attached in this checkout).
+`SecureChannelTest` 5, `SessionCodecTest` 4, `SessionStoreTest` 2,
+`OutboxStoreTest` 2 — **127 tests, 0 failures** in total. The instrumented
+suite (device only) is `DatabaseInstrumentedTest` 1,
+`IdentityStoreInstrumentedTest` 4, `DbPassphraseInstrumentedTest` 1,
+`SecureStorageStatusTest` 2, `SecureStoresInstrumentedTest` 4,
+`PanicWipeInstrumentedTest` 2, `RoomMigrationTest` 2 — **16 tests, compiled
+only** (no device is attached in this checkout).
+
+The Room schemas of every database version are committed under
+`app/schemas/com.meshline.app.storage.MeshlineDatabase/` (v1, v5, v6) — they
+are what the instrumented **migration chain test** (v1 → v6) uses to build a
+real v1 database and walk it up with the production migrations.
 
 > **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
 > typically uninstalls the app (and its data) after the run, and the
@@ -171,6 +177,12 @@ Fragmentation (§5 of the spec): chunks of the *entire encoded packet* inside
 in order with a 30 s timeout, then decoded once (signature verified there).
 
 ## Physical-phone test — Phase C (you do this, I cannot run BLE here)
+
+> **The full test plan for the test day** (emulators, two phones, Phase C / D1 /
+> D2 builds, and the results tables to paste back) is in
+> [`TESTING.md`](TESTING.md). The build helper is `tools/test-day.ps1`, which
+> builds all three APKs side by side with `git worktree` — your checkout is
+> never switched to another branch.
 
 **You need:** 2 physical phones (any brands; ideally different vendors), both
 Android 8.0+, both with Bluetooth LE and location services on. Install the same
@@ -313,8 +325,8 @@ Measured with `:app:assembleRelease` (minified, resource-shrunk, unsigned) on
 |---|---:|---:|---|
 | `app-arm64-v8a-release-unsigned.apk` | 5,673,688 | 5.41 | < 25 MB |
 | `app-armeabi-v7a-release-unsigned.apk` | 5,311,786 | 5.07 | < 25 MB |
-| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,722,844 | 5.45 | < 25 MB |
-| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,360,938 | 5.11 | < 25 MB |
+| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,728,596 | 5.46 | < 25 MB |
+| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,366,690 | 5.12 | < 25 MB |
 
 Each release/releaseSmoke APK contains exactly one ABI and
 `lib/.../libsqlcipher.so`, and none of them declares
@@ -369,9 +381,16 @@ What exists (all pure JVM, all simulator-tested):
   the Noise engine; the engine's outgoing packets go back into the router; the
   service ticks the handshake retransmits, the outbox retries, the re-keys and
   the expiry every 2 s. The UI has **Chats** tabs (Nearby / Private), a
-  private chat with the honest **Queued / Sent / Delivered / Read** states, a
-  key-change warning that needs an explicit accept, the verified badge (QR
-  contacts only) and the panic wipe behind three taps plus a confirmation.
+  private chat with the honest **Queued / Sent / Delivered / Read** states
+  (plus **Not delivered** with a **Resend** button and a per-chat **Clear
+  chat**), a key-change warning that needs an explicit accept, the verified
+  badge (QR contacts only), the **message retention** setting (off / 1 day /
+  7 days, FR-15) and the panic wipe behind three taps plus a confirmation.
+- **Chat history vs delivery (FR-15):** the `messages` table is the history
+  (both directions) and the `outbox` tracks **delivery only**. A message
+  nobody acknowledged ends as **Not delivered** — never "Sent" — and can be
+  sent again (a fresh outbox entry, a fresh nonce, the same application-level
+  id, so the receiver still shows it once).
 
 Wire format: `PROTOCOL.md` §6.3 and §6.5. Design and its amendments:
 `NOISE_DESIGN.md`.
@@ -499,6 +518,25 @@ Four review items were closed on this branch:
    ```
    *Expect:* no keys, no fingerprints, no message text — only connection and
    GATT state.
+5. **A message that is never acknowledged.**
+   1. On A: open a private chat with a phone that is **not there** (or take B
+      out of range) and send a message.
+   2. It stays **Queued**/**Sent** while it retries.
+   3. After the 12 h store-and-forward window it must end as **Not
+      delivered** — never "Sent" forever.
+   4. Tap **Resend**: it creates a fresh outbox entry (a fresh nonce, the same
+      message id) and goes out again when the peer is back. The peer shows it
+      **once**.
+6. **Retention and "Clear chat".**
+   1. Settings → **Message retention** → *1 day* (or *7 days*) → the service
+      purges the older history with its periodic tick. Set it back to *Off*
+      (the default) to keep everything.
+   2. In a private chat → **Clear chat** → that conversation is empty; the
+      other conversations are untouched.
+7. **The chat history persists.** Force-stop Meshline and relaunch it → the
+   private chat history is **still there** (it lives in the encrypted
+   database, not in memory). This is new: before, the chat was only the
+   outbox, so it expired with it.
 
 ## Open issues after D1
 

@@ -52,6 +52,8 @@ import com.meshline.app.service.MeshStatsSnapshot
 import com.meshline.app.service.PrivateChatMessage
 import com.meshline.app.service.PrivatePeer
 import com.meshline.app.storage.ContactsRepository
+import com.meshline.app.storage.MessageRetention
+import com.meshline.app.storage.RetentionStore
 import com.meshline.app.ui.ChatsScreen
 import com.meshline.app.ui.ContactsScreen
 import com.meshline.app.ui.KeyChangeDialog
@@ -72,9 +74,14 @@ import kotlinx.coroutines.launch
  * full UI polish land in D2/E.
  */
 class MainActivity : ComponentActivity() {
+    /** The message retention (FR-15) — kept here so the service action and the
+     *  UI stay in sync. */
+    private var retention by mutableStateOf(MessageRetention.OFF)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestBlePermissionsIfNeeded()
+        retention = RetentionStore(applicationContext).load()
         setContent {
             MeshlineTheme {
                 App(
@@ -85,6 +92,13 @@ class MainActivity : ComponentActivity() {
                     onAcceptKey = { peer -> acceptKey(peer) },
                     onRejectKey = { peer -> rejectKey(peer) },
                     onPanicWipe = { panicWipe() },
+                    onResend = { messageId -> resend(messageId) },
+                    onClearChat = { peer -> clearChat(peer) },
+                    retention = retention,
+                    onSetRetention = { option ->
+                        retention = option
+                        applyRetention(option)
+                    },
                 )
             }
         }
@@ -143,6 +157,30 @@ class MainActivity : ComponentActivity() {
         startForegroundService(intent)
     }
 
+    /** Sends a message that was never delivered again. */
+    private fun resend(messageIdHex: String) {
+        val intent = Intent(this, BleMeshService::class.java)
+            .setAction(BleMeshService.ACTION_RESEND)
+            .putExtra(BleMeshService.EXTRA_MESSAGE_ID, messageIdHex)
+        startForegroundService(intent)
+    }
+
+    /** "Clear chat": the history of one conversation goes. */
+    private fun clearChat(peerIdHex: String) {
+        val intent = Intent(this, BleMeshService::class.java)
+            .setAction(BleMeshService.ACTION_CLEAR_CHAT)
+            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+        startForegroundService(intent)
+    }
+
+    /** The message retention (FR-15). */
+    private fun applyRetention(retention: MessageRetention) {
+        val intent = Intent(this, BleMeshService::class.java)
+            .setAction(BleMeshService.ACTION_SET_RETENTION)
+            .putExtra(BleMeshService.EXTRA_RETENTION_DAYS, retention.days)
+        startForegroundService(intent)
+    }
+
     private fun requestBlePermissionsIfNeeded() {
         val perms = mutableListOf<String>()
         if (android.os.Build.VERSION.SDK_INT >= 31) {
@@ -165,10 +203,23 @@ class MainActivity : ComponentActivity() {
 private enum class Screen { HOME, MY_QR, SCAN, CONTACTS, SETTINGS, PRIVATE_CHAT }
 
 @Composable
-private fun App(onStart: () -> Unit, onSendPublic: (String) -> Unit, onSendPrivate: (String, String) -> Unit, onOpenChat: (String) -> Unit, onAcceptKey: (String) -> Unit, onRejectKey: (String) -> Unit, onPanicWipe: () -> Unit) {
+private fun App(
+    onStart: () -> Unit,
+    onSendPublic: (String) -> Unit,
+    onSendPrivate: (String, String) -> Unit,
+    onOpenChat: (String) -> Unit,
+    onAcceptKey: (String) -> Unit,
+    onRejectKey: (String) -> Unit,
+    onPanicWipe: () -> Unit,
+    onResend: (String) -> Unit,
+    onClearChat: (String) -> Unit,
+    retention: MessageRetention,
+    onSetRetention: (MessageRetention) -> Unit,
+) {
     val app = LocalContext.current.applicationContext
     val identityStore = remember { AndroidKeystoreIdentityStore(app) }
     val profileStore = remember { ProfileStore(app) }
+    val retentionStore = remember { RetentionStore(app) }
     val contactsRepo = remember { ContactsRepository(app) }
     val scope = rememberCoroutineScope()
 
@@ -292,6 +343,8 @@ private fun App(onStart: () -> Unit, onSendPublic: (String) -> Unit, onSendPriva
         screen == Screen.SETTINGS -> SettingsProfileScreen(
             store = profileStore,
             initial = prof,
+            retention = retention,
+            onRetention = { option -> onSetRetention(option) },
             onSaved = {
                 profile = profileStore.load()
                 screen = Screen.HOME
@@ -307,6 +360,8 @@ private fun App(onStart: () -> Unit, onSendPublic: (String) -> Unit, onSendPriva
                     peer = peer,
                     messages = privateMessages.filter { it.peerIdHex == peer.peerIdHex },
                     onSend = { text -> onSendPrivate(peer.peerIdHex, text) },
+                    onResend = { messageId -> onResend(messageId) },
+                    onClearChat = { onClearChat(peer.peerIdHex) },
                     onBack = { screen = Screen.HOME },
                 )
             }
