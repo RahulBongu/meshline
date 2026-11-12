@@ -29,6 +29,7 @@ class MessageDedupeTest {
             override suspend fun rows(): List<OutboxRow> = emptyList()
             override suspend fun markAttempt(id: Long, state: OutboxState, attempts: Int) = Unit
             override suspend fun delete(id: Long) = Unit
+            override suspend fun deleteForPeer(peerIdHex: String): Int = 0
             override suspend fun deleteOlderThan(cutoffMs: Long) = 0
         }
         val peer = "aabbccddeeff0011"

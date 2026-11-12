@@ -16,10 +16,14 @@ import kotlinx.coroutines.flow.flow
  *
  * If the DB cannot be opened/read (Keystore key invalidated, file corrupt),
  * the repository wipes the passphrase + DB, records a [SecureStorageStatus]
- * notice, and continues with an empty list — never crashes. The UI shows the
+ * notice, and continues with an empty list - never crashes. The UI shows the
  * "secure storage was reset" dialog; peers see a new identity (key change).
+ *
+ * It also implements [ContactDirectory] - the view of the contacts the D2
+ * secure channel needs (the trusted X25519 key, the QR-verified flag, the
+ * block list).
  */
-class ContactsRepository(private val context: Context) {
+class ContactsRepository(private val context: Context) : ContactDirectory {
 
     @Volatile
     private var db: MeshlineDatabase? = null
@@ -29,7 +33,7 @@ class ContactsRepository(private val context: Context) {
         db ?: DatabaseFactory.create(context).also { db = it }
 
     /**
-     * The D2 stores (sessions, outbox, inbox, seen ids) — the **same** Room
+     * The D2 stores (sessions, outbox, seen ids, messages) - the **same** Room
      * handle, so the app opens the encrypted database once.
      */
     val secure: SecureStores by lazy { SecureStores(open()) }
@@ -42,7 +46,7 @@ class ContactsRepository(private val context: Context) {
         emit(emptyList())
     }
 
-    suspend fun all(): List<ContactEntity> = runCatching {
+    override suspend fun all(): List<ContactEntity> = runCatching {
         open().contactsDao().allOnce()
     }.getOrElse {
         resetStorage()
@@ -59,15 +63,15 @@ class ContactsRepository(private val context: Context) {
     }
 
     /** The X25519 key we know for this peer (from a QR-verified contact). */
-    suspend fun x25519For(peerIdHex: String): ByteArray? =
+    override suspend fun x25519For(peerIdHex: String): ByteArray? =
         runCatching { open().contactsDao().find(peerIdHex)?.x25519PublicKey }.getOrNull()
 
     /** Is this peer a QR-verified contact? */
-    suspend fun isVerified(peerIdHex: String): Boolean =
+    override suspend fun isVerified(peerIdHex: String): Boolean =
         runCatching { open().contactsDao().find(peerIdHex)?.verified == true }.getOrDefault(false)
 
     /** Is this peer blocked? */
-    suspend fun isBlocked(peerIdHex: String): Boolean =
+    override suspend fun isBlocked(peerIdHex: String): Boolean =
         runCatching { open().contactsDao().find(peerIdHex)?.blocked == true }.getOrDefault(false)
 
     /**
@@ -75,7 +79,11 @@ class ContactsRepository(private val context: Context) {
      * contact loses the QR-verified badge (the scanned fingerprint no longer
      * matches) and becomes TOFU.
      */
-    suspend fun acceptNewKeys(peerIdHex: String, ed25519PublicKey: ByteArray, x25519PublicKey: ByteArray) {
+    override suspend fun acceptNewKeys(
+        peerIdHex: String,
+        ed25519PublicKey: ByteArray,
+        x25519PublicKey: ByteArray,
+    ) {
         runCatching {
             val dao = open().contactsDao()
             val existing = dao.find(peerIdHex) ?: return
@@ -92,12 +100,12 @@ class ContactsRepository(private val context: Context) {
     }
 
     /** Blocks a peer (the user rejected a key change). */
-    suspend fun block(peerIdHex: String) {
+    override suspend fun block(peerIdHex: String) {
         runCatching { open().contactsDao().setBlocked(peerIdHex, true) }
     }
 
     /** Panic wipe: every contact goes with the identity. */
-    suspend fun deleteAll() {
+    override suspend fun deleteAll() {
         runCatching { open().contactsDao().deleteAll() }
     }
 

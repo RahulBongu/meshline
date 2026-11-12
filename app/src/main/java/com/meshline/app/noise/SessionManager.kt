@@ -40,12 +40,14 @@ class SessionManager(
     /**
      * The tier of a sender for the handshake budget (see [HandshakeTier]).
      *
-     * A **connected neighbour is protected only after it has delivered a
-     * verified ANNOUNCE** — being linked is not enough, otherwise a peer that
-     * connects and stays silent could spend the reserved budget. QR-verified
-     * contacts rank above plain neighbours.
+     * A **NEIGHBOUR** is a peer whose handshake arrived **directly** from one
+     * of our linked neighbours (a handshake relayed by somebody else is not a
+     * neighbour handshake). A **QR-verified contact** ranks above it. The
+     * reserved budget is then spent **per connection** for a neighbour, so one
+     * link cannot spend more than its allowance no matter how many identities
+     * it announces.
      */
-    private val handshakeTier: (ByteArray) -> HandshakeTier = { HandshakeTier.JUNK },
+    private val handshakeTier: (ByteArray, ByteArray) -> HandshakeTier = { _, _ -> HandshakeTier.JUNK },
 ) {
     /** Our own id (the outer packets' senderId). */
     val ownId: ByteArray = MessageIds.idFromPublicKey(localEd25519PublicKey)
@@ -138,7 +140,7 @@ class SessionManager(
         }
         // The global work budget: a peer that reconnects under a new BLE
         // address must not be able to make us do endless key agreement.
-        if (!limiter.allowDhWork(NoiseProtocol.DH_COST_START, handshakeTier(peerId), hex(peerId))) {
+        if (!limiter.allowDhWork(NoiseProtocol.DH_COST_START, handshakeTier(peerId, peerId), hex(peerId))) {
             counters.handshakeBudgetExhausted++
             return null
         }
@@ -231,8 +233,12 @@ class SessionManager(
         // address gets a fresh per-connection bucket, but not a fresh work
         // budget (NOISE_DESIGN §5). Only the tiers that earned it may spend
         // the reserved half, and only up to their per-sender allowance.
-        val tier = handshakeTier(packet.senderId)
-        if (!limiter.allowDhWork(NoiseProtocol.dhCost(payload.step), tier, hex(packet.senderId))) {
+        val tier = handshakeTier(packet.senderId, fromPeer)
+        // The reserved budget is scoped: a contact spends it per *sender*, a
+        // neighbour per *connection* — one link cannot spend more than one
+        // allowance, however many identities it announces.
+        val scopeKey = if (tier == HandshakeTier.CONTACT) hex(packet.senderId) else hex(fromPeer)
+        if (!limiter.allowDhWork(NoiseProtocol.dhCost(payload.step), tier, scopeKey)) {
             counters.handshakeBudgetExhausted++
             return events
         }

@@ -79,6 +79,12 @@ class PrivateOutboxTest {
             rows.remove(id)
         }
 
+        override suspend fun deleteForPeer(peerIdHex: String): Int {
+            val hit = rows.values.filter { it.peerIdHex == peerIdHex }
+            hit.forEach { rows.remove(it.id) }
+            return hit.size
+        }
+
         override suspend fun deleteOlderThan(cutoffMs: Long): Int {
             val old = rows.values.filter { it.createdAtMs < cutoffMs }
             old.forEach { rows.remove(it.id) }
@@ -240,7 +246,7 @@ class PrivateOutboxTest {
                     val hp = a.manager.startHandshake(b.id)
                     if (hp != null) a.router.onLocalSend(hp, retransmit = true)
                 }
-                val packets = senderMessenger!!.tick()
+                val packets = senderMessenger!!.tick().map { it.packet }
                 for (p in packets) a.router.onLocalSend(p)
                 delay(25)
                 val next = senderMessenger!!.nextDueAtMs()

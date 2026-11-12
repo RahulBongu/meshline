@@ -549,15 +549,29 @@ nonce window (see `GROUPS_DESIGN.md` §5).
   → **Delivered** / **Read** (receipts, §6.4). A message queued while the
   peer is away shows *Queued* until the silent re-handshake completes, then
   flips to *Sent*.
-  - A panic wipe (§7) erases every session, every peer record and the outbox.
+- **Chat history (D2, FR-15):** the `messages` table (DB version 6,
+  `MIGRATION_5_6`) is the **history** — both directions — while the outbox
+  tracks **delivery only**. The retention is a setting: **off (keep
+  everything, the default) / 1 day / 7 days**; the service purges the expired
+  rows with its periodic tick. **"Clear chat"** empties one conversation (and
+  cancels its pending sends) whatever the retention is.
+  - A message that nobody ever acknowledged ends as **Not delivered** — never
+    as "Sent". It can be sent again: **Resend** creates a fresh outbox entry
+    with the same application-level id, so the receiver still shows it once.
 - **Handshake tiers (D2, FR-12 review):** the reserved half of the global
-  handshake budget is split **per sender**: a QR-verified contact may take
-  **60 X25519 operations / minute**, a connected neighbour that has delivered
-  a **verified ANNOUNCE** may take **30**, and everybody else only the general
-  half. A connected neighbour is protected **only after** it has delivered a
-  verified ANNOUNCE — being linked is not enough, otherwise a peer that
-  connects and stays silent could spend the reserved budget. One peer can
-  therefore never starve a contact's handshake.
+  handshake budget is split: a QR-verified contact may take
+  **60 X25519 operations / minute** (per sender), a **direct** neighbour that
+  has delivered a verified ANNOUNCE may take **30** (per **connection** — one
+  link cannot use more than one allowance, however many identities it
+  announces), and everybody else only the general half.
+  A **direct** neighbour is protected **only after** it has delivered a
+  verified ANNOUNCE, and only when the handshake arrived **straight** from it:
+  a handshake that was relayed uses the general pool only, so a peer cannot
+  launder its budget through a friendly relay. One peer can therefore never
+  starve a contact's handshake.
+- **Panic wipe (§7):** erases the identity (and its Keystore alias), the
+  contacts, the Noise sessions, the outbox, the chat history, the receiver's
+  seen ids, the preferences and the database file.
 - **Receiver-side dedupe (D2):** the application-level message ids the
   receiver has shown are persisted in the `seen_message_ids` table (DB version
   4, `MIGRATION_3_4`) with a **30-day retention** — longer than the sender's

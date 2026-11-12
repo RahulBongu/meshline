@@ -24,6 +24,8 @@ import com.meshline.app.security.Identity
 import com.meshline.app.security.KeyCache
 import com.meshline.app.security.SecureStorageStatus
 import com.meshline.app.storage.ContactsRepository
+import com.meshline.app.storage.MessageRetention
+import com.meshline.app.storage.RetentionStore
 import com.meshline.app.transport.BleTransport
 import com.meshline.app.transport.PeerInfo
 import com.meshline.app.transport.ReceivedMessageInfo
@@ -79,6 +81,7 @@ class BleMeshService : Service() {
     private val identityStore by lazy { AndroidKeystoreIdentityStore(applicationContext) }
     private val profileStore by lazy { ProfileStore(applicationContext) }
     private val contacts by lazy { ContactsRepository(applicationContext) }
+    private val retentionStore by lazy { RetentionStore(applicationContext) }
     private val keyCache = KeyCache()
 
     /** Peers we are currently linked to (transport view) — drives the settle window. */
@@ -130,8 +133,11 @@ class BleMeshService : Service() {
             router = r,
             keyCache = keyCache,
             contacts = contacts,
-            store = contacts.secure,
+            outbox = contacts.secure.outbox,
+            dedupe = contacts.secure.seen,
+            messageStore = contacts.secure.messages,            sessionDirectory = contacts.secure.sessions,
             connectedPeers = { connectedPeersHex() },
+            retentionDays = { retentionStore.load().days },
         )
         secureChannel = channel
 
@@ -313,6 +319,18 @@ class BleMeshService : Service() {
                     }
                 }
             }
+            ACTION_CLEAR_CHAT -> {
+                val peer = intent.getStringExtra(EXTRA_PEER_ID)
+                if (peer != null) scope.launch { secureChannel?.clearChat(peer) }
+            }
+            ACTION_RESEND -> {
+                val messageId = intent.getStringExtra(EXTRA_MESSAGE_ID)
+                if (messageId != null) scope.launch { secureChannel?.resend(messageId) }
+            }
+            ACTION_SET_RETENTION -> {
+                val days = intent.getIntExtra(EXTRA_RETENTION_DAYS, 0)
+                retentionStore.save(MessageRetention.of(days))
+            }
             ACTION_ACCEPT_KEY -> {
                 val peer = intent.getStringExtra(EXTRA_PEER_ID)
                 if (peer != null) scope.launch { secureChannel?.acceptKeyChange(peer) }
@@ -331,12 +349,13 @@ class BleMeshService : Service() {
      * go. The app comes back with a **new** identity on the next launch.
      */
     private suspend fun panicWipe() {
-        val channel = secureChannel
-        channel?.wipe()
-        runCatching { identityStore.wipe() }
-        runCatching { DbPassphrase.wipe(applicationContext) }
-        // The UI asks for a fresh identity the next time it opens.
-        SecureStorageStatus.record(applicationContext, SecureStorageStatus.Reason.PANIC_WIPE)
+        PanicWiper(
+            context = applicationContext,
+            identityStore = identityStore,
+            contacts = contacts,
+            profileStore = profileStore,
+            retentionStore = retentionStore,
+        ).wipe(secureChannel)
         setPrivateMessages(emptyList())
         setPrivatePeers(emptyList())
     }
@@ -358,11 +377,16 @@ class BleMeshService : Service() {
         const val ACTION_SEND_PRIVATE = "com.meshline.app.action.SEND_PRIVATE"
         const val ACTION_MARK_READ = "com.meshline.app.action.MARK_READ"
         const val ACTION_OPEN_CHAT = "com.meshline.app.action.OPEN_CHAT"
+        const val ACTION_CLEAR_CHAT = "com.meshline.app.action.CLEAR_CHAT"
+        const val ACTION_RESEND = "com.meshline.app.action.RESEND"
+        const val ACTION_SET_RETENTION = "com.meshline.app.action.SET_RETENTION"
         const val ACTION_ACCEPT_KEY = "com.meshline.app.action.ACCEPT_KEY"
         const val ACTION_REJECT_KEY = "com.meshline.app.action.REJECT_KEY"
         const val ACTION_PANIC_WIPE = "com.meshline.app.action.PANIC_WIPE"
         const val EXTRA_TEXT = "text"
         const val EXTRA_PEER_ID = "peerIdHex"
+        const val EXTRA_MESSAGE_ID = "messageIdHex"
+        const val EXTRA_RETENTION_DAYS = "retentionDays"
 
         private const val CHANNEL_ID = "meshline_mesh"
         private const val NOTIFICATION_ID = 1

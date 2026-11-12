@@ -59,18 +59,20 @@ class SecureStoresInstrumentedTest {
     }
 
     @Test
-    fun theInboxStoresReceivedMessages() = runBlocking {
-        val inbox = db.inboxDao()
-        val row = InboxEntity("id1", "peer1", "hi".toByteArray(), 2_000L, read = false)
-        assertTrue(inbox.insert(row) > 0)
-        // The same id again is ignored (the message is shown once).
-        assertEquals(-1L, inbox.insert(row.copy(read = true)))
-        assertEquals(1, inbox.all().size)
-        assertFalse(inbox.find("id1")!!.read)
-        inbox.markRead("id1")
-        assertTrue(inbox.find("id1")!!.read)
-        inbox.deleteAll()
-        assertTrue(inbox.all().isEmpty())
+    fun theMessageHistoryStoresBothDirections() = runBlocking {
+        val messages = db.messagesDao()
+        val row = MessageEntity("id1", "peer1", false, "hi".toByteArray(), 2_000L, "DELIVERED")
+        messages.upsert(row)
+        assertEquals(1, messages.all().size)
+        assertEquals("hi", String(messages.all().single().text))
+        // The same id again replaces the row (the history is keyed by id).
+        messages.upsert(row.copy(state = "READ"))
+        assertEquals(1, messages.all().size)
+        assertEquals("READ", messages.all().single().state)
+        messages.setState("id1", "DELIVERED")
+        assertEquals("DELIVERED", messages.all().single().state)
+        messages.clearPeer("peer1")
+        assertTrue(messages.all().isEmpty())
     }
 
     @Test

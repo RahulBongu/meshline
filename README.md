@@ -110,13 +110,14 @@ INTERNET permission on the **merged manifest** or in
 `aapt dump permissions app-universal-debug.apk`.
 
 On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
-`NoiseNonceOrderingTest` 7, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 9,
+`NoiseNonceOrderingTest` 7, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 11,
 `HandshakeTierTest` 4, `MessageDedupeTest` 3, `PrivateOutboxTest` 1,
-`SessionCodecTest` 4, `SessionStoreTest` 2, `OutboxStoreTest` 2 —
-**120 tests, 0 failures** in total. The instrumented suite (device only) is
-`DatabaseInstrumentedTest` 1, `IdentityStoreInstrumentedTest` 4,
-`DbPassphraseInstrumentedTest` 1, `SecureStorageStatusTest` 2,
-`SecureStoresInstrumentedTest` 4 — **12 tests, compiled only** (no device is
+`SecureChannelTest` 5, `SessionCodecTest` 4, `SessionStoreTest` 2,
+`OutboxStoreTest` 2 — **127 tests, 0 failures** in total. The instrumented
+suite (device only) is `DatabaseInstrumentedTest` 1,
+`IdentityStoreInstrumentedTest` 4, `DbPassphraseInstrumentedTest` 1,
+`SecureStorageStatusTest` 2, `SecureStoresInstrumentedTest` 4,
+`PanicWipeInstrumentedTest` 2 — **14 tests, compiled only** (no device is
 attached in this checkout).
 
 > **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
@@ -313,8 +314,8 @@ Measured with `:app:assembleRelease` (minified, resource-shrunk, unsigned) on
 |---|---:|---:|---|
 | `app-arm64-v8a-release-unsigned.apk` | 5,673,688 | 5.41 | < 25 MB |
 | `app-armeabi-v7a-release-unsigned.apk` | 5,311,786 | 5.07 | < 25 MB |
-| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,722,844 | 5.45 | < 25 MB |
-| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,360,938 | 5.11 | < 25 MB |
+| `app-arm64-v8a-releaseSmoke.apk` (debug-key-signed) | 5,728,596 | 5.46 | < 25 MB |
+| `app-armeabi-v7a-releaseSmoke.apk` (debug-key-signed) | 5,366,690 | 5.12 | < 25 MB |
 
 Each release/releaseSmoke APK contains exactly one ABI and
 `lib/.../libsqlcipher.so`, and none of them declares
@@ -369,9 +370,16 @@ What exists (all pure JVM, all simulator-tested):
   the Noise engine; the engine's outgoing packets go back into the router; the
   service ticks the handshake retransmits, the outbox retries, the re-keys and
   the expiry every 2 s. The UI has **Chats** tabs (Nearby / Private), a
-  private chat with the honest **Queued / Sent / Delivered / Read** states, a
-  key-change warning that needs an explicit accept, the verified badge (QR
-  contacts only) and the panic wipe behind three taps plus a confirmation.
+  private chat with the honest **Queued / Sent / Delivered / Read** states
+  (plus **Not delivered** with a **Resend** button and a per-chat **Clear
+  chat**), a key-change warning that needs an explicit accept, the verified
+  badge (QR contacts only), the **message retention** setting (off / 1 day /
+  7 days, FR-15) and the panic wipe behind three taps plus a confirmation.
+- **Chat history vs delivery (FR-15):** the `messages` table is the history
+  (both directions) and the `outbox` tracks **delivery only**. A message
+  nobody acknowledged ends as **Not delivered** — never "Sent" — and can be
+  sent again (a fresh outbox entry, a fresh nonce, the same application-level
+  id, so the receiver still shows it once).
 
 Wire format: `PROTOCOL.md` §6.3 and §6.5. Design and its amendments:
 `NOISE_DESIGN.md`.

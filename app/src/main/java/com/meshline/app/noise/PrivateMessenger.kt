@@ -23,6 +23,9 @@ interface Outbox {
     /** Removes a row (the receipt arrived, or it expired). */
     suspend fun delete(id: Long)
 
+    /** Removes the rows of one peer ("clear chat"). */
+    suspend fun deleteForPeer(peerIdHex: String): Int
+
     /** Removes the rows older than the cutoff; returns how many went. */
     suspend fun deleteOlderThan(cutoffMs: Long): Int
 }
@@ -112,8 +115,11 @@ class PrivateMessenger(
     /** The backoff schedule for retries. */
     private val retrySchedule = HashMap<Long, Long>()
 
-    /** Queues a message for [peerId] and returns the outbox row id. */
-    suspend fun send(peerId: ByteArray, peerIdHex: String, text: ByteArray): Long {
+    /**
+     * Queues a message for [peerId] and returns the envelope (with its
+     * application-level id) so the caller can record it in the chat history.
+     */
+    suspend fun send(peerId: ByteArray, peerIdHex: String, text: ByteArray): PrivateEnvelope {
         val envelope = PrivateEnvelope(
             messageId = randomBytes(PrivateEnvelope.MESSAGE_ID_BYTES),
             sentAtMs = nowProvider(),
@@ -121,8 +127,11 @@ class PrivateMessenger(
         )
         val id = outbox.queue(peerIdHex, envelope.encode(), nowProvider())
         retrySchedule[id] = nowProvider()
-        return id
+        return envelope
     }
+
+    /** One (re)send: the packet and the row it came from. */
+    data class Outgoing(val packet: MeshPacket, val messageIdHex: String, val peerIdHex: String)
 
     /**
      * Encrypts and returns the packets that are due for a (re)send.
@@ -130,9 +139,9 @@ class PrivateMessenger(
      * A row is due when its backoff has elapsed. Every attempt is encrypted
      * **again**, under the session that is live now, with a fresh nonce.
      */
-    suspend fun tick(): List<MeshPacket> {
+    suspend fun tick(): List<Outgoing> {
         val now = nowProvider()
-        val packets = mutableListOf<MeshPacket>()
+        val packets = mutableListOf<Outgoing>()
         for (row in outbox.rows()) {
             // A message that was acknowledged is done: it stays in the outbox
             // so the chat can show its state, but it is never retried.
@@ -144,7 +153,10 @@ class PrivateMessenger(
             val attempts = row.attempts + 1
             outbox.markAttempt(row.id, OutboxState.SENT, attempts)
             retrySchedule[row.id] = now + backoffMs(attempts)
-            packets += packet
+            val messageIdHex = runCatching {
+                hex(PrivateEnvelope.decode(row.envelope).messageId)
+            }.getOrDefault("")
+            packets += Outgoing(packet, messageIdHex, row.peerIdHex)
         }
         return packets
     }
@@ -153,17 +165,43 @@ class PrivateMessenger(
      * Handles a receipt: the row leaves the *retry* queue and records the
      * state the user sees (Delivered / Read). The row itself stays until the
      * outbox expiry, so the chat still shows the message with its state.
-     * Returns true when a row was updated.
+     * Returns the application-level message id that was acknowledged.
      */
-    suspend fun onReceipt(peerIdHex: String, messageId: ByteArray, kind: OutboxState = OutboxState.DELIVERED): Boolean {
+    suspend fun onReceipt(
+        peerIdHex: String,
+        messageId: ByteArray,
+        kind: OutboxState = OutboxState.DELIVERED,
+    ): String? {
         val id = hex(messageId)
         val row = outbox.rows().firstOrNull { r ->
             r.peerIdHex == peerIdHex && runCatching { hex(PrivateEnvelope.decode(r.envelope).messageId) }
                 .getOrNull() == id
-        } ?: return false
+        } ?: return null
         outbox.markAttempt(row.id, kind, row.attempts)
         retrySchedule.remove(row.id)
-        return true
+        return id
+    }
+
+    /**
+     * Drops the rows that waited longer than the age limit and returns them:
+     * the caller marks the matching messages **Not delivered** — a message
+     * must never stay "Sent" when nobody ever acknowledged it.
+     */
+    suspend fun expire(): List<OutboxRow> {
+        val cutoff = nowProvider() - MAX_AGE_MS
+        val expired = outbox.rows().filter { it.createdAtMs < cutoff }
+        if (expired.isEmpty()) return emptyList()
+        outbox.deleteOlderThan(cutoff)
+        expired.forEach { retrySchedule.remove(it.id) }
+        return expired
+    }
+
+    /** "Clear chat": the pending deliveries of one peer are cancelled. */
+    suspend fun clearPeer(peerIdHex: String): Int {
+        val rows = outbox.rows().filter { it.peerIdHex == peerIdHex }
+        outbox.deleteForPeer(peerIdHex)
+        rows.forEach { retrySchedule.remove(it.id) }
+        return rows.size
     }
 
     /**
@@ -201,9 +239,6 @@ class PrivateMessenger(
         val now = nowProvider()
         return outbox.rows().mapNotNull { retrySchedule[it.id] }.filter { it > now }.minOrNull()
     }
-
-    /** Drops the rows that waited longer than the age limit. */
-    suspend fun expire(nowMs: Long = nowProvider()): Int = outbox.deleteOlderThan(nowMs - MAX_AGE_MS)
 
     /** The exponential backoff for the n-th attempt. */
     fun backoffMs(attempts: Int): Long {

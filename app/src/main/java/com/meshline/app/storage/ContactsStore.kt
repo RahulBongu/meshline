@@ -56,9 +56,9 @@ interface ContactsDao {
         NoiseSessionEntity::class,
         OutboxEntity::class,
         SeenMessageEntity::class,
-        InboxEntity::class,
+        MessageEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class MeshlineDatabase : RoomDatabase() {
@@ -66,7 +66,7 @@ abstract class MeshlineDatabase : RoomDatabase() {
     abstract fun noiseSessionDao(): NoiseSessionDao
     abstract fun outboxDao(): OutboxDao
     abstract fun seenMessageDao(): SeenMessageDao
-    abstract fun inboxDao(): InboxDao
+    abstract fun messagesDao(): MessagesDao
 
     companion object {
         /**
@@ -142,7 +142,8 @@ abstract class MeshlineDatabase : RoomDatabase() {
         }
         /**
          * v4 → v5 adds the `inbox` table: the private messages we received
-         * (plaintext, protected by SQLCipher).
+         * (plaintext, protected by SQLCipher). It is folded into `messages` by
+         * MIGRATION_5_6.
          */
         val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
             override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
@@ -158,6 +159,44 @@ abstract class MeshlineDatabase : RoomDatabase() {
                     )
                     """.trimIndent()
                 )
+            }
+        }
+
+        /**
+         * v5 → v6 replaces the `inbox` table with the `messages` table: the
+         * chat history now holds **both** directions, while the `outbox` keeps
+         * the delivery queue. The migration copies the received messages into
+         * the new table before dropping the old one, so nothing is lost.
+         */
+        val MIGRATION_5_6 = object : androidx.room.migration.Migration(5, 6) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `messages` (
+                        `messageIdHex` TEXT NOT NULL,
+                        `peerIdHex` TEXT NOT NULL,
+                        `outgoing` INTEGER NOT NULL,
+                        `text` BLOB NOT NULL,
+                        `createdAtMs` INTEGER NOT NULL,
+                        `state` TEXT NOT NULL,
+                        PRIMARY KEY(`messageIdHex`)
+                    )
+                    """.trimIndent()
+                )
+                // Carry the received messages over (a received message that was
+                // read stays "read").
+                runCatching {
+                    db.execSQL(
+                        """
+                        INSERT OR IGNORE INTO `messages`
+                            (`messageIdHex`, `peerIdHex`, `outgoing`, `text`, `createdAtMs`, `state`)
+                        SELECT `messageIdHex`, `peerIdHex`, 0, `text`, `createdAtMs`,
+                               CASE WHEN `read` = 1 THEN 'READ' ELSE 'DELIVERED' END
+                        FROM `inbox`
+                        """.trimIndent()
+                    )
+                }
+                db.execSQL("DROP TABLE IF EXISTS `inbox`")
             }
         }
     }
