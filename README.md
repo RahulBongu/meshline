@@ -117,8 +117,13 @@ On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
 suite (device only) is `DatabaseInstrumentedTest` 1,
 `IdentityStoreInstrumentedTest` 4, `DbPassphraseInstrumentedTest` 1,
 `SecureStorageStatusTest` 2, `SecureStoresInstrumentedTest` 4,
-`PanicWipeInstrumentedTest` 2 — **14 tests, compiled only** (no device is
-attached in this checkout).
+`PanicWipeInstrumentedTest` 2, `RoomMigrationTest` 2 — **16 tests, compiled
+only** (no device is attached in this checkout).
+
+The Room schemas of every database version are committed under
+`app/schemas/com.meshline.app.storage.MeshlineDatabase/` (v1, v5, v6) — they
+are what the instrumented **migration chain test** (v1 → v6) uses to build a
+real v1 database and walk it up with the production migrations.
 
 > **Instrumented tests destroy app data.** `:app:connectedDebugAndroidTest`
 > typically uninstalls the app (and its data) after the run, and the
