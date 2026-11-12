@@ -53,6 +53,16 @@ android {
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
 
+    // Room schema export: the JSON schemas of every database version are
+    // committed under app/schemas/<database>/ so the instrumented migration
+    // test (RoomMigrationTest) can build a v1 database and walk it up to the
+    // current version without guessing.
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDir("$projectDir/schemas")
+        }
+    }
+
     // ABI splits are configured once, then selected per variant below:
     //  - release / releaseSmoke: only arm64-v8a + armeabi-v7a, NO universal
     //    APK, so each artifact stays well under the 25 MB budget.
@@ -157,10 +167,20 @@ dependencies {
     androidTestImplementation("androidx.test:core-ktx:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
+    // The Room migration test (v1 -> v6): it reads the exported schemas from
+    // the androidTest assets and walks a real v1 database up to the current one.
+    androidTestImplementation("androidx.room:room-testing:2.6.1")
     implementation("org.jetbrains:annotations:23.0.0")
     // Real JSON impl for JVM unit tests (android.jar's org.json is stubbed).
     testImplementation("org.json:json:20250517")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+// Room schema export: the JSON schema of every database version is committed
+// under app/schemas/<database>/, so the instrumented migration test can build
+// a v1 database and walk it up to the current version.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }

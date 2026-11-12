@@ -59,7 +59,10 @@ interface ContactsDao {
         MessageEntity::class,
     ],
     version = 6,
-    exportSchema = false,
+    // The schema of every version is exported to app/schemas/ (see the KSP
+    // arguments in build.gradle.kts) so the instrumented migration test can
+    // build a v1 database and walk it up to the current version.
+    exportSchema = true,
 )
 abstract class MeshlineDatabase : RoomDatabase() {
     abstract fun contactsDao(): ContactsDao
@@ -201,3 +204,4 @@ abstract class MeshlineDatabase : RoomDatabase() {
         }
     }
 }
+

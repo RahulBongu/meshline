@@ -173,6 +173,12 @@ in order with a 30 s timeout, then decoded once (signature verified there).
 
 ## Physical-phone test — Phase C (you do this, I cannot run BLE here)
 
+> **The full test plan for the test day** (emulators, two phones, Phase C / D1 /
+> D2 builds, and the results tables to paste back) is in
+> [`TESTING.md`](TESTING.md). The build helper is `tools/test-day.ps1`, which
+> builds all three APKs side by side with `git worktree` — your checkout is
+> never switched to another branch.
+
 **You need:** 2 physical phones (any brands; ideally different vendors), both
 Android 8.0+, both with Bluetooth LE and location services on. Install the same
 `app-universal-debug.apk` on both. Keep both on the same desk first (within 1 m).
@@ -507,6 +513,25 @@ Four review items were closed on this branch:
    ```
    *Expect:* no keys, no fingerprints, no message text — only connection and
    GATT state.
+5. **A message that is never acknowledged.**
+   1. On A: open a private chat with a phone that is **not there** (or take B
+      out of range) and send a message.
+   2. It stays **Queued**/**Sent** while it retries.
+   3. After the 12 h store-and-forward window it must end as **Not
+      delivered** — never "Sent" forever.
+   4. Tap **Resend**: it creates a fresh outbox entry (a fresh nonce, the same
+      message id) and goes out again when the peer is back. The peer shows it
+      **once**.
+6. **Retention and "Clear chat".**
+   1. Settings → **Message retention** → *1 day* (or *7 days*) → the service
+      purges the older history with its periodic tick. Set it back to *Off*
+      (the default) to keep everything.
+   2. In a private chat → **Clear chat** → that conversation is empty; the
+      other conversations are untouched.
+7. **The chat history persists.** Force-stop Meshline and relaunch it → the
+   private chat history is **still there** (it lives in the encrypted
+   database, not in memory). This is new: before, the chat was only the
+   outbox, so it expired with it.
 
 ## Open issues after D1
 
