@@ -129,20 +129,21 @@ function Build-Ref {
         if (-not $apk) { throw "no APK was produced in $apkDir" }
 
         New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-        $target = Join-Path $OutDir $Target.Apk
-        Copy-Item $apk.FullName $target -Force
-        Write-Host "    -> $target ($([Math]::Round($apk.Length / 1MB, 2)) MiB)" -ForegroundColor Green
+        $apkPath = Join-Path $OutDir $Target.Apk
+        Copy-Item $apk.FullName $apkPath -Force
+        Write-Host "    -> $apkPath ($([Math]::Round($apk.Length / 1MB, 2)) MiB)" -ForegroundColor Green
     }
     finally {
         # The worktree is disposable: never leave the repo in a strange state.
-        & git -C $repoRoot worktree remove --force $worktree 2>&1 | Out-Null
-        & git -C $repoRoot worktree prune 2>&1 | Out-Null
+        # (git writes to stderr, so the errors are swallowed on purpose.)
+        & git -C $repoRoot worktree remove --force $worktree *>$null
+        & git -C $repoRoot worktree prune *>$null
     }
 }
 
 # --- build -------------------------------------------------------------------
-$wanted = if ($Build -eq 'all') { $targets } else { $targets | Where-Object { $_.Name -eq $Build } }
-foreach ($target in $wanted) { Build-Ref $target }
+$wanted = if ($Build -eq 'all') { $targets } else { @($targets | Where-Object { $_.Name -eq $Build }) }
+foreach ($ref in $wanted) { Build-Ref $ref }
 
 # --- install -----------------------------------------------------------------
 if ($Install) {
