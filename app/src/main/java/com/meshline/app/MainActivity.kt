@@ -94,6 +94,7 @@ class MainActivity : ComponentActivity() {
                     onPanicWipe = { panicWipe() },
                     onResend = { messageId -> resend(messageId) },
                     onClearChat = { peer -> clearChat(peer) },
+                    onGrantPermissions = { requestBlePermissionsIfNeeded() },
                     retention = retention,
                     onSetRetention = { option ->
                         retention = option
@@ -213,6 +214,7 @@ private fun App(
     onPanicWipe: () -> Unit,
     onResend: (String) -> Unit,
     onClearChat: (String) -> Unit,
+    onGrantPermissions: () -> Unit,
     retention: MessageRetention,
     onSetRetention: (MessageRetention) -> Unit,
 ) {
@@ -372,6 +374,7 @@ private fun App(
                     profileLabel = ProfileStore.displayName(prof, id.fingerprintShort),
                     contactsCount = contacts.size,
                     onStart = onStart,
+                    onGrantPermissions = onGrantPermissions,
                     onMyQr = { screen = Screen.MY_QR },
                     onScan = {
                         if (ContextCompat.checkSelfPermission(app, Manifest.permission.CAMERA) ==
@@ -408,6 +411,7 @@ private fun Home(
     profileLabel: String,
     contactsCount: Int,
     onStart: () -> Unit,
+    onGrantPermissions: () -> Unit,
     onMyQr: () -> Unit,
     onScan: () -> Unit,
     onContacts: () -> Unit,
@@ -421,6 +425,7 @@ private fun Home(
     val lastGattError by BleMeshService.lastGattError.collectAsState(initial = null)
     val advertiseSupported by BleMeshService.advertiseSupported.collectAsState(initial = true)
     val stats by BleMeshService.stats.collectAsState(initial = MeshStatsSnapshot())
+    val startError by BleMeshService.startError.collectAsState(initial = null)
 
     Surface(color = MeshlineColors.Background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
@@ -431,6 +436,18 @@ private fun Home(
                 color = MeshlineColors.TextSecondary,
                 style = MaterialTheme.typography.bodySmall,
             )
+            // The mesh could not start: say why, and offer the fix.
+            if (startError != null) {
+                Text(
+                    "MESH NOT STARTED — $startError",
+                    color = Color(0xFFFF8A80),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(4.dp))
+                Button(onClick = onGrantPermissions, modifier = Modifier.fillMaxWidth()) {
+                    Text("Grant permissions")
+                }
+            }
             if (!advertiseSupported) {
                 Text(
                     "Advertising unsupported on this device — you can still chat as client only (scan + connect). Check Logcat isMultipleAdvertisementSupported.",

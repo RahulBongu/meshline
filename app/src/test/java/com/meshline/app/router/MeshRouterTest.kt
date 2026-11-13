@@ -53,8 +53,11 @@ class MeshRouterTest {
     ) : com.meshline.app.transport.Transport {
         val sentTo = mutableListOf<ByteArray>()
         val broadcastBytes = mutableListOf<ByteArray>()
+
+        /** Only the packets that went out through broadcast() (not sendTo()). */
+        val directBroadcasts = mutableListOf<ByteArray>()
         override suspend fun sendTo(peer: ByteArray, packet: ByteArray) { sentTo += peer; broadcastBytes += packet }
-        override suspend fun broadcast(packet: ByteArray) { broadcastBytes += packet }
+        override suspend fun broadcast(packet: ByteArray) { broadcastBytes += packet; directBroadcasts += packet }
         override val incoming: Flow<Pair<ByteArray, ByteArray>> = MutableSharedFlow()
         override val neighbours: Flow<Set<ByteArray>> = MutableStateFlow(neigh)
         override suspend fun connect(peer: ByteArray) {}
@@ -380,5 +383,55 @@ class MeshRouterTest {
         router.onReceive(PacketCodec.encode(unsigned), id(0))
         assertEquals(1, router.stats.droppedBadSignature)
         assertEquals(0, router.stats.delivered)
+    }
+
+    // ------------------------------------------------------- local broadcast
+
+    @Test
+    fun `local broadcast reaches every link even without known neighbours`() = runBlocking {
+        // The ANNOUNCE must reach peers that have not identified themselves
+        // yet: a peer that has not heard from us cannot address us, so it
+        // would never show up in the neighbours set at all.
+        val transport = FakeTransport(id(1), emptySet())
+        val router = MeshRouter(id(1), transport, testConfig(), neighboursProvider = { transport.snapshot() })
+        val decision = router.onLocalBroadcast(packet(from = 1, type = PacketType.ANNOUNCE))
+        assertTrue(decision is RouteDecision.Relay)
+        assertEquals("the announce must be broadcast", 1, transport.directBroadcasts.size)
+        assertEquals("no addressed send", 0, transport.sentTo.size)
+        assertEquals(1, router.stats.originatedSends)
+        assertEquals(1, router.stats.linkTransmissions)
+    }
+
+    @Test
+    fun `local broadcast of a foreign sender is dropped`() = runBlocking {
+        val transport = FakeTransport(id(1), setOf(id(2)))
+        val router = MeshRouter(id(1), transport, testConfig(), neighboursProvider = { transport.snapshot() })
+        val decision = router.onLocalBroadcast(packet(from = 9, type = PacketType.ANNOUNCE))
+        assertTrue(decision is RouteDecision.Drop)
+        assertEquals(0, transport.directBroadcasts.size)
+        assertEquals(1, router.stats.droppedInvalid)
+    }
+
+    @Test
+    fun `local broadcast is deduped like any other originated packet`() = runBlocking {
+        val transport = FakeTransport(id(1), emptySet())
+        val router = MeshRouter(id(1), transport, testConfig(), neighboursProvider = { transport.snapshot() })
+        val announce = packet(from = 1, type = PacketType.ANNOUNCE)
+        router.onLocalBroadcast(announce)
+        router.onLocalBroadcast(announce)
+        assertEquals("the same announce must go out once", 1, transport.directBroadcasts.size)
+        assertEquals(1, router.stats.originatedSends)
+    }
+
+    @Test
+    fun `an addressed send still only reaches the known neighbours`() = runBlocking {
+        // The neighbours feed is live now: a directed packet goes to the
+        // neighbours only (rule 5), not to every link.
+        val transport = FakeTransport(id(1), setOf(id(2)))
+        val router = MeshRouter(id(1), transport, testConfig(), neighboursProvider = { transport.snapshot() })
+        router.onLocalSend(packet(from = 1, to = 2))
+        assertEquals(1, transport.sentTo.size)
+        assertTrue(transport.sentTo.any { it.contentEquals(id(2)) })
+        assertEquals("no broadcast copy", 0, transport.directBroadcasts.size)
     }
 }

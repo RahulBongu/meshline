@@ -290,6 +290,31 @@ class MeshRouter(
     }
 
     /**
+     * Origin-side send that reaches **every** link, including peers that have
+     * not identified themselves yet.
+     *
+     * Our ANNOUNCE must go this way: a peer only learns our `senderId` from
+     * the announce, and until it has that id it cannot be addressed — so a send
+     * to the "known neighbours" would never reach a brand new peer. Everything
+     * else (public chat, private chat, relaying) goes to the known neighbours
+     * only, because a peer that has not announced cannot relay either.
+     */
+    suspend fun onLocalBroadcast(packet: MeshPacket): RouteDecision {
+        if (!packet.senderId.contentEquals(ownId)) {
+            stats.droppedInvalid++
+            return RouteDecision.Drop
+        }
+        val id = packet.messageId
+        if (dedupe.isSeen(id)) return RouteDecision.Drop
+        dedupe.mark(id, packet.ttl)
+        val encoded = PacketCodec.encode(packet)
+        stats.originatedSends++
+        runCatching { transport.broadcast(encoded) }
+        stats.linkTransmissions++
+        return RouteDecision.Relay(encoded, emptySet())
+    }
+
+    /**
      * Origin-side entry point: validate, dedupe-mark, then transmit.
      *
      * [retransmit] re-sends a packet we already sent. The dedupe check is

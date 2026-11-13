@@ -903,12 +903,66 @@ the one to keep off** until a phone measures real drain.
 - Dual role: every node is GATT server **and** GATT client simultaneously.
   Concurrency cap starts at **6** connections, configurable. The lower
   `senderId` (unsigned byte compare) acts as central to avoid double-connects.
-- Request MTU 512; payload per write = MTU − 3. Fragment via §5.
+- **Both link directions carry traffic (Phase F).** A link is either
+  **central** (we connected to the peer: we write to it) or **peripheral** (the
+  peer connected to *our* GATT server: we notify it). The two halves of the
+  duplicate-link arbitration (§9) are exactly these two cases, so a node that
+  keeps the canonical link as the *higher* id still has to reach the peer —
+  through the server notification path
+  (`BluetoothGattServer.notifyCharacteristicChanged`, API 33+ with the value
+  as an argument, API 18–32 with the value set on the characteristic).
+  A node that only writes to its *central* links is deaf on the peer that
+  holds the canonical link.
+- **Request MTU 512; payload per write = MTU − 3. Fragment via §5.**
+  The same per-connection MTU applies to a notification.
 - GATT error 133 → retry with backoff and a fresh connection. Scan restarts are
   throttled (≤ a few per 30 s) so scanning is a long-lived, tuned session.
 - Foreground service type `connectedDevice` with a persistent notification
   (Phase E). BLE does not work on emulators — all radio behaviour is
   **physical-device only** (see README).
+
+#### 9.1 The link budget and the unannounced-link guard (Phase F)
+
+- **A connection is released when it ends.** A GATT disconnect removes the
+  link from the connection table; a stale entry would both block the reconnect
+  and count against the six-slot budget.
+- **A link that never proves an identity is closed.** A link is *proved* when
+  the peer delivered a **signed ANNOUNCE of its own** (a packet with
+  `TTL == MAX_TTL`, i.e. one that originated at that peer) and the router
+  verified its signature. Until then the link costs a slot and gives nothing.
+  - **silent** for **12 s** (no packet at all arrived) → the peer is not a
+    Meshline node → close the link;
+  - **unproven** for **45 s** (traffic, but no verified ANNOUNCE) → the peer
+    cannot be addressed → close the link.
+  Both kinds of link can be closed: a central link with a GATT close, a
+  peripheral link with `BluetoothGattServer.cancelConnection`.
+  The policy lives in `LinkEvictionPolicy` (pure JVM, unit-tested).
+- **A peer that gives up its central link does not reconnect.** The lower id
+  keeps the canonical link; if the higher id reconnected as central, the two
+  nodes would flip the link back and forth (a connect and a slot each time).
+  The suppression is lifted when the peer is gone entirely, or when the peer
+  announces a **new** identity (a panic wipe).
+
+#### 9.2 Identity confirmation (Phase F)
+
+- A peer's `senderId` is learned from **its own ANNOUNCE only**. A relayed
+  packet carries the *origin's* id, so learning a peer id from arbitrary
+  traffic would map a peer's device to somebody else's identity — and that peer
+  would disappear from the neighbours set.
+- The learned id is **not trusted** until the router verified the ANNOUNCE's
+  signature; only then is the peer **confirmed** (`confirmPeerIdentity`).
+  **Only confirmed peers are addressable** (`sendTo` refuses an unconfirmed
+  id) and **only confirmed peers count as neighbours** — so a peer that
+  claims somebody else's id can pull no traffic to itself.
+- The neighbours set drives the router: the direct-send shortcut (rule 5) and
+  the adaptive relay probability (rule 6). Until the neighbours feed was
+  wired (Phase F), the set was empty and the router transmitted **nothing**.
+- **The ANNOUNCE is sent to every link**, not to the known neighbours: a peer
+  that has not heard from us yet cannot address us and would never show up in
+  the neighbours set. The announce is *also* sent when a link comes up and
+  when a new peer is confirmed, so both sides learn each other within about a
+  second instead of waiting for the periodic announce.
+
 
 ## 10. Security notes and honest limits
 
@@ -950,13 +1004,16 @@ the one to keep off** until a phone measures real drain.
 - **Connection-slot exhaustion.** The connection cap is 6 (`BleUuids.MAX_CONNECTIONS`).
   A device can hold all 6 connections open without ever delivering a valid
   ANNOUNCE, starving legitimate peers (an unauthenticated, low-cost denial of
-  service: BLE connects are cheap, slots are not). *Planned mitigation
-  (Phase E, behaviour-only — no wire change):* close any connection that has
-  not delivered a valid ANNOUNCE within ~10 s of connecting, and when the cap
-  is reached prefer evicting the unauthenticated/idle link over an established
-  (Announce-verified) one. Eviction policy and the exact timeout are tuned in
-  Phase E against field measurements; the wire protocol is unaffected, so this
-  does not need a version bump.
+  service: BLE connects are cheap, slots are not).
+  **Mitigation (Phase F, implemented, behaviour-only — no wire change):** a
+  connection that is released frees its slot immediately, and a link that has
+  not proved a peer identity is closed after 12 s (silent) or 45 s (unproven) —
+  see §9.1. An **established** (Announce-verified) link is never evicted by
+  this guard. *Still open (Phase E):* when the cap is reached, prefer evicting
+  the unauthenticated/idle link over an established one — the guard only
+  closes links that proved nothing, so a full budget of *established* peers
+  still blocks new ones. The wire protocol is unaffected, so this does not need
+  a version bump.
 
 ## 11. Change policy
 

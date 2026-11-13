@@ -91,4 +91,48 @@ class AnnounceVerifierTest {
         val tampered = pkt.copy(payload = "hell0".encodeToByteArray())
         assertEquals(SignatureCheck.BAD_SIGNATURE, AnnounceVerifier.verify(tampered, cache, peer))
     }
+
+    // ------------------------------------------- the identity claim alone
+    // The BLE layer binds a *device* to an identity with this check, so it
+    // must accept exactly what the announce proves — and nothing else.
+
+    @Test
+    fun `a valid announce proves its identity without touching the cache`() {
+        val (identity, _, _) = IdentityFactory.generate()
+        val cache = KeyCache(nowProvider = { now })
+        val verified = AnnounceVerifier.verifyAnnounceIdentity(announcePacket(identity))
+        assertArrayEquals(identity.senderId, verified)
+        assertFalse("the cache must stay untouched", cache.knows(identity.senderId))
+    }
+
+    @Test
+    fun `a tampered announce proves nothing`() {
+        val (identity, _, _) = IdentityFactory.generate()
+        val pkt = announcePacket(identity)
+        val tampered = pkt.copy(payload = pkt.payload.copyOf().also { it[it.size - 1] = 6 })
+        assertEquals(null, AnnounceVerifier.verifyAnnounceIdentity(tampered))
+    }
+
+    @Test
+    fun `an announce that claims another id proves nothing`() {
+        val (identity, _, _) = IdentityFactory.generate()
+        val (other, _, _) = IdentityFactory.generate()
+        // The payload carries the real key, but the header claims somebody
+        // else's id: the hash check must refuse it.
+        val spoofed = announcePacket(identity).copy(senderId = other.senderId)
+        assertEquals(null, AnnounceVerifier.verifyAnnounceIdentity(spoofed))
+    }
+
+    @Test
+    fun `an unsigned announce proves nothing`() {
+        val (identity, _, _) = IdentityFactory.generate()
+        val unsigned = announcePacket(identity).copy(flags = 0x00, signature = null)
+        assertEquals(null, AnnounceVerifier.verifyAnnounceIdentity(unsigned))
+    }
+
+    @Test
+    fun `a non-announce packet proves nothing`() {
+        val (identity, _, _) = IdentityFactory.generate()
+        assertEquals(null, AnnounceVerifier.verifyAnnounceIdentity(publicPacket(identity)))
+    }
 }
