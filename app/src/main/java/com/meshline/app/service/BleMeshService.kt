@@ -1,9 +1,11 @@
 package com.meshline.app.service
 
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -87,6 +89,9 @@ class BleMeshService : Service() {
     /** Peers we are currently linked to (transport view) — drives the settle window. */
     @Volatile private var connectedPeers: Set<ByteArray> = emptySet()
 
+    /** When the last announce went out (the re-announce cadence uses it). */
+    @Volatile private var lastAnnounceAtMs: Long = 0L
+
     /** The D2 secure channel (Noise sessions, private messages, receipts). */
     @Volatile private var secureChannel: SecureChannel? = null
 
@@ -104,6 +109,18 @@ class BleMeshService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        setStartError(null)
+        val missing = missingBlePermissions()
+        if (missing.isNotEmpty()) {
+            // Without them the transport cannot scan, connect or advertise:
+            // say so in the UI instead of failing silently in the log.
+            setStartError(
+                "Bluetooth permission missing: ${missing.joinToString()}. " +
+                    "Grant it and tap \"Start mesh\" again."
+            )
+            stopSelf()
+            return
+        }
         if (!startForegroundCompat()) {
             // Android 12+/14 can reject the FGS start (background start or a
             // missing connected-device permission). Fail soft instead of crashing.
@@ -112,12 +129,26 @@ class BleMeshService : Service() {
         }
 
         val id = identity
-        val t = BleTransport(applicationContext, id.senderId, scope)
+        val t = BleTransport(
+            context = applicationContext,
+            localId = id.senderId,
+            scope = scope,
+            // The transport binds a *device* to an identity only when the
+            // announce proves it (self-certifying) — a forged announce must
+            // not be able to claim somebody else's id and pull our traffic to
+            // the impostor.
+            announceIdentityVerifier = { pkt -> AnnounceVerifier.verifyAnnounceIdentity(pkt) },
+        )
         val r = MeshRouter(
             ownId = id.senderId,
             transport = t,
             config = RouterConfig(),
-            neighboursProvider = { emptySet() },
+            // The peers we can address: the ones that sent us a verified
+            // ANNOUNCE (the transport registers them under their senderId).
+            // With this the router can use the direct-send shortcut (rule 5)
+            // and the adaptive relay probability (rule 6) instead of always
+            // flooding to everybody.
+            neighboursProvider = { connectedPeers },
             // The transport's connection view drives the settle window only
             // (PROTOCOL §8.1): the sender waits ~2 s after linking a new peer
             // before its first data packet to it.
@@ -164,14 +195,44 @@ class BleMeshService : Service() {
         jobs += scope.launch {
             while (true) {
                 runCatching { channel.tick() }
+                // Release the links that never proved a peer identity: they
+                // would hold one of the six GATT slots forever.
+                runCatching { t.sweepUnannouncedLinks() }
+                // While a peer is still unproven, announce again (every 5 s):
+                // it learns our id only from an announce, and a lost announce
+                // would otherwise leave the link unusable for a whole cycle.
+                if (t.unprovenLinkCount > 0 &&
+                    System.currentTimeMillis() - lastAnnounceAtMs > RE_ANNOUNCE_INTERVAL_MS
+                ) {
+                    runCatching { sendAnnounce() }
+                }
                 delay(2_000)
             }
         }
         jobs += scope.launch { t.debugPeers.collect { setPeers(it) } }
         jobs += scope.launch { t.lastGattError.collect { if (it != null) setGattError(it) } }
         jobs += scope.launch { t.advertiseSupported.collect { setAdvertiseSupported(it) } }
+        // A new link came up: announce ourselves right away. The peer learns
+        // our id only from an announce, and the periodic announce (30 s) would
+        // leave the link unusable for most of that cycle.
+        jobs += scope.launch {
+            t.newLink.collect { runCatching { sendAnnounce() } }
+        }
         jobs += scope.launch {
             r.delivered.collect { pkt ->
+                // The identity is confirmed by the peer's **signed ANNOUNCE**
+                // only: the router verified the signature before delivering
+                // it, so from now on this id can be addressed and the peer
+                // counts as a neighbour.
+                if (pkt.type == PacketType.ANNOUNCE) {
+                    val isNew = runCatching { t.confirmPeerIdentity(pkt.senderId) }.getOrDefault(false)
+                    // Announce ourselves to a **new direct** peer, so it learns
+                    // us too. A relayed announce (the origin is further away)
+                    // must not trigger an announce per hop.
+                    if (isNew && t.isDirectPeer(pkt.senderId)) {
+                        runCatching { sendAnnounce() }
+                    }
+                }
                 val hops = (PacketCodec.MAX_TTL - pkt.ttl).coerceAtLeast(0)
                 pushMessage(
                     ReceivedMessageInfo(
@@ -238,7 +299,11 @@ class BleMeshService : Service() {
                 intervalUnits = INTERVAL_UNITS,
             )
         )
-        runCatching { r.onLocalSend(signed(PacketType.ANNOUNCE, payload)) }
+        lastAnnounceAtMs = System.currentTimeMillis()
+        // The announce goes to **every** link, not only to the known
+        // neighbours: a peer that has not heard from us yet cannot address us
+        // and would never show up in the neighbours set at all.
+        runCatching { r.onLocalBroadcast(signed(PacketType.ANNOUNCE, payload)) }
     }
 
     /** Public Nearby chat (signed, not encrypted). */
@@ -288,8 +353,40 @@ class BleMeshService : Service() {
             true
         } catch (e: Exception) {
             Log.w(TAG, "startForeground failed: ${e.javaClass.simpleName}")
+            setStartError(describeFgsFailure(e))
             false
         }
+    }
+
+    /**
+     * Turns a rejected foreground-service start into something the user can
+     * act on. The old behaviour was a log line only, so the mesh simply never
+     * came up and nobody knew why.
+     */
+    private fun describeFgsFailure(e: Exception): String = when {
+        e is SecurityException && Build.VERSION.SDK_INT >= 34 ->
+            "Android 14 refused the connected-device foreground service. The " +
+                "FOREGROUND_SERVICE_CONNECTED_DEVICE permission or a Bluetooth permission is missing."
+        e is SecurityException ->
+            "The system refused the foreground service — a Bluetooth permission is missing."
+        Build.VERSION.SDK_INT >= 31 && e is ForegroundServiceStartNotAllowedException ->
+            "Android blocked the background start of the mesh. Open Meshline and tap \"Start mesh\" again."
+        else -> "The mesh service could not start (${e.javaClass.simpleName})."
+    }
+
+    /** The Bluetooth permissions the transport needs, missing ones named. */
+    private fun missingBlePermissions(): List<String> {
+        val out = mutableListOf<String>()
+        fun granted(permission: String) =
+            checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+        if (Build.VERSION.SDK_INT >= 31) {
+            if (!granted("android.permission.BLUETOOTH_CONNECT")) out += "Nearby devices (connect)"
+            if (!granted("android.permission.BLUETOOTH_SCAN")) out += "Nearby devices (scan)"
+            if (!granted("android.permission.BLUETOOTH_ADVERTISE")) out += "Nearby devices (advertise)"
+        } else if (!granted("android.permission.ACCESS_FINE_LOCATION")) {
+            out += "Location (needed for the BLE scan before Android 12)"
+        }
+        return out
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -391,6 +488,9 @@ class BleMeshService : Service() {
         private const val CHANNEL_ID = "meshline_mesh"
         private const val NOTIFICATION_ID = 1
         private const val INTERVAL_UNITS: Byte = 3 // 30 s announce cadence
+
+        /** Re-announce cadence while a peer has not yet proved its identity. */
+        private const val RE_ANNOUNCE_INTERVAL_MS: Long = 5_000L
         private const val TAG = "BleMeshService"
 
         private val _peers = MutableStateFlow<List<PeerInfo>>(emptyList())
@@ -403,6 +503,14 @@ class BleMeshService : Service() {
         val advertiseSupported: Flow<Boolean> = _advertiseSupported.asStateFlow()
         private val _stats = MutableStateFlow(MeshStatsSnapshot())
         val stats: Flow<MeshStatsSnapshot> = _stats.asStateFlow()
+
+        /**
+         * Why the mesh service could not start (a missing Bluetooth permission,
+         * a blocked foreground-service start). The UI shows it — the mesh
+         * simply not coming up is not a usable error message.
+         */
+        private val _startError = MutableStateFlow<String?>(null)
+        val startError: StateFlow<String?> = _startError.asStateFlow()
 
         // ---- D2: the private-chat state the UI reads ----
         private val _privateMessages = MutableStateFlow<List<PrivateChatMessage>>(emptyList())
@@ -417,6 +525,7 @@ class BleMeshService : Service() {
         internal fun setGattError(c: Int) { _lastGattError.value = c }
         internal fun setAdvertiseSupported(b: Boolean) { _advertiseSupported.value = b }
         internal fun setStats(s: MeshStatsSnapshot) { _stats.value = s }
+        internal fun setStartError(reason: String?) { _startError.value = reason }
         internal fun setPrivateMessages(v: List<PrivateChatMessage>) { _privateMessages.value = v }
         internal fun setPrivatePeers(v: List<PrivatePeer>) { _privatePeers.value = v }
         internal fun setKeyChange(v: KeyChangeEvent?) { _keyChange.value = v }

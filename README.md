@@ -113,7 +113,10 @@ On the `d2-noise` branch add: `NoiseVectorsTest` 1, `NoiseSessionTest` 8,
 `NoiseNonceOrderingTest` 7, `ReplayWindowTest` 6, `HandshakeRateLimiterTest` 11,
 `HandshakeTierTest` 4, `MessageDedupeTest` 3, `PrivateOutboxTest` 1,
 `SecureChannelTest` 5, `SessionCodecTest` 4, `SessionStoreTest` 2,
-`OutboxStoreTest` 2 — **127 tests, 0 failures** in total. The instrumented
+`OutboxStoreTest` 2 — **127 tests, 0 failures** at the last commit. The Phase F
+groundwork adds on top: `MeshRouterTest` +4 (local-broadcast and addressing),
+`AnnounceVerifierTest` +5 (announce-identity claims), `LinkEvictionPolicyTest` 5
+— **141 tests, 0 failures** in total. The instrumented
 suite (device only) is `DatabaseInstrumentedTest` 1,
 `IdentityStoreInstrumentedTest` 4, `DbPassphraseInstrumentedTest` 1,
 `SecureStorageStatusTest` 2, `SecureStoresInstrumentedTest` 4,
@@ -538,21 +541,61 @@ Four review items were closed on this branch:
    database, not in memory). This is new: before, the chat was only the
    outbox, so it expired with it.
 
+## Phase F groundwork (wired, awaiting phone verification)
+
+Three things the mesh needs before the test day measures anything, plus the
+transport gap they exposed. **No wire change** — the protocol bytes are the
+same; this is about what the node does with the links it has.
+
+- **The neighbours feed is live.** `BleMeshService` passes the transport's
+  **verified** peers to the router (`neighboursProvider`), so the direct-send
+  shortcut (PROTOCOL §8 rule 5) and the adaptive relay probability (rule 6)
+  are no longer dead code. Until now the set was empty, `chooseTargets`
+  returned nothing, and **the router transmitted nothing at all** — every
+  build since Phase C was deaf. This is the single most important line in
+  this section.
+- **A peer's identity is confirmed before it is addressable.** A peer's
+  `senderId` is learned from **its own signed ANNOUNCE** (a packet with
+  `TTL == MAX_TTL`, so it cannot be a relayed packet carrying somebody
+  else's id), and only after the router verified the signature does
+  `confirmPeerIdentity` mark it as usable. Unconfirmed ids are neither
+  addressable (`sendTo` refuses them) nor neighbours, so a peer that claims
+  another identity pulls no traffic to itself.
+- **Both link directions carry traffic.** A peer that connected to *our* GATT
+  server (we are the peripheral for it) is reached with a **server
+  notification**; a peer we connected to is reached with a GATT write. The
+  duplicate-link arbitration hands the canonical link to the **lower** id, so
+  without the notification path the higher-id node was deaf — it had dropped
+  its central link and had no way to answer. See `PROTOCOL.md` §9.
+- **The connection budget is protected.** A GATT disconnect now releases its
+  slot immediately (a stale entry used to block the reconnect *and* count
+  against the six), and a link that never proves an identity is closed after
+  12 s (silent) or 45 s (traffic but no verified ANNOUNCE) — the policy is
+  pure JVM in `LinkEvictionPolicy` and unit-tested. A node that gave up its
+  central link in the arbitration no longer reconnects, so the two nodes stop
+  flipping the link back and forth.
+- **The mesh says why it did not start.** A missing Bluetooth permission or a
+  rejected foreground-service start is now shown in the UI (with a **Grant
+  permissions** button) instead of only a line in the log. The service also
+  checks the permissions itself and stops cleanly.
+- **The announce reaches every link**, not only the known neighbours: a peer
+  that has not heard from us yet cannot address us and would never show up in
+  the neighbours set. The announce is also sent when a link comes up and when
+  a new peer is confirmed, so two phones learn each other in about a second
+  instead of waiting for the 30 s cadence.
+
+Still open (Phase E/F): the adaptive announce cadence (30/60/120 s driven by
+the known-node count), the private-chat history paging, and evicting an
+*established* peer when all six slots are taken by established peers.
+
 ## Open issues after D1
 
-- **Foreground-service permission gate (Phase F).** The service now fails soft
-  (no crash) if Android rejects the FGS start, but the UI should explain which
-  Bluetooth permission is missing instead of silently stopping.
-- **Connection-slot exhaustion (Phase F).** Six GATT slots can be consumed by
-  peers that never send a valid ANNOUNCE; planned mitigation is to close
-  non-Announced connections after ~10 s.
 - **Adaptive announce cadence (Phase E/F).** D1 announces at a fixed 30 s
   (`intervalUnits = 3`). The 30/60/120 s hysteresis rule (§8.4) is specified but
   not yet driven by known-node count.
-- **Neighbour set is not wired into the router yet.** `neighboursProvider`
-  returns an empty set, so D1 always floods instead of using the direct-send
-  shortcut and adaptive relay probability. Correct, but more expensive at scale.
-- **D2+**: Noise private chat, encrypted message storage, panic wipe, groups.
+- **The private-chat history is loaded whole** (`refresh()` reads every row) —
+  fine for a test day, but it needs paging before the history can grow.
+- **D2+**: groups.
 
 ## Compliance notes (PRD §12)
 

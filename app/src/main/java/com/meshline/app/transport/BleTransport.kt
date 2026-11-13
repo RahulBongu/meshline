@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -25,7 +26,10 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import com.meshline.app.protocol.Fragmentation
+import com.meshline.app.protocol.MeshPacket
 import com.meshline.app.protocol.PacketCodec
+import com.meshline.app.protocol.PacketType
+import com.meshline.app.protocol.Reassembler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
@@ -37,6 +41,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import kotlin.math.min
 
@@ -74,6 +79,17 @@ class BleTransport(
     override val localId: ByteArray,
     private val scope: CoroutineScope,
     private val maxConnections: Int = BleUuids.MAX_CONNECTIONS,
+    /**
+     * Verifies an ANNOUNCE's identity claim (self-certifying: the announced
+     * key's hash must equal the claimed `senderId` and the signature must
+     * verify with that key — no cache, no prior trust).
+     *
+     * The transport needs it to bind a **device** to an identity: the packet
+     * header only *claims* an id, so a forged announce could otherwise claim
+     * somebody else's id and pull our traffic to the impostor. The app layer
+     * injects `AnnounceVerifier.verifyAnnounceIdentity`.
+     */
+    private val announceIdentityVerifier: (MeshPacket) -> ByteArray? = { null },
 ) : Transport {
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -99,13 +115,71 @@ class BleTransport(
     // --- state ---
     private var server: BluetoothGattServer? = null
     private var serverCharacteristic: BluetoothGattCharacteristic? = null
-    private val clients = mutableMapOf<String, BluetoothGatt>() // mac -> gatt (we are central)
-    private val serverLinks = mutableSetOf<String>() // macs that connected to our GATT server (we are peripheral)
-    private val mtuByMac = mutableMapOf<String, Int>()
-    private val rssiByMac = mutableMapOf<String, Int>()
-    private val senderToDevice = mutableMapOf<String, BluetoothDevice>()
-    private val deviceToSender = mutableMapOf<String, ByteArray>()
+    // Concurrent: the BLE callbacks mutate these from binder threads while the
+    // send path iterates them from the service's coroutines.
+    private val clients = ConcurrentHashMap<String, BluetoothGatt>() // mac -> gatt (we are central)
+    private val serverLinks: MutableSet<String> = ConcurrentHashMap.newKeySet() // macs that connected to our GATT server (we are peripheral)
+    private val serverDevices = ConcurrentHashMap<String, BluetoothDevice>() // mac -> device (we are peripheral)
+    private val mtuByMac = ConcurrentHashMap<String, Int>()
+    private val rssiByMac = ConcurrentHashMap<String, Int>()
+    private val senderToDevice = ConcurrentHashMap<String, BluetoothDevice>()
+    private val deviceToSender = ConcurrentHashMap<String, ByteArray>()
+
+    /**
+     * The peers whose identity we **verified** (the app layer confirmed it
+     * after the router checked the peer's signed ANNOUNCE).
+     *
+     * A packet header carries a *claimed* senderId, so the id cannot be trusted
+     * before the signature has been checked. Only confirmed peers are
+     * addressable and only confirmed peers count as neighbours — otherwise a
+     * peer could claim somebody else's id and pull our traffic to itself.
+     */
+    private val verifiedSenders = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Per-link bookkeeping, used by the slot-exhaustion guard and by the
+     * duplicate-link arbitration.
+     *
+     * A link only becomes *usable* when the peer proves its identity with a
+     * verified ANNOUNCE. Until then the link costs us one of the six GATT
+     * slots (BleUuids.MAX_CONNECTIONS) and gives us nothing.
+     *
+     * A peer can hold **two** physical links to us (we connected to it *and*
+     * it connected to our server), so the record tracks both kinds.
+     */
+    private class LinkRecord(val openedAtMs: Long) {
+        @Volatile var lastTrafficAtMs: Long = openedAtMs
+        @Volatile var verified: Boolean = false
+        @Volatile var central: Boolean = false
+        @Volatile var peripheral: Boolean = false
+    }
+
+    private val links = ConcurrentHashMap<String, LinkRecord>()
+
+    /**
+     * The peers whose **central** link we gave up in the duplicate-link
+     * arbitration (we are the higher id).
+     *
+     * The lower id keeps the canonical link, so reconnecting as central would
+     * only flip the two nodes back and forth — every flip costs a connect and
+     * a slot. The suppression is lifted when the peer is gone entirely.
+     */
+    private val suppressedCentral = ConcurrentHashMap.newKeySet<String>()
+
+    private val _newLink = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
+
+    /**
+     * Emits whenever a **new** peer link comes up (central or peripheral).
+     *
+     * The app layer uses it to announce itself: a peer learns our id only from
+     * our ANNOUNCE, and the periodic announce (30 s) would leave the link
+     * unusable for most of that cycle.
+     */
+    val newLink: Flow<Unit> = _newLink.asSharedFlow()
     private val rawReassembler = BleReassemblyManager()
+
+    /** Protocol-level fragments (a fragmented ANNOUNCE) — see [maybeBindAnnounce]. */
+    private val fragReassembler = Reassembler()
     private val writeQueue = kotlinx.coroutines.channels.Channel<Pair<BluetoothDevice, ByteArray>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     private var writeJob: Job? = null
     private val scanStartTimes = CopyOnWriteArraySet<Long>()
@@ -135,6 +209,9 @@ class BleTransport(
         stopAdvertising()
         clients.values.forEach { safeClose(it) }
         clients.clear()
+        serverLinks.clear()
+        serverDevices.clear()
+        links.clear()
         server?.close()
         server = null
         writeJob?.cancel()
@@ -147,10 +224,19 @@ class BleTransport(
         if (server != null) return
         server = bluetoothManager.openGattServer(context, object : BluetoothGattServerCallback() {
             override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+                val mac = device.address
                 if (newState == BluetoothGatt.STATE_CONNECTED) {
-                    serverLinks.add(device.address)
+                    if (mac != null) {
+                        serverLinks.add(mac)
+                        serverDevices[mac] = device
+                        openLink(mac, central = false)
+                    }
                 } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
-                    serverLinks.remove(device.address)
+                    if (mac != null) {
+                        serverLinks.remove(mac)
+                        serverDevices.remove(mac)
+                        closeLink(mac, central = false)
+                    }
                     if (status != BluetoothGatt.GATT_SUCCESS) _lastGattError.value = status
                 }
                 refreshDebugPeers()
@@ -274,6 +360,9 @@ class BleTransport(
         val mac = device.address ?: return
         if (clients.containsKey(mac)) return
         if (clients.size >= maxConnections) return
+        // We gave up this peer's central link in the duplicate arbitration:
+        // reconnecting would only flip the two nodes back and forth.
+        if (suppressedCentral.contains(mac)) return
         // Lower-ID-as-central tie-break is enforced *after* Announce reveals both
         // IDs; pre-Announce we connect once and rely on the server-side handling.
         // (Phase C keeps the simple side; Phase E tightens the pre-connect decision.)
@@ -282,14 +371,26 @@ class BleTransport(
 
     private fun connectWithRetry(device: BluetoothDevice, attempt: Int) {
         val mac = device.address ?: return
+        if (suppressedCentral.contains(mac)) return
         val gatt = device.connectGatt(context, false, object : BluetoothGattCallback() {
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
                 if (status != BluetoothGatt.GATT_SUCCESS) _lastGattError.value = status
                 if (newState == BluetoothGatt.STATE_CONNECTED) {
                     retryAttempts.remove(mac)
+                    openLink(mac, central = true)
                     g.requestMtu(BleUuids.REQUESTED_MTU)
                     g.discoverServices()
                 } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
+                    // The slot must be released here: a stale entry in
+                    // `clients` would block the reconnect AND count against
+                    // the six-connection budget (slot exhaustion).
+                    // Only when *this* GATT is the current one — a stale
+                    // object's disconnect must not evict a live link.
+                    if (clients[mac] === g) {
+                        clients.remove(mac)
+                        closeLink(mac, central = true)
+                    }
+                    safeClose(g)
                     if (status == 133) handle133(g, device, attempt) else scheduleRetry(device, attempt)
                 }
             }
@@ -336,7 +437,11 @@ class BleTransport(
 
     private fun handle133(g: BluetoothGatt, device: BluetoothDevice, attempt: Int) {
         safeClose(g)
-        clients.remove(device.address)
+        val mac = device.address
+        if (mac != null && clients[mac] === g) {
+            clients.remove(mac)
+            closeLink(mac, central = true)
+        }
         val wait = min(8_000L, 1_000L shl attempt) // 1s, 2s, 4s, 8s
         Log.w(TAG, "GATT 133 for ${device.address}; retrying in ${wait}ms (attempt $attempt)")
         scope.launch {
@@ -358,6 +463,93 @@ class BleTransport(
         runCatching { g.close() }
     }
 
+    // ------------------------------------------------------------ link state
+
+    /** A peer link came up (central: we connected; peripheral: it connected). */
+    private fun openLink(mac: String, central: Boolean) {
+        val existing = links[mac]
+        if (existing == null) {
+            val rec = LinkRecord(System.currentTimeMillis())
+            if (central) rec.central = true else rec.peripheral = true
+            links[mac] = rec
+            // The peer only learns our id from an announce: tell the app layer
+            // so it can announce itself on this link right away.
+            runCatching { _newLink.tryEmit(Unit) }
+            return
+        }
+        if (central) existing.central = true else existing.peripheral = true
+        existing.lastTrafficAtMs = System.currentTimeMillis()
+    }
+
+    /** One of the two links to [mac] is gone. */
+    private fun closeLink(mac: String, central: Boolean) {
+        val rec = links[mac] ?: return
+        if (central) rec.central = false else rec.peripheral = false
+        if (rec.central || rec.peripheral) return
+        links.remove(mac)
+        rawReassembler.drop(mac)
+        // The peer is gone entirely: a future connection may be tried again.
+        suppressedCentral.remove(mac)
+    }
+
+    /**
+     * How many links are up but have **not** yet proved a peer identity.
+     *
+     * The app layer uses it to announce again (a lost announce would leave
+     * the link unusable for a whole announce cycle).
+     */
+    val unprovenLinkCount: Int
+        get() {
+            val now = System.currentTimeMillis()
+            return links.count { (_, rec) ->
+                !rec.verified && now - rec.openedAtMs < LinkEvictionPolicy.UNPROVEN_INTEREST_MS
+            }
+        }
+
+    /**
+     * Closes the links that never produced a usable peer identity.
+     *
+     * Six GATT slots are the whole connection budget
+     * ([BleUuids.MAX_CONNECTIONS]). A device that connects and stays silent —
+     * or talks without ever proving who it is — would hold a slot forever and
+     * starve the mesh, so such a link is closed and the slot released.
+     *
+     * Both link kinds can be closed: a central link with a GATT close, a
+     * peripheral link with `BluetoothGattServer.cancelConnection` (the peer
+     * connected to *our* server).
+     *
+     * @return how many links were closed.
+     */
+    fun sweepUnannouncedLinks(nowMs: Long = System.currentTimeMillis()): Int {
+        var evicted = 0
+        for ((mac, rec) in links.entries.toList()) {
+            if (rec.verified) continue
+            if (!LinkEvictionPolicy.shouldEvict(rec.openedAtMs, rec.lastTrafficAtMs, nowMs)) continue
+            if (closeLinkTo(mac)) evicted++
+        }
+        return evicted
+    }
+
+    /** Closes **every** link to [mac] (central and peripheral). True when there was one. */
+    private fun closeLinkTo(mac: String): Boolean {
+        var closed = false
+        clients.remove(mac)?.let {
+            Log.w(TAG, "closing link: no verified announce")
+            safeClose(it)
+            closed = true
+        }
+        serverDevices.remove(mac)?.let { device ->
+            Log.w(TAG, "closing server link: no verified announce")
+            serverLinks.remove(mac)
+            runCatching { server?.cancelConnection(device) }
+            closed = true
+        }
+        links.remove(mac)
+        suppressedCentral.remove(mac)
+        rawReassembler.drop(mac)
+        return closed
+    }
+
     // ---------------------------------------------------------------- sends
 
     override suspend fun sendTo(peer: ByteArray, packet: ByteArray) {
@@ -368,14 +560,28 @@ class BleTransport(
             Log.w(TAG, "sendTo unknown peer; dropping")
             return
         }
+        if (!verifiedSenders.contains(hex)) {
+            // The peer claimed this id but never proved it (no verified
+            // ANNOUNCE): we do not hand our traffic to an unproven id.
+            Log.w(TAG, "sendTo unverified peer; dropping")
+            return
+        }
         sendToDevice(device, packet)
     }
 
     override suspend fun broadcast(packet: ByteArray) {
         // Per-connection MTU: fragment separately for each connection's MTU.
-        // (Server links from peers that connected to us are written via the
-        // characteristic notify path in production; Phase C writes via clients.)
+        // Two link kinds exist and both must be served:
+        //  - **central**: we connected to the peer, so we write to it;
+        //  - **peripheral**: the peer connected to *our* GATT server, so the
+        //    only way to reach it is a notification from the server.
+        // A peer that holds both links (the duplicate-link case) is served
+        // through the central one — the arbiter closes the other.
         for (gatt in clients.values) sendToDevice(gatt.device, packet)
+        for ((mac, device) in serverDevices) {
+            if (clients.containsKey(mac)) continue
+            sendToDevice(device, packet)
+        }
     }
 
     /**
@@ -411,11 +617,36 @@ class BleTransport(
     }
 
     private fun writeOnce(device: BluetoothDevice, bytes: ByteArray) {
-        val gatt = clients[device.address] ?: return
-        val char = gatt.getService(BleUuids.SERVICE_UUID)?.getCharacteristic(BleUuids.CHARACTERISTIC_UUID) ?: return
-        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        char.value = bytes
-        gatt.writeCharacteristic(char)
+        val mac = device.address
+        // Central link: a GATT write (write-without-response).
+        val gatt = clients[mac]
+        if (gatt != null) {
+            val char = gatt.getService(BleUuids.SERVICE_UUID)?.getCharacteristic(BleUuids.CHARACTERISTIC_UUID) ?: return
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            char.value = bytes
+            gatt.writeCharacteristic(char)
+            return
+        }
+        // Peripheral link: the peer connected to *our* GATT server, so it is
+        // reached with a server notification. The peer enabled notifications
+        // when it discovered our characteristic (the CCCD write in
+        // onServicesDiscovered), so this is the only way it can hear us.
+        notifyServerLink(device, bytes)
+    }
+
+    /** Notifies one peripheral peer (it connected to our GATT server). */
+    private fun notifyServerLink(device: BluetoothDevice, bytes: ByteArray) {
+        val srv = server ?: return
+        val char = serverCharacteristic ?: return
+        val ok = if (Build.VERSION.SDK_INT >= 33) {
+            // Android 13+: the value travels with the call.
+            srv.notifyCharacteristicChanged(device, char, false, bytes) == BluetoothStatusCodes.SUCCESS
+        } else {
+            // Android 12 and older: the value must sit on the characteristic.
+            char.value = bytes
+            srv.notifyCharacteristicChanged(device, char, false)
+        }
+        if (!ok) Log.w(TAG, "notify failed")
     }
 
     // -------------------------------------------------------------- receive
@@ -429,14 +660,69 @@ class BleTransport(
             emit(device, assembled)
             return
         }
-        val senderId = peekSenderId(bytes) ?: hashMac(device.address)
-        registerPeer(senderId, device)
+        val mac = device.address
+        links[mac]?.lastTrafficAtMs = System.currentTimeMillis()
+        val header = peekHeader(bytes)
+        // A peer's identity comes from its **own** signed ANNOUNCE, and only
+        // from a packet that originated at that peer (TTL == MAX_TTL). A
+        // relayed packet carries the *origin's* id, so learning from it would
+        // map this peer's device to somebody else's identity — and the peer
+        // would vanish from the neighbours set.
+        if (header != null) maybeBindAnnounce(device, bytes, header)
+        val senderId = header?.senderId ?: hashMac(device.address)
         _incoming.tryEmit(senderId to bytes)
     }
 
-    private fun peekSenderId(bytes: ByteArray): ByteArray? {
-        if (bytes.size < 24) return null
-        return bytes.copyOfRange(16, 24)
+    /**
+     * Binds this link to the peer's identity — but only when the announce
+     * **proves** it.
+     *
+     * A packet header only claims a `senderId`; the binding is what makes a
+     * peer addressable, so a forged announce must not be able to claim
+     * somebody else's id. The announce is therefore verified here (the
+     * app layer injects the verifier), and only a verified announce binds
+     * the device to the id.
+     *
+     * A fragmented announce (a small negotiated MTU) is reassembled here too:
+     * the router reassembles it again for the packet flow, but the router
+     * cannot tell the transport *which device* delivered it.
+     */
+    private fun maybeBindAnnounce(device: BluetoothDevice, bytes: ByteArray, header: HeaderPeek) {
+        // A relayed packet carries the origin's id — it is not this peer.
+        if (header.ttl != PacketCodec.MAX_TTL) return
+        when (header.type) {
+            PacketType.ANNOUNCE -> {
+                val pkt = runCatching { PacketCodec.decode(bytes) }.getOrNull() ?: return
+                val id = announceIdentityVerifier(pkt) ?: return
+                registerPeer(id, device)
+            }
+            PacketType.FRAGMENT -> {
+                val pkt = runCatching { PacketCodec.decode(bytes) }.getOrNull() ?: return
+                val parts = runCatching { Fragmentation.parseFragmentPayload(pkt.payload) }.getOrNull() ?: return
+                // Only the first chunk tells the original's type; the others
+                // are pure payload, so a data fragment is skipped without
+                // reassembling it.
+                if (parts.index != 0 || parts.chunk.size < 2) return
+                if ((parts.chunk[1].toInt() and 0xFF) != PacketType.ANNOUNCE.code.toInt()) return
+                val assembled = runCatching { fragReassembler.offer(pkt) }.getOrNull() ?: return
+                val full = runCatching { PacketCodec.decode(assembled) }.getOrNull() ?: return
+                val id = announceIdentityVerifier(full) ?: return
+                registerPeer(id, device)
+            }
+            else -> Unit
+        }
+    }
+
+    /** The header fields the transport needs before the router sees the packet. */
+    private class HeaderPeek(val type: PacketType, val ttl: Int, val senderId: ByteArray)
+
+    private fun peekHeader(bytes: ByteArray): HeaderPeek? {
+        if (bytes.size < PacketCodec.HEADER_BYTES) return null
+        if ((bytes[0].toInt() and 0xFF) != PacketCodec.PROTOCOL_VERSION) return null
+        val type = PacketType.fromCode(bytes[1]) ?: return null
+        val ttl = bytes[2].toInt() and 0xFF
+        val senderId = bytes.copyOfRange(16, 24)
+        return HeaderPeek(type, ttl, senderId)
     }
 
     private fun hashMac(mac: String?): ByteArray {
@@ -444,20 +730,43 @@ class BleTransport(
         return h.copyOfRange(0, 8)
     }
 
-    /** Called by the app layer once it knows a device's identity (Announce). */
-    fun registerPeer(senderId: ByteArray, device: BluetoothDevice) {
+    /**
+     * Records the identity of a peer we are linked to.
+     *
+     * Called only for a peer's **own** ANNOUNCE (see [emit]), so the mapping
+     * MAC ⇄ senderId always belongs to the peer on that link. The id is not
+     * trusted yet: the app layer confirms it with [confirmPeerIdentity] after
+     * the router verified the announce's signature.
+     */
+    private fun registerPeer(senderId: ByteArray, device: BluetoothDevice) {
+        val mac = device.address ?: return
         val hex = VirtualNetwork.hex(senderId)
+        val previous = deviceToSender[mac]
+        if (previous != null && !previous.contentEquals(senderId)) {
+            // The peer changed its identity (a panic wipe): the old id is
+            // dead — nobody may be addressed with it any more.
+            val oldHex = VirtualNetwork.hex(previous)
+            senderToDevice.remove(oldHex)
+            verifiedSenders.remove(oldHex)
+            // The new identity deserves a fresh arbitration.
+            suppressedCentral.remove(mac)
+        }
         senderToDevice[hex] = device
-        deviceToSender[device.address] = senderId
+        deviceToSender[mac] = senderId
         refreshNeighbours()
         refreshDebugPeers()
-        maybeCloseDuplicate(device.address, senderId)
+        maybeCloseDuplicate(mac, senderId)
     }
 
     /**
      * If we hold both a central (client) and a peripheral (server) link to the
      * same device, keep exactly one — the lower senderId's central link.
      * The higher node drops its central link and logs `duplicate link closed`.
+     *
+     * Dropping the central link closes the *physical* link, so the lower id's
+     * server half disappears with it: the pair is left with one link, and
+     * traffic still flows both ways (the higher id reaches the lower one
+     * through the server notification path).
      */
     private fun maybeCloseDuplicate(mac: String?, senderId: ByteArray) {
         if (mac == null) return
@@ -467,6 +776,10 @@ class BleTransport(
         val decision = LinkArbiter.resolveDuplicate(localId, senderId, duplicateLink = true)
         if (decision == LinkArbiter.DuplicateDecision.DROP_LOCAL_CENTRAL) {
             Log.i(TAG, "duplicate link closed (higher ID dropped its central link)")
+            // Never reconnect as central to this peer: the lower id keeps the
+            // canonical link, and every reconnect would flip the two nodes
+            // back and forth (and burn a slot each time).
+            suppressedCentral.add(mac)
             clients.remove(mac)?.let { safeClose(it) }
         } else {
             Log.i(TAG, "duplicate link closed (lower ID kept central; peer will drop its duplicate)")
@@ -474,8 +787,48 @@ class BleTransport(
         refreshDebugPeers()
     }
 
+    /**
+     * Confirms that [senderId] is the genuine identity of a peer we are
+     * linked to.
+     *
+     * The app layer calls this **only** after the router verified the peer's
+     * signed ANNOUNCE (`AnnounceVerifier`), so the id is bound to a key the
+     * peer proved it owns. Until then the peer is not addressable and is not
+     * a neighbour.
+     *
+     * @return true when this is a **new** identity — the caller announces
+     * itself then, so the new peer learns us too.
+     */
+    fun confirmPeerIdentity(senderId: ByteArray): Boolean {
+        val hex = VirtualNetwork.hex(senderId)
+        val isNew = verifiedSenders.add(hex)
+        if (!isNew) return false
+        // The link that carries this identity is now usable.
+        for ((mac, id) in deviceToSender) {
+            if (id.contentEquals(senderId)) links[mac]?.verified = true
+        }
+        refreshNeighbours()
+        refreshDebugPeers()
+        return true
+    }
+
+    /**
+     * True when [senderId] is a peer we are **directly** linked to (we know
+     * which device it is).
+     *
+     * A relayed announce carries the origin's id, and that origin may be
+     * several hops away — it is not addressable and it is not a neighbour.
+     */
+    fun isDirectPeer(senderId: ByteArray): Boolean =
+        senderToDevice.containsKey(VirtualNetwork.hex(senderId))
+
     private fun refreshNeighbours() {
-        _neighbours.value = deviceToSender.values.mapTo(mutableSetOf()) { it.copyOf() }
+        // Only the peers whose identity we verified are neighbours: the router
+        // uses this set for the direct-send shortcut (rule 5) and the adaptive
+        // relay probability (rule 6).
+        _neighbours.value = deviceToSender.values
+            .filter { verifiedSenders.contains(VirtualNetwork.hex(it)) }
+            .mapTo(mutableSetOf()) { it.copyOf() }
     }
 
     /** Debug overlay snapshot: central + peripheral peers with MTU/RSSI/role. */
@@ -495,11 +848,11 @@ class BleTransport(
 
     override suspend fun connect(peer: ByteArray) { senderToDevice[VirtualNetwork.hex(peer)]?.let { maybeConnect(it) } }
     override suspend fun disconnect(peer: ByteArray) {
-        val device = senderToDevice.remove(VirtualNetwork.hex(peer)) ?: return
+        val hex = VirtualNetwork.hex(peer)
+        val device = senderToDevice.remove(hex) ?: return
+        verifiedSenders.remove(hex)
         deviceToSender.remove(device.address)
-        clients.remove(device.address)?.let { safeClose(it) }
-        rawReassembler.drop(device.address)
-        serverLinks.remove(device.address)
+        closeLinkTo(device.address)
         refreshNeighbours()
         refreshDebugPeers()
     }

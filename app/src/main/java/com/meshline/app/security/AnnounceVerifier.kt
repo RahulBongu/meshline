@@ -54,6 +54,33 @@ object AnnounceVerifier {
         return if (learned) SignatureCheck.OK else SignatureCheck.BUDGET
     }
 
+    /**
+     * Verifies an ANNOUNCE's **identity claim** without touching the key
+     * cache.
+     *
+     * An ANNOUNCE is self-certifying: the payload carries the Ed25519 key,
+     * the hash of that key must equal the claimed `senderId`, and the
+     * signature must verify with that key. No prior trust and no cache write
+     * are needed — which is exactly what the BLE layer needs to bind a
+     * *device* to an identity: a forged announce must not be able to claim
+     * somebody else's id (and pull our traffic to the impostor).
+     *
+     * @return the verified `senderId`, or null when the announce does not
+     * prove the identity it claims.
+     */
+    fun verifyAnnounceIdentity(pkt: MeshPacket): ByteArray? {
+        if (pkt.type != PacketType.ANNOUNCE) return null
+        val ann = try {
+            Payloads.decodeAnnounce(pkt.payload)
+        } catch (_: Exception) {
+            return null
+        }
+        if (!MessageIds.idFromPublicKey(ann.ed25519PublicKey).contentEquals(pkt.senderId)) return null
+        val sig = pkt.signature ?: return null
+        if (!verifyEd(ann.ed25519PublicKey, PacketCodec.signingInput(pkt), sig)) return null
+        return pkt.senderId
+    }
+
     fun verifyEd(rawPub: ByteArray, input: ByteArray, sig: ByteArray): Boolean {
         return try {
             // BouncyCastle, not JCA: platform Ed25519 only exists on Android 13+,
