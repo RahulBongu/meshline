@@ -576,8 +576,12 @@ same; this is about what the node does with the links it has.
   flipping the link back and forth.
 - **The mesh says why it did not start.** A missing Bluetooth permission or a
   rejected foreground-service start is now shown in the UI (with a **Grant
-  permissions** button) instead of only a line in the log. The service also
-  checks the permissions itself and stops cleanly.
+  permissions** button) instead of only a line in the log. The service checks
+  the permissions itself and stops cleanly — and it always calls
+  `startForeground()` **before** any permission decision, because a service
+  that stops without ever going foreground crashes the app
+  (`ForegroundServiceDidNotStartInTimeException`); a refused start stays
+  alive instead and the next "Start mesh" tap retries it.
 - **The announce reaches every link**, not only the known neighbours: a peer
   that has not heard from us yet cannot address us and would never show up in
   the neighbours set. The announce is also sent when a link comes up and when
