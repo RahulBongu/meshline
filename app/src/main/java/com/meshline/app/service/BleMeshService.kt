@@ -77,12 +77,23 @@ class BleMeshService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var transport: BleTransport? = null
     private var router: MeshRouter? = null
+
+    /** True once the full start below ran (transport, router, channel). */
+    @Volatile private var initialized = false
     private val jobs = mutableListOf<Job>()
     private var announceJob: Job? = null
 
     private val identityStore by lazy { AndroidKeystoreIdentityStore(applicationContext) }
     private val profileStore by lazy { ProfileStore(applicationContext) }
-    private val contacts by lazy { ContactsRepository(applicationContext) }
+
+    /**
+     * The contacts database, created on first use and closed in onDestroy.
+     * Explicit (not `by lazy`) so a service that never got as far as opening
+     * it does not open it just to close it.
+     */
+    private var contactsStore: ContactsRepository? = null
+    private val contacts: ContactsRepository
+        get() = contactsStore ?: ContactsRepository(applicationContext).also { contactsStore = it }
     private val retentionStore by lazy { RetentionStore(applicationContext) }
     private val keyCache = KeyCache()
 
@@ -110,6 +121,33 @@ class BleMeshService : Service() {
     override fun onCreate() {
         super.onCreate()
         setStartError(null)
+        tryInitialize()
+    }
+
+    /**
+     * The full service start, idempotent: onCreate runs it once and every
+     * later startForegroundService() retries it through onStartCommand — that
+     * is what makes "grant the permission, then tap Start mesh again" work
+     * after a refused start left the service un-initialized.
+     *
+     * The ordering is the point. startForegroundService() obliges the service
+     * to go foreground before anything else: a service that is destroyed
+     * without a successful startForeground() crashes the whole app
+     * (ForegroundServiceDidNotStartInTimeException) — **even when the service
+     * stops itself on purpose**. So the foreground start comes FIRST; only
+     * once it succeeded may the missing-permission path stopSelf() safely.
+     */
+    private fun tryInitialize() {
+        if (initialized) return
+        if (!startForegroundCompat()) {
+            // The foreground start itself was refused: a revoked Bluetooth
+            // permission on Android 14+ makes the connected-device type
+            // inadmissible, or Android blocked a background start. The reason
+            // is already surfaced in the UI. stopSelf() here would crash the
+            // app (the service never went foreground) — stay a plain started
+            // service instead; the next "Start mesh" tap retries.
+            return
+        }
         val missing = missingBlePermissions()
         if (missing.isNotEmpty()) {
             // Without them the transport cannot scan, connect or advertise:
@@ -118,13 +156,7 @@ class BleMeshService : Service() {
                 "Bluetooth permission missing: ${missing.joinToString()}. " +
                     "Grant it and tap \"Start mesh\" again."
             )
-            stopSelf()
-            return
-        }
-        if (!startForegroundCompat()) {
-            // Android 12+/14 can reject the FGS start (background start or a
-            // missing connected-device permission). Fail soft instead of crashing.
-            stopSelf()
+            stopSelf() // crash-safe: the service did go foreground
             return
         }
 
@@ -282,6 +314,8 @@ class BleMeshService : Service() {
                 sendAnnounce()
             }
         }
+        initialized = true
+        setStartError(null) // a retry succeeded — the old failure banner is stale
         Log.d(TAG, "BleMeshService up")
     }
 
@@ -390,6 +424,10 @@ class BleMeshService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A start that was refused before (foreground or permission) left the
+        // service un-initialized: retry now — the user may have just granted
+        // the permission and tapped "Start mesh" again.
+        tryInitialize()
         when (intent?.action) {
             ACTION_SEND_PUBLIC -> {
                 intent.getStringExtra(EXTRA_TEXT)?.let { text ->
@@ -463,7 +501,7 @@ class BleMeshService : Service() {
         announceJob?.cancel()
         jobs.forEach { it.cancel() }
         transport?.stopInternal()
-        contacts.close()
+        contactsStore?.close()
         scope.cancel()
         super.onDestroy()
     }

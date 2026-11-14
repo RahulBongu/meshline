@@ -136,6 +136,12 @@ Install `meshline-d2.apk` on both phones. **Same build on both.**
    warning** when A comes back; accept it (or reject it → A is blocked).
    Then scan A's **new** QR on B → the verified badge is back and the chat works
    again.
+9. **Permission deny (the crash check):** revoke Meshline's *Nearby devices*
+   permission in system settings (or *Location* on Android 11) while the app
+   is closed, reopen it and tap **Start mesh**: the app must **not** crash — a
+   red `MESH NOT STARTED — …` banner appears instead (the exact wording
+   depends on the Android version). Then grant the permission again and tap
+   **Start mesh**: the banner clears and the mesh comes up.
 
 **Results — step 4**
 
@@ -156,6 +162,7 @@ Tick the boxes that passed:
 - [ ] the chat history survived a force-stop and relaunch
 - [ ] QR verified both ways, badge shown
 - [ ] the panic wipe gave a new identity and the peer saw the key-change warning
+- [ ] denying a Bluetooth permission showed the red banner instead of crashing; grant + Start mesh recovered
 - [ ] accepting the new key restored the chat (and the badge came back only after a new QR scan)
 - [ ] Logcat shows **no keys, no fingerprints and no message text**
 
