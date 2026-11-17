@@ -14,7 +14,9 @@ enum class PacketType(val code: Byte) {
     RECEIPT(0x05),
     FRAGMENT(0x06),
     LEAVE(0x07),
-    HANDSHAKE(0x08);
+    HANDSHAKE(0x08),
+    GROUP_MESSAGE(0x09),
+    GROUP_CONTROL(0x0A);
 
     companion object {
         /** Returns null for reserved/unknown codes — never throws. */

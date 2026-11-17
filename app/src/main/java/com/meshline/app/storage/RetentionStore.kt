@@ -22,7 +22,10 @@ enum class MessageRetention(val days: Int) {
     ONE_DAY(1),
 
     /** Purge messages older than seven days. */
-    SEVEN_DAYS(7);
+    SEVEN_DAYS(7),
+
+    /** Purge messages older than thirty days. */
+    THIRTY_DAYS(30);
 
     companion object {
         fun of(days: Int): MessageRetention = entries.firstOrNull { it.days == days } ?: OFF

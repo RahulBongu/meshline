@@ -8,6 +8,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,11 +19,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,11 +41,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.meshline.app.groups.GroupItem
 import com.meshline.app.profile.Profile
 import com.meshline.app.profile.ProfileStore
 import com.meshline.app.protocol.MessageIds
@@ -51,31 +62,36 @@ import com.meshline.app.service.KeyChangeEvent
 import com.meshline.app.service.MeshStatsSnapshot
 import com.meshline.app.service.PrivateChatMessage
 import com.meshline.app.service.PrivatePeer
+import com.meshline.app.storage.ContactEntity
 import com.meshline.app.storage.ContactsRepository
 import com.meshline.app.storage.MessageRetention
 import com.meshline.app.storage.RetentionStore
-import com.meshline.app.ui.ChatsScreen
+import com.meshline.app.ui.ChannelsScreen
+import com.meshline.app.ui.ChatsUnifiedScreen
 import com.meshline.app.ui.ContactsScreen
+import com.meshline.app.ui.GroupChatScreen
 import com.meshline.app.ui.KeyChangeDialog
 import com.meshline.app.ui.MyProfileScreen
-import com.meshline.app.ui.PanicWipeButton
+import com.meshline.app.ui.NearbyScreen
 import com.meshline.app.ui.PanicWipeDialog
 import com.meshline.app.ui.PrivateChatScreen
-import com.meshline.app.ui.PrivatePeerList
+import com.meshline.app.ui.ProfileAndSettingsScreen
 import com.meshline.app.ui.ScanConfirmScreen
 import com.meshline.app.ui.ScanQRScreen
 import com.meshline.app.ui.SecureStorageResetDialog
-import com.meshline.app.ui.SettingsProfileScreen
 import kotlinx.coroutines.launch
 
 /**
- * D1 activity: permissions, public composer, debug overlay, and the identity
- * flows — My QR, Scan (CameraX + ZXing), Contacts, Settings. Private chat and
- * full UI polish land in D2/E.
+ * Meshline Main Activity.
+ *
+ * Hosts the top-level 4-tab interface:
+ *  1. Chats: Unified 1-on-1 direct E2EE & group chats.
+ *  2. Nearby: Live BLE mesh status, radio diagnostics, public broadcast stream, and slash commands.
+ *  3. Channels: Topic-based broadcast rooms (#general, #mesh, #emergency, #geo-local).
+ *  4. Settings: Cryptographic identity, QR contact card exchange, network relays, and panic wipe.
  */
 class MainActivity : ComponentActivity() {
-    /** The message retention (FR-15) — kept here so the service action and the
-     *  UI stay in sync. */
+
     private var retention by mutableStateOf(MessageRetention.OFF)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,86 +116,183 @@ class MainActivity : ComponentActivity() {
                         retention = option
                         applyRetention(option)
                     },
+                    onCreateGroup = { name, icon, members -> createGroup(name, icon, members) },
+                    onSendGroupMessage = { groupId, text -> sendGroupMessage(groupId, text) },
+                    onAcceptGroupInvite = { groupId -> acceptGroupInvite(groupId) },
+                    onDeclineGroupInvite = { groupId -> declineGroupInvite(groupId) },
+                    onLeaveGroup = { groupId -> leaveGroup(groupId) },
+                    onClearGroupUnread = { groupId -> clearGroupUnread(groupId) },
+                    onSendChannelMessage = { channel, text -> sendChannelMessage(channel, text) },
+                    onSetActiveChannel = { channel -> setActiveChannel(channel) },
+                    onSetInternetRelay = { enabled -> setInternetRelay(enabled) },
+                    onExecuteCommand = { cmdText, ch -> executeCommand(cmdText, ch) },
                 )
             }
         }
     }
 
     private fun startMesh() {
-        // minSdk 26: startForegroundService is always available; the service
-        // posts its connected-device notification in onCreate.
         startForegroundService(Intent(this, BleMeshService::class.java))
     }
 
     private fun sendPublic(text: String) {
         if (text.isBlank()) return
-        val intent = Intent(this, BleMeshService::class.java)
-            .setAction(BleMeshService.ACTION_SEND_PUBLIC)
-            .putExtra(BleMeshService.EXTRA_TEXT, text)
-        startForegroundService(intent)
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SEND_PUBLIC)
+                .putExtra(BleMeshService.EXTRA_TEXT, text)
+        )
     }
 
-    /** Queues a private message (it stays Queued until a session exists). */
     private fun sendPrivate(peerIdHex: String, text: String) {
         if (text.isBlank()) return
-        val intent = Intent(this, BleMeshService::class.java)
-            .setAction(BleMeshService.ACTION_SEND_PRIVATE)
-            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
-            .putExtra(BleMeshService.EXTRA_TEXT, text)
-        startForegroundService(intent)
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SEND_PRIVATE)
+                .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+                .putExtra(BleMeshService.EXTRA_TEXT, text)
+        )
     }
 
-    /** Opens a chat: start the handshake if needed and mark what we read. */
     private fun openChat(peerIdHex: String) {
-        val intent = Intent(this, BleMeshService::class.java)
-            .setAction(BleMeshService.ACTION_OPEN_CHAT)
-            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
-        startForegroundService(intent)
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_OPEN_CHAT)
+                .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+        )
     }
 
     private fun acceptKey(peerIdHex: String) {
-        val intent = Intent(this, BleMeshService::class.java)
-            .setAction(BleMeshService.ACTION_ACCEPT_KEY)
-            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
-        startForegroundService(intent)
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_ACCEPT_KEY)
+                .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+        )
     }
 
     private fun rejectKey(peerIdHex: String) {
-        val intent = Intent(this, BleMeshService::class.java)
-            .setAction(BleMeshService.ACTION_REJECT_KEY)
-            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
-        startForegroundService(intent)
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_REJECT_KEY)
+                .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+        )
     }
 
-    /** The panic wipe: the identity, the contacts and every message go. */
     private fun panicWipe() {
-        val intent = Intent(this, BleMeshService::class.java)
-            .setAction(BleMeshService.ACTION_PANIC_WIPE)
-        startForegroundService(intent)
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_PANIC_WIPE)
+        )
     }
 
-    /** Sends a message that was never delivered again. */
     private fun resend(messageIdHex: String) {
-        val intent = Intent(this, BleMeshService::class.java)
-            .setAction(BleMeshService.ACTION_RESEND)
-            .putExtra(BleMeshService.EXTRA_MESSAGE_ID, messageIdHex)
-        startForegroundService(intent)
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_RESEND)
+                .putExtra(BleMeshService.EXTRA_MESSAGE_ID, messageIdHex)
+        )
     }
 
-    /** "Clear chat": the history of one conversation goes. */
     private fun clearChat(peerIdHex: String) {
-        val intent = Intent(this, BleMeshService::class.java)
-            .setAction(BleMeshService.ACTION_CLEAR_CHAT)
-            .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
-        startForegroundService(intent)
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_CLEAR_CHAT)
+                .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+        )
     }
 
-    /** The message retention (FR-15). */
     private fun applyRetention(retention: MessageRetention) {
-        val intent = Intent(this, BleMeshService::class.java)
-            .setAction(BleMeshService.ACTION_SET_RETENTION)
-            .putExtra(BleMeshService.EXTRA_RETENTION_DAYS, retention.days)
-        startForegroundService(intent)
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SET_RETENTION)
+                .putExtra(BleMeshService.EXTRA_RETENTION_DAYS, retention.days)
+        )
+    }
+
+    private fun createGroup(name: String, icon: Byte, members: List<ContactEntity>) {
+        val pubkeys = members.map { it.ed25519PublicKey.joinToString("") { b -> "%02x".format(b) } }.toTypedArray()
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_CREATE_GROUP)
+                .putExtra(BleMeshService.EXTRA_GROUP_NAME, name)
+                .putExtra(BleMeshService.EXTRA_AVATAR_INDEX, icon)
+                .putExtra(BleMeshService.EXTRA_MEMBERS_PUBLIC_KEYS, pubkeys)
+        )
+    }
+
+    private fun sendGroupMessage(groupIdHex: String, text: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SEND_GROUP_MESSAGE)
+                .putExtra(BleMeshService.EXTRA_GROUP_ID, groupIdHex)
+                .putExtra(BleMeshService.EXTRA_TEXT, text)
+        )
+    }
+
+    private fun acceptGroupInvite(groupIdHex: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_ACCEPT_GROUP_INVITE)
+                .putExtra(BleMeshService.EXTRA_GROUP_ID, groupIdHex)
+        )
+    }
+
+    private fun declineGroupInvite(groupIdHex: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_DECLINE_GROUP_INVITE)
+                .putExtra(BleMeshService.EXTRA_GROUP_ID, groupIdHex)
+        )
+    }
+
+    private fun leaveGroup(groupIdHex: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_LEAVE_GROUP)
+                .putExtra(BleMeshService.EXTRA_GROUP_ID, groupIdHex)
+        )
+    }
+
+    private fun clearGroupUnread(groupIdHex: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_CLEAR_GROUP_UNREAD)
+                .putExtra(BleMeshService.EXTRA_GROUP_ID, groupIdHex)
+        )
+    }
+
+    private fun sendChannelMessage(channel: String, text: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SEND_CHANNEL_MESSAGE)
+                .putExtra(BleMeshService.EXTRA_CHANNEL, channel)
+                .putExtra(BleMeshService.EXTRA_TEXT, text)
+        )
+    }
+
+    private fun setActiveChannel(channel: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SET_ACTIVE_CHANNEL)
+                .putExtra(BleMeshService.EXTRA_CHANNEL, channel)
+        )
+    }
+
+    private fun setInternetRelay(enabled: Boolean) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SET_INTERNET_RELAY)
+                .putExtra(BleMeshService.EXTRA_ENABLED, enabled)
+        )
+    }
+
+    private fun executeCommand(commandText: String, activeChannel: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_EXECUTE_COMMAND)
+                .putExtra(BleMeshService.EXTRA_COMMAND_TEXT, commandText)
+                .putExtra(BleMeshService.EXTRA_CHANNEL, activeChannel)
+        )
     }
 
     private fun requestBlePermissionsIfNeeded() {
@@ -201,7 +314,8 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { HOME, MY_QR, SCAN, CONTACTS, SETTINGS, PRIVATE_CHAT }
+private enum class MainTab { CHATS, NEARBY, CHANNELS, SETTINGS }
+private enum class Screen { MAIN, MY_QR, SCAN, CONTACTS, PRIVATE_CHAT, GROUP_CHAT }
 
 @Composable
 private fun App(
@@ -217,26 +331,53 @@ private fun App(
     onGrantPermissions: () -> Unit,
     retention: MessageRetention,
     onSetRetention: (MessageRetention) -> Unit,
+    onCreateGroup: (name: String, icon: Byte, members: List<ContactEntity>) -> Unit,
+    onSendGroupMessage: (groupId: String, text: String) -> Unit,
+    onAcceptGroupInvite: (groupId: String) -> Unit,
+    onDeclineGroupInvite: (groupId: String) -> Unit,
+    onLeaveGroup: (groupId: String) -> Unit,
+    onClearGroupUnread: (groupId: String) -> Unit,
+    onSendChannelMessage: (channel: String, text: String) -> Unit,
+    onSetActiveChannel: (channel: String) -> Unit,
+    onSetInternetRelay: (enabled: Boolean) -> Unit,
+    onExecuteCommand: (commandText: String, activeChannel: String) -> Unit,
 ) {
     val app = LocalContext.current.applicationContext
     val identityStore = remember { AndroidKeystoreIdentityStore(app) }
     val profileStore = remember { ProfileStore(app) }
-    val retentionStore = remember { RetentionStore(app) }
     val contactsRepo = remember { ContactsRepository(app) }
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     var identity by remember { mutableStateOf<Identity?>(null) }
     var profile by remember { mutableStateOf<Profile?>(null) }
     var resetEvent by remember { mutableStateOf<SecureStorageStatus.Event?>(null) }
-    var screen by remember { mutableStateOf(Screen.HOME) }
+    var currentTab by remember { mutableStateOf(MainTab.CHATS) }
+    var screen by remember { mutableStateOf(Screen.MAIN) }
     var pendingCard by remember { mutableStateOf<QrPayload.ContactCard?>(null) }
     var scanError by remember { mutableStateOf<String?>(null) }
     var openPeerId by remember { mutableStateOf<String?>(null) }
+    var openGroupId by remember { mutableStateOf<String?>(null) }
     var wipeArmed by remember { mutableStateOf(false) }
 
+    // State flows from BleMeshService
     val privateMessages by BleMeshService.privateMessages.collectAsState()
     val privatePeers by BleMeshService.privatePeers.collectAsState()
     val keyChange by BleMeshService.keyChange.collectAsState()
+    val publicChatMessages by BleMeshService.publicChatMessages.collectAsState()
+    val groups by BleMeshService.groups.collectAsState()
+    val groupMessages by BleMeshService.groupMessages.collectAsState()
+    val pendingGroupInvites by BleMeshService.pendingGroupInvites.collectAsState()
+    val channels by BleMeshService.channels.collectAsState()
+    val activeChannel by BleMeshService.activeChannel.collectAsState()
+    val channelMessages by BleMeshService.channelMessages.collectAsState()
+    val relayStatus by BleMeshService.relayStatus.collectAsState()
+    val systemNotification by BleMeshService.systemNotification.collectAsState()
+    val peers by BleMeshService.peers.collectAsState(initial = emptyList())
+    val stats by BleMeshService.stats.collectAsState(initial = MeshStatsSnapshot())
+    val startError by BleMeshService.startError.collectAsState(initial = null)
+    val lastGattError by BleMeshService.lastGattError.collectAsState(initial = null)
+    val advertiseSupported by BleMeshService.advertiseSupported.collectAsState(initial = true)
 
     val contacts by remember(contactsRepo) { contactsRepo.observeAll() }
         .collectAsState(initial = emptyList())
@@ -256,19 +397,24 @@ private fun App(
         identity = identityStore.load() ?: AndroidKeystoreIdentityStore.generateAndStore(app)
         profile = profileStore.load()
         resetEvent = SecureStorageStatus.consume(app)
+        onStart() // Ensure mesh foreground service is active
     }
-    // A reset can also happen when the DB is first opened (service or contacts
-    // flow); surface it once, without popping on every normal empty list.
+
     LaunchedEffect(contacts) {
         if (resetEvent == null) resetEvent = SecureStorageStatus.consume(app)
+    }
+
+    LaunchedEffect(systemNotification) {
+        systemNotification?.let { msg ->
+            snackbarHostState.showSnackbar(msg)
+            BleMeshService.clearSystemNotification()
+        }
     }
 
     resetEvent?.let { event ->
         SecureStorageResetDialog(event) { resetEvent = null }
     }
 
-    // A key change needs an explicit decision (§7.2) — it is never applied
-    // silently, and it is never dismissed by a tap outside.
     keyChange?.let { event ->
         KeyChangeDialog(
             event = event,
@@ -289,6 +435,17 @@ private fun App(
 
     val id = identity
     val prof = profile
+
+    if (id == null || prof == null) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(MeshlineColors.Background),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("Initializing Meshline cryptographic identity…", color = MeshlineColors.TextSecondary)
+        }
+        return
+    }
+
     when {
         pendingCard != null -> {
             val card = pendingCard!!
@@ -306,57 +463,56 @@ private fun App(
                 },
                 onCancel = {
                     pendingCard = null
-                    screen = Screen.HOME
+                    screen = Screen.MAIN
                 },
             )
         }
-        screen == Screen.SCAN -> ScanQRScreen(
-            error = scanError,
-            onScanned = { text ->
-                val card = runCatching { QrPayload.decode(text) }.getOrNull()
-                if (card == null) {
-                    scanError = "Not a valid Meshline contact QR (or the code is damaged)."
-                } else {
-                    scanError = null
-                    pendingCard = card
-                }
-            },
-        )
-        id == null || prof == null -> Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center,
-        ) { Text("Preparing secure storage…") }
-        screen == Screen.MY_QR -> MyProfileScreen(
-            profile = prof,
-            fingerprintShort = id.fingerprintShort,
-            qrText = QrPayload.encode(
-                QrPayload.ContactCard(
-                    ed25519PublicKey = id.ed25519PublicKey,
-                    x25519PublicKey = id.x25519PublicKey,
-                    avatarIndex = prof.avatarIndex,
-                    nickname = prof.nickname,
-                )
-            ),
-        )
-        screen == Screen.CONTACTS -> ContactsScreen(
-            contacts = contacts,
-            onOpen = { c -> onOpenChat(c.senderIdHex) },
-        )
-        screen == Screen.SETTINGS -> SettingsProfileScreen(
-            store = profileStore,
-            initial = prof,
-            retention = retention,
-            onRetention = { option -> onSetRetention(option) },
-            onSaved = {
-                profile = profileStore.load()
-                screen = Screen.HOME
-            },
-        )
+        screen == Screen.SCAN -> {
+            ScanQRScreen(
+                error = scanError,
+                onScanned = { text ->
+                    val card = runCatching { QrPayload.decode(text) }.getOrNull()
+                    if (card == null) {
+                        scanError = "Not a valid Meshline contact QR code."
+                    } else {
+                        scanError = null
+                        pendingCard = card
+                    }
+                },
+                onBack = { screen = Screen.MAIN },
+            )
+        }
+        screen == Screen.MY_QR -> {
+            MyProfileScreen(
+                profile = prof,
+                fingerprintShort = id.fingerprintShort,
+                qrText = QrPayload.encode(
+                    QrPayload.ContactCard(
+                        ed25519PublicKey = id.ed25519PublicKey,
+                        x25519PublicKey = id.x25519PublicKey,
+                        avatarIndex = prof.avatarIndex,
+                        nickname = prof.nickname,
+                    )
+                ),
+                onBack = { screen = Screen.MAIN },
+            )
+        }
+        screen == Screen.CONTACTS -> {
+            ContactsScreen(
+                contacts = contacts,
+                onOpen = { c ->
+                    openPeerId = c.senderIdHex
+                    onOpenChat(c.senderIdHex)
+                    screen = Screen.PRIVATE_CHAT
+                },
+                onBack = { screen = Screen.MAIN },
+            )
+        }
         screen == Screen.PRIVATE_CHAT -> {
             val peerId = openPeerId
             val peer = privatePeers.firstOrNull { it.peerIdHex == peerId }
             if (peer == null) {
-                screen = Screen.HOME
+                screen = Screen.MAIN
             } else {
                 PrivateChatScreen(
                     peer = peer,
@@ -364,174 +520,224 @@ private fun App(
                     onSend = { text -> onSendPrivate(peer.peerIdHex, text) },
                     onResend = { messageId -> onResend(messageId) },
                     onClearChat = { onClearChat(peer.peerIdHex) },
-                    onBack = { screen = Screen.HOME },
+                    onBack = { screen = Screen.MAIN },
                 )
             }
         }
-        else -> ChatsScreen(
-            nearby = {
-                Home(
-                    profileLabel = ProfileStore.displayName(prof, id.fingerprintShort),
-                    contactsCount = contacts.size,
-                    onStart = onStart,
-                    onGrantPermissions = onGrantPermissions,
-                    onMyQr = { screen = Screen.MY_QR },
-                    onScan = {
-                        if (ContextCompat.checkSelfPermission(app, Manifest.permission.CAMERA) ==
-                            PackageManager.PERMISSION_GRANTED
-                        ) {
-                            scanError = null
-                            screen = Screen.SCAN
-                        } else {
-                            cameraPermission.launch(Manifest.permission.CAMERA)
+        screen == Screen.GROUP_CHAT -> {
+            val groupId = openGroupId
+            val group = groups.firstOrNull { it.groupIdHex == groupId }
+            if (group == null) {
+                screen = Screen.MAIN
+            } else {
+                val groupMsgList = groupMessages[group.groupIdHex] ?: emptyList()
+                GroupChatScreen(
+                    group = group,
+                    messages = groupMsgList,
+                    onSend = { text -> onSendGroupMessage(group.groupIdHex, text) },
+                    onLeaveGroup = {
+                        onLeaveGroup(group.groupIdHex)
+                        screen = Screen.MAIN
+                    },
+                    onBack = {
+                        onClearGroupUnread(group.groupIdHex)
+                        screen = Screen.MAIN
+                    },
+                )
+            }
+        }
+        else -> {
+            // Main Top-Level Scaffold with 4 Tabs
+            Scaffold(
+                snackbarHost = { SnackbarHost(snackbarHostState) },
+                bottomBar = {
+                    NavigationBar(
+                        containerColor = Color(0xFF101410),
+                        contentColor = MeshlineColors.TextPrimary,
+                    ) {
+                        val totalGroupBadge = groups.sumOf { it.unreadCount } + pendingGroupInvites.size
+                        NavigationBarItem(
+                            selected = currentTab == MainTab.CHATS,
+                            onClick = { currentTab = MainTab.CHATS },
+                            icon = {
+                                Box {
+                                    Text("💬", fontSize = 18.sp)
+                                    if (totalGroupBadge > 0) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .size(10.dp)
+                                                .clip(CircleShape)
+                                                .background(MeshlineColors.Accent)
+                                        )
+                                    }
+                                }
+                            },
+                            label = { Text("Chats", fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MeshlineColors.Accent,
+                                selectedTextColor = MeshlineColors.Accent,
+                                indicatorColor = Color(0xFF1E2A20),
+                            ),
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == MainTab.NEARBY,
+                            onClick = { currentTab = MainTab.NEARBY },
+                            icon = {
+                                Box {
+                                    Text("📡", fontSize = 18.sp)
+                                    if (peers.isNotEmpty()) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .size(10.dp)
+                                                .clip(CircleShape)
+                                                .background(MeshlineColors.Accent)
+                                        )
+                                    }
+                                }
+                            },
+                            label = { Text("Nearby (${peers.size})", fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MeshlineColors.Accent,
+                                selectedTextColor = MeshlineColors.Accent,
+                                indicatorColor = Color(0xFF1E2A20),
+                            ),
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == MainTab.CHANNELS,
+                            onClick = { currentTab = MainTab.CHANNELS },
+                            icon = {
+                                val chBadge = channels.sumOf { it.unreadCount }
+                                Box {
+                                    Text("#", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                    if (chBadge > 0) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .size(10.dp)
+                                                .clip(CircleShape)
+                                                .background(MeshlineColors.Accent)
+                                        )
+                                    }
+                                }
+                            },
+                            label = { Text("Channels", fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MeshlineColors.Accent,
+                                selectedTextColor = MeshlineColors.Accent,
+                                indicatorColor = Color(0xFF1E2A20),
+                            ),
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == MainTab.SETTINGS,
+                            onClick = { currentTab = MainTab.SETTINGS },
+                            icon = { Text("⚙", fontSize = 18.sp) },
+                            label = { Text("Settings", fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MeshlineColors.Accent,
+                                selectedTextColor = MeshlineColors.Accent,
+                                indicatorColor = Color(0xFF1E2A20),
+                            ),
+                        )
+                    }
+                },
+            ) { innerPadding ->
+                Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
+                    when (currentTab) {
+                        MainTab.CHATS -> {
+                            ChatsUnifiedScreen(
+                                peers = privatePeers,
+                                groups = groups,
+                                pendingInvites = pendingGroupInvites,
+                                contacts = contacts,
+                                onOpenPeer = { peer ->
+                                    openPeerId = peer.peerIdHex
+                                    onOpenChat(peer.peerIdHex)
+                                    screen = Screen.PRIVATE_CHAT
+                                },
+                                onOpenGroup = { group ->
+                                    openGroupId = group.groupIdHex
+                                    onClearGroupUnread(group.groupIdHex)
+                                    screen = Screen.GROUP_CHAT
+                                },
+                                onAcceptInvite = { gid -> onAcceptGroupInvite(gid) },
+                                onDeclineInvite = { gid -> onDeclineGroupInvite(gid) },
+                                onCreateGroup = { name, icon, selected ->
+                                    onCreateGroup(name, icon, selected)
+                                },
+                            )
                         }
-                    },
-                    onContacts = { screen = Screen.CONTACTS },
-                    onSettings = { screen = Screen.SETTINGS },
-                    onSend = onSendPublic,
-                    onPanicWipeArmed = { wipeArmed = true },
-                )
-            },
-            private = {
-                PrivatePeerList(
-                    peers = privatePeers,
-                    onOpen = { peer ->
-                        openPeerId = peer.peerIdHex
-                        onOpenChat(peer.peerIdHex)
-                        screen = Screen.PRIVATE_CHAT
-                    },
-                )
-            },
-        )
-    }
-}
-
-@Composable
-private fun Home(
-    profileLabel: String,
-    contactsCount: Int,
-    onStart: () -> Unit,
-    onGrantPermissions: () -> Unit,
-    onMyQr: () -> Unit,
-    onScan: () -> Unit,
-    onContacts: () -> Unit,
-    onSettings: () -> Unit,
-    onSend: (String) -> Unit,
-    onPanicWipeArmed: () -> Unit,
-) {
-    var msg by remember { mutableStateOf("") }
-    val peers by BleMeshService.peers.collectAsState(initial = emptyList())
-    val messages by BleMeshService.messages.collectAsState(initial = emptyList())
-    val lastGattError by BleMeshService.lastGattError.collectAsState(initial = null)
-    val advertiseSupported by BleMeshService.advertiseSupported.collectAsState(initial = true)
-    val stats by BleMeshService.stats.collectAsState(initial = MeshStatsSnapshot())
-    val startError by BleMeshService.startError.collectAsState(initial = null)
-
-    Surface(color = MeshlineColors.Background, modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-            Text("// MESHLINE — NEARBY (PUBLIC)", color = MeshlineColors.Accent, style = MaterialTheme.typography.headlineSmall)
-            Text("you: $profileLabel", color = MeshlineColors.TextPrimary, style = MaterialTheme.typography.bodyMedium)
-            Text(
-                "public chat is signed (Ed25519) but NOT encrypted yet. Anyone in range can read it.",
-                color = MeshlineColors.TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            // The mesh could not start: say why, and offer the fix.
-            if (startError != null) {
-                Text(
-                    "MESH NOT STARTED — $startError",
-                    color = Color(0xFFFF8A80),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Spacer(Modifier.height(4.dp))
-                Button(onClick = onGrantPermissions, modifier = Modifier.fillMaxWidth()) {
-                    Text("Grant permissions")
+                        MainTab.NEARBY -> {
+                            NearbyScreen(
+                                profileLabel = ProfileStore.displayName(prof, id.fingerprintShort),
+                                peers = peers,
+                                messages = publicChatMessages,
+                                stats = stats,
+                                lastGattError = lastGattError,
+                                advertiseSupported = advertiseSupported,
+                                startError = startError,
+                                relayStatus = relayStatus,
+                                onStartMesh = onStart,
+                                onGrantPermissions = onGrantPermissions,
+                                onSendPublic = onSendPublic,
+                                onExecuteCommand = { cmd -> onExecuteCommand(cmd, "#general") },
+                            )
+                        }
+                        MainTab.CHANNELS -> {
+                            val activeMsgs = channelMessages[activeChannel] ?: emptyList()
+                            ChannelsScreen(
+                                channels = channels,
+                                activeChannel = activeChannel,
+                                messages = activeMsgs,
+                                onSelectChannel = { ch -> onSetActiveChannel(ch) },
+                                onJoinChannel = { ch -> onSetActiveChannel(ch) },
+                                onSendMessage = { ch, text -> onSendChannelMessage(ch, text) },
+                                onExecuteCommand = { cmd, ch -> onExecuteCommand(cmd, ch) },
+                            )
+                        }
+                        MainTab.SETTINGS -> {
+                            ProfileAndSettingsScreen(
+                                profile = prof,
+                                fingerprintShort = id.fingerprintShort,
+                                contactsCount = contacts.size,
+                                retention = retention,
+                                relayStatus = relayStatus,
+                                onSaveProfile = { newNick, newAvatar ->
+                                    profileStore.save(Profile(newNick, newAvatar))
+                                    profile = profileStore.load()
+                                },
+                                onSetRetention = onSetRetention,
+                                onSetInternetRelay = onSetInternetRelay,
+                                onMyQr = { screen = Screen.MY_QR },
+                                onScanQr = {
+                                    if (ContextCompat.checkSelfPermission(app, Manifest.permission.CAMERA) ==
+                                        PackageManager.PERMISSION_GRANTED
+                                    ) {
+                                        scanError = null
+                                        screen = Screen.SCAN
+                                    } else {
+                                        cameraPermission.launch(Manifest.permission.CAMERA)
+                                    }
+                                },
+                                onViewContacts = { screen = Screen.CONTACTS },
+                                onPanicWipeArmed = { wipeArmed = true },
+                            )
+                        }
+                    }
                 }
             }
-            if (!advertiseSupported) {
-                Text(
-                    "Advertising unsupported on this device — you can still chat as client only (scan + connect). Check Logcat isMultipleAdvertisementSupported.",
-                    color = Color(0xFFFFD54F),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) { Text("Start mesh (BLE)") }
-            Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onMyQr, modifier = Modifier.weight(1f)) { Text("My QR") }
-                Button(onClick = onScan, modifier = Modifier.weight(1f)) { Text("Scan") }
-            }
-            Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onContacts, modifier = Modifier.weight(1f)) { Text("Contacts ($contactsCount)") }
-                Button(onClick = onSettings, modifier = Modifier.weight(1f)) { Text("Settings") }
-            }
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "no peers nearby yet — open on two physical phones, allow Bluetooth, start both. BLE does not work on emulators.",
-                color = MeshlineColors.TextPrimary,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = msg,
-                onValueChange = { if (it.length <= 500) msg = it },
-                label = { Text("public (500 chars max)") },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Button(
-                onClick = {
-                    onSend(msg)
-                    msg = ""
-                },
-                enabled = msg.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Send public") }
-            // ---- debug overlay (Phase C #1) ----
-            Spacer(Modifier.height(16.dp))
-            Text("DEBUG — peers (${peers.size})", color = MeshlineColors.Accent, style = MaterialTheme.typography.titleSmall)
-            if (peers.isEmpty()) Text("none", color = MeshlineColors.TextSecondary)
-            peers.forEach { p ->
-                Text(
-                    "peer ${p.peerIdHex.take(8)}… rssi=${p.rssiDbm ?: "?"}dBm mtu=${p.mtu ?: "?"} role=${p.role}",
-                    color = MeshlineColors.TextPrimary,
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            Text("DEBUG — received (${messages.size})", color = MeshlineColors.Accent, style = MaterialTheme.typography.titleSmall)
-            if (messages.isEmpty()) Text("none yet", color = MeshlineColors.TextSecondary)
-            messages.takeLast(20).reversed().forEach { m ->
-                Text(
-                    "${m.typeName} from ${m.senderIdHex.take(8)}… ttl=${m.receivedTtl} hops=${m.hops}",
-                    color = MeshlineColors.TextPrimary,
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "counters: delivered=${stats.delivered} relayed=${stats.relayedForwards} " +
-                    "unknownKey=${stats.droppedUnknownKey} badSig=${stats.droppedBadSignature} " +
-                    "budget=${stats.droppedBudget} invalid=${stats.droppedInvalid} " +
-                    "bufFull=${stats.droppedBufferFull} held=${stats.heldTotal} " +
-                    "released=${stats.releasedPending}",
-                color = MeshlineColors.TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Text("last GATT error: ${lastGattError?.let { "code $it" } ?: "none"}", color = MeshlineColors.TextSecondary)
-            Text("See README: physical checklist incl. 500-char, screen-off, permission-deny, logcat.", color = MeshlineColors.TextSecondary, style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(8.dp))
-            PanicWipeButton(onArmed = onPanicWipeArmed)
         }
     }
 }
 
-/** Terminal palette: dark-first, one neon accent (PRD §13). */
+/** Deep charcoal with mint neon accent palette. */
 object MeshlineColors {
-    val Background = Color(0xFF0A0F0A)
-    val Surface = Color(0xFF111711)
-    val Accent = Color(0xFF39FF88)
-    val TextPrimary = Color(0xFFE8F5E9)
-    val TextSecondary = Color(0xFF9DBE9D)
+    val Background = Color(0xFF0C100D)
+    val Surface = Color(0xFF131A14)
+    val Accent = Color(0xFF10B981) // Modern polished emerald mint
+    val TextPrimary = Color(0xFFECFDF5)
+    val TextSecondary = Color(0xFF94A3B8)
 }
 
 @Composable

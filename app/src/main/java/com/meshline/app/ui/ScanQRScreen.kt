@@ -81,7 +81,7 @@ internal fun rotateLuminance(data: ByteArray, w: Int, h: Int, degrees: Int): Tri
 }
 
 @Composable
-fun ScanQRScreen(onScanned: (String) -> Unit, error: String? = null) {
+fun ScanQRScreen(onScanned: (String) -> Unit, error: String? = null, onBack: () -> Unit = {}) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
@@ -92,6 +92,9 @@ fun ScanQRScreen(onScanned: (String) -> Unit, error: String? = null) {
     }
 
     Column(modifier = Modifier.padding(16.dp)) {
+        androidx.compose.material3.TextButton(onClick = onBack) {
+            androidx.compose.material3.Text("← Back")
+        }
         Text("Scan a Meshline QR code", style = MaterialTheme.typography.headlineSmall)
         Text(
             "Hold steady and fill the frame. Only QR codes are decoded.",

@@ -16,4 +16,9 @@ class SecureStores(private val db: MeshlineDatabase) {
 
     /** The chat history (both directions). */
     val messages: MessageStore = RoomMessageStore(db.messagesDao())
+
+    /** Groups and group messages (Phase E). */
+    val groups = db.groupsDao()
+    val groupMessages = db.groupMessagesDao()
+    val channelMessages = db.channelMessagesDao()
 }

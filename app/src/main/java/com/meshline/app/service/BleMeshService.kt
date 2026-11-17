@@ -12,7 +12,16 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.meshline.app.R
+import com.meshline.app.channels.ChannelItem
+import com.meshline.app.channels.ChannelManager
+import com.meshline.app.channels.ChannelMessageUi
+import com.meshline.app.commands.CommandParser
+import com.meshline.app.groups.GroupItem
+import com.meshline.app.groups.GroupManager
+import com.meshline.app.groups.GroupMessageUi
+import com.meshline.app.groups.PendingGroupInvite
 import com.meshline.app.profile.ProfileStore
+import com.meshline.app.protocol.GroupPayloads
 import com.meshline.app.protocol.MeshPacket
 import com.meshline.app.protocol.PacketCodec
 import com.meshline.app.protocol.PacketType
@@ -29,8 +38,10 @@ import com.meshline.app.storage.ContactsRepository
 import com.meshline.app.storage.MessageRetention
 import com.meshline.app.storage.RetentionStore
 import com.meshline.app.transport.BleTransport
+import com.meshline.app.transport.InternetRelayTransport
 import com.meshline.app.transport.PeerInfo
 import com.meshline.app.transport.ReceivedMessageInfo
+import com.meshline.app.transport.RelayStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,8 +57,6 @@ import kotlin.random.Random
 
 /**
  * Counter snapshot for the debug overlay (PROTOCOL §8.1 counter split).
- * Top-level so both the service and the UI can name it without companion
- * nesting rules.
  */
 data class MeshStatsSnapshot(
     val delivered: Int = 0,
@@ -61,16 +70,28 @@ data class MeshStatsSnapshot(
     val releasedPending: Int = 0,
 )
 
+/** Public Nearby chat message (signed Ed25519). */
+data class PublicChatMessage(
+    val messageIdHex: String,
+    val senderIdHex: String,
+    val senderNickname: String,
+    val senderAvatarIndex: Int,
+    val text: String,
+    val timestampMs: Long,
+    val isSelf: Boolean,
+    val hops: Int = 0,
+)
+
 /**
- * D1 service: owns BLE + MeshRouter + the Keystore identity.
+ * Meshline background mesh service.
  *
- * - Identity is Keystore-backed (Ed25519 + X25519). ANNOUNCE and PUBLIC_MESSAGE
- *   are signed; the router verifies every signature before dedupe/relay and
- *   keeps the two-tier [KeyCache] (PROTOCOL §8.1).
- * - Announces every ~30 s (intervalUnits=3) with the profile's fruit avatar.
- * - QR-verified contacts are pre-loaded into the protected key tier.
- * - Runs as a connected-device foreground service.
- * - BLE does not work on emulators. Test on two physical phones (see README).
+ * Responsibilities:
+ *  - Owns BLE transport + MeshRouter + Android Keystore identity.
+ *  - Coordinates Noise XX E2EE 1-on-1 private messaging via [SecureChannel].
+ *  - Coordinates encrypted group messaging and membership epoch keys via [GroupManager].
+ *  - Coordinates topic channels and IRC-style slash commands via [ChannelManager] & [CommandParser].
+ *  - Optionally coordinates global Nostr relay synchronization via [InternetRelayTransport].
+ *  - Provides persistent foreground service behavior on Android 8.0+.
  */
 class BleMeshService : Service() {
 
@@ -78,7 +99,6 @@ class BleMeshService : Service() {
     private var transport: BleTransport? = null
     private var router: MeshRouter? = null
 
-    /** True once the full start below ran (transport, router, channel). */
     @Volatile private var initialized = false
     private val jobs = mutableListOf<Job>()
     private var announceJob: Job? = null
@@ -86,31 +106,24 @@ class BleMeshService : Service() {
     private val identityStore by lazy { AndroidKeystoreIdentityStore(applicationContext) }
     private val profileStore by lazy { ProfileStore(applicationContext) }
 
-    /**
-     * The contacts database, created on first use and closed in onDestroy.
-     * Explicit (not `by lazy`) so a service that never got as far as opening
-     * it does not open it just to close it.
-     */
     private var contactsStore: ContactsRepository? = null
     private val contacts: ContactsRepository
         get() = contactsStore ?: ContactsRepository(applicationContext).also { contactsStore = it }
     private val retentionStore by lazy { RetentionStore(applicationContext) }
     private val keyCache = KeyCache()
 
-    /** Peers we are currently linked to (transport view) — drives the settle window. */
     @Volatile private var connectedPeers: Set<ByteArray> = emptySet()
-
-    /** When the last announce went out (the re-announce cadence uses it). */
     @Volatile private var lastAnnounceAtMs: Long = 0L
 
-    /** The D2 secure channel (Noise sessions, private messages, receipts). */
     @Volatile private var secureChannel: SecureChannel? = null
+    @Volatile private var groupManager: GroupManager? = null
+    @Volatile private var channelManager: ChannelManager? = null
+    @Volatile private var relayTransport: InternetRelayTransport? = null
+    private val peerProfiles = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Int>>()
 
-    /** The connected peers as hex ids (the D2 layer's view). */
     private fun connectedPeersHex(): Set<String> =
         connectedPeers.map { it.joinToString("") { b -> "%02x".format(b) } }.toSet()
 
-    /** Keystore-backed identity; a reset creates a new one (see SecureStorageStatus). */
     val identity: Identity by lazy {
         identityStore.load() ?: AndroidKeystoreIdentityStore.generateAndStore(applicationContext)
     }
@@ -124,39 +137,19 @@ class BleMeshService : Service() {
         tryInitialize()
     }
 
-    /**
-     * The full service start, idempotent: onCreate runs it once and every
-     * later startForegroundService() retries it through onStartCommand — that
-     * is what makes "grant the permission, then tap Start mesh again" work
-     * after a refused start left the service un-initialized.
-     *
-     * The ordering is the point. startForegroundService() obliges the service
-     * to go foreground before anything else: a service that is destroyed
-     * without a successful startForeground() crashes the whole app
-     * (ForegroundServiceDidNotStartInTimeException) — **even when the service
-     * stops itself on purpose**. So the foreground start comes FIRST; only
-     * once it succeeded may the missing-permission path stopSelf() safely.
-     */
     private fun tryInitialize() {
         if (initialized) return
         if (!startForegroundCompat()) {
-            // The foreground start itself was refused: a revoked Bluetooth
-            // permission on Android 14+ makes the connected-device type
-            // inadmissible, or Android blocked a background start. The reason
-            // is already surfaced in the UI. stopSelf() here would crash the
-            // app (the service never went foreground) — stay a plain started
-            // service instead; the next "Start mesh" tap retries.
             return
         }
+
         val missing = missingBlePermissions()
         if (missing.isNotEmpty()) {
-            // Without them the transport cannot scan, connect or advertise:
-            // say so in the UI instead of failing silently in the log.
             setStartError(
                 "Bluetooth permission missing: ${missing.joinToString()}. " +
                     "Grant it and tap \"Start mesh\" again."
             )
-            stopSelf() // crash-safe: the service did go foreground
+            stopSelf()
             return
         }
 
@@ -165,32 +158,42 @@ class BleMeshService : Service() {
             context = applicationContext,
             localId = id.senderId,
             scope = scope,
-            // The transport binds a *device* to an identity only when the
-            // announce proves it (self-certifying) — a forged announce must
-            // not be able to claim somebody else's id and pull our traffic to
-            // the impostor.
             announceIdentityVerifier = { pkt -> AnnounceVerifier.verifyAnnounceIdentity(pkt) },
         )
         val r = MeshRouter(
             ownId = id.senderId,
             transport = t,
             config = RouterConfig(),
-            // The peers we can address: the ones that sent us a verified
-            // ANNOUNCE (the transport registers them under their senderId).
-            // With this the router can use the direct-send shortcut (rule 5)
-            // and the adaptive relay probability (rule 6) instead of always
-            // flooding to everybody.
             neighboursProvider = { connectedPeers },
-            // The transport's connection view drives the settle window only
-            // (PROTOCOL §8.1): the sender waits ~2 s after linking a new peer
-            // before its first data packet to it.
             connectedPeersProvider = { connectedPeers },
             signatureVerifier = { pkt, from -> AnnounceVerifier.verify(pkt, keyCache, from) },
         )
         transport = t
         router = r
 
-        // The D2 secure channel: Noise handshakes, private messages, receipts.
+        // 1. Group Manager
+        val gm = GroupManager(
+            localIdentity = id,
+            localNickname = { profileStore.load().nickname },
+            localAvatarIndex = { profileStore.load().avatarIndex.toByte() },
+        )
+        groupManager = gm
+
+        // 2. Channel Manager
+        val cm = ChannelManager(
+            ownIdHex = id.senderId.joinToString("") { "%02x".format(it) }
+        )
+        channelManager = cm
+
+        // 3. Internet Relay Transport (Nostr)
+        val rt = InternetRelayTransport(
+            context = applicationContext,
+            localIdHex = id.senderId.joinToString("") { "%02x".format(it) },
+            scope = scope,
+        )
+        relayTransport = rt
+
+        // 4. Secure Channel (Noise XX E2EE)
         val channel = SecureChannel(
             identity = id,
             router = r,
@@ -198,41 +201,113 @@ class BleMeshService : Service() {
             contacts = contacts,
             outbox = contacts.secure.outbox,
             dedupe = contacts.secure.seen,
-            messageStore = contacts.secure.messages,            sessionDirectory = contacts.secure.sessions,
+            messageStore = contacts.secure.messages,
+            sessionDirectory = contacts.secure.sessions,
             connectedPeers = { connectedPeersHex() },
             retentionDays = { retentionStore.load().days },
+            onGroupInvite = { inviteBytes ->
+                gm.offerInvite(inviteBytes)
+            },
         )
         secureChannel = channel
 
+        // Flow bindings: Private Chat
         jobs += scope.launch { channel.messages.collect { setPrivateMessages(it) } }
         jobs += scope.launch { channel.peers.collect { setPrivatePeers(it) } }
         jobs += scope.launch { channel.keyChange.collect { setKeyChange(it) } }
 
+        // Flow bindings: Groups
+        jobs += scope.launch { gm.groups.collect { setGroups(it.values.toList()) } }
+        jobs += scope.launch { gm.messages.collect { setGroupMessages(it) } }
+        jobs += scope.launch { gm.pendingInvites.collect { setPendingGroupInvites(it) } }
+
+        // Flow bindings: Channels
+        jobs += scope.launch { cm.channels.collect { setChannels(it) } }
+        jobs += scope.launch { cm.activeChannel.collect { setActiveChannel(it) } }
+        jobs += scope.launch { cm.messages.collect { setChannelMessages(it) } }
+
+        // Flow bindings: Internet Relay
+        jobs += scope.launch { rt.status.collect { setRelayStatus(it) } }
+        jobs += scope.launch {
+            rt.incomingMessages.collect { (channelName, text) ->
+                cm.addMessage(
+                    ChannelMessageUi(
+                        messageIdHex = "nostr-${System.currentTimeMillis()}-${Random.nextInt(1000, 9999)}",
+                        channel = channelName,
+                        senderIdHex = "nostr-relay",
+                        senderNickname = "Nostr Peer",
+                        senderAvatarIndex = 0,
+                        text = text,
+                        timestampMs = System.currentTimeMillis(),
+                        isSelf = false,
+                    )
+                )
+            }
+        }
+
+        // Transport incoming -> Router
         jobs += scope.launch {
             t.incoming.collect { (from, bytes) -> runCatching { r.onReceive(bytes, from) } }
         }
-        // Track the connected peers (transport view) for the settle window.
         jobs += scope.launch {
             t.neighbours.collect { set -> connectedPeers = set.map { it.copyOf() }.toSet() }
         }
-        // D2: every packet the router delivers to us goes through the secure
-        // channel (handshakes, private messages, receipts).
+
+        // Router delivered packets dispatcher
         jobs += scope.launch {
             r.deliveredWithPeer.collect { (from, pkt) ->
-                runCatching { channel.onPacket(pkt, from) }
+                runCatching {
+                    when (pkt.type) {
+                        PacketType.GROUP_MESSAGE -> {
+                            gm.onIncomingGroupPacket(pkt)
+                        }
+                        PacketType.CHANNEL_MESSAGE -> {
+                            val channelMsg = GroupPayloads.decodeChannelMessage(pkt.payload)
+                            val senderHex = pkt.senderId.joinToString("") { "%02x".format(it) }
+                            val prof = peerProfiles[senderHex]
+                            cm.addMessage(
+                                ChannelMessageUi(
+                                    messageIdHex = pkt.messageId.joinToString("") { "%02x".format(it) },
+                                    channel = channelMsg.channel,
+                                    senderIdHex = senderHex,
+                                    senderNickname = prof?.first ?: senderHex.take(4).uppercase(),
+                                    senderAvatarIndex = prof?.second ?: 0,
+                                    text = channelMsg.text,
+                                    timestampMs = pkt.timestampMs,
+                                    isSelf = pkt.senderId.contentEquals(id.senderId),
+                                )
+                            )
+                        }
+                        PacketType.PUBLIC_MESSAGE -> {
+                            val text = Payloads.decodePublicText(pkt.payload)
+                            val senderHex = pkt.senderId.joinToString("") { "%02x".format(it) }
+                            val prof = peerProfiles[senderHex]
+                            pushPublicMessage(
+                                PublicChatMessage(
+                                    messageIdHex = pkt.messageId.joinToString("") { "%02x".format(it) },
+                                    senderIdHex = senderHex,
+                                    senderNickname = prof?.first ?: senderHex.take(4).uppercase(),
+                                    senderAvatarIndex = prof?.second ?: 0,
+                                    text = text,
+                                    timestampMs = pkt.timestampMs,
+                                    isSelf = pkt.senderId.contentEquals(id.senderId),
+                                    hops = (PacketCodec.MAX_TTL - pkt.ttl).coerceAtLeast(0),
+                                )
+                            )
+                        }
+                        else -> {
+                            channel.onPacket(pkt, from)
+                        }
+                    }
+                }
             }
         }
-        // D2: the periodic work — handshake retransmits, outbox retries,
-        // re-keys, expiry.
+
+        // Periodic maintenance
         jobs += scope.launch {
             while (true) {
                 runCatching { channel.tick() }
-                // Release the links that never proved a peer identity: they
-                // would hold one of the six GATT slots forever.
                 runCatching { t.sweepUnannouncedLinks() }
-                // While a peer is still unproven, announce again (every 5 s):
-                // it learns our id only from an announce, and a lost announce
-                // would otherwise leave the link unusable for a whole cycle.
                 if (t.unprovenLinkCount > 0 &&
                     System.currentTimeMillis() - lastAnnounceAtMs > RE_ANNOUNCE_INTERVAL_MS
                 ) {
@@ -241,26 +316,24 @@ class BleMeshService : Service() {
                 delay(2_000)
             }
         }
+
         jobs += scope.launch { t.debugPeers.collect { setPeers(it) } }
         jobs += scope.launch { t.lastGattError.collect { if (it != null) setGattError(it) } }
         jobs += scope.launch { t.advertiseSupported.collect { setAdvertiseSupported(it) } }
-        // A new link came up: announce ourselves right away. The peer learns
-        // our id only from an announce, and the periodic announce (30 s) would
-        // leave the link unusable for most of that cycle.
+
         jobs += scope.launch {
             t.newLink.collect { runCatching { sendAnnounce() } }
         }
+
         jobs += scope.launch {
             r.delivered.collect { pkt ->
-                // The identity is confirmed by the peer's **signed ANNOUNCE**
-                // only: the router verified the signature before delivering
-                // it, so from now on this id can be addressed and the peer
-                // counts as a neighbour.
                 if (pkt.type == PacketType.ANNOUNCE) {
+                    val announce = runCatching { Payloads.decodeAnnounce(pkt.payload) }.getOrNull()
+                    if (announce != null) {
+                        peerProfiles[pkt.senderId.joinToString("") { "%02x".format(it) }] =
+                            announce.nickname to announce.avatarIndex.toInt()
+                    }
                     val isNew = runCatching { t.confirmPeerIdentity(pkt.senderId) }.getOrDefault(false)
-                    // Announce ourselves to a **new direct** peer, so it learns
-                    // us too. A relayed announce (the origin is further away)
-                    // must not trigger an announce per hop.
                     if (isNew && t.isDirectPeer(pkt.senderId)) {
                         runCatching { sendAnnounce() }
                     }
@@ -276,12 +349,11 @@ class BleMeshService : Service() {
                 )
             }
         }
-        // Counter snapshot for the debug overlay (D1 counter split).
+
+        // Stats snapshot
         jobs += scope.launch {
             while (true) {
                 val s = r.stats
-                // Held packets time out on a timer, not only when traffic
-                // arrives (PROTOCOL §8.1).
                 r.sweepExpiredPending()
                 setStats(
                     MeshStatsSnapshot(
@@ -299,7 +371,8 @@ class BleMeshService : Service() {
                 delay(2_000)
             }
         }
-        // QR-verified contacts are trusted immediately (protected tier).
+
+        // QR-verified contacts are trusted immediately
         jobs += scope.launch {
             contacts.all().forEach { c ->
                 runCatching { keyCache.protect(c.senderIdHex.hexToBytes(), c.ed25519PublicKey) }
@@ -315,7 +388,7 @@ class BleMeshService : Service() {
             }
         }
         initialized = true
-        setStartError(null) // a retry succeeded — the old failure banner is stale
+        setStartError(null)
         Log.d(TAG, "BleMeshService up")
     }
 
@@ -334,18 +407,155 @@ class BleMeshService : Service() {
             )
         )
         lastAnnounceAtMs = System.currentTimeMillis()
-        // The announce goes to **every** link, not only to the known
-        // neighbours: a peer that has not heard from us yet cannot address us
-        // and would never show up in the neighbours set at all.
         runCatching { r.onLocalBroadcast(signed(PacketType.ANNOUNCE, payload)) }
     }
 
-    /** Public Nearby chat (signed, not encrypted). */
+    /** Public Nearby chat (signed Ed25519, broadcast). */
     suspend fun sendPublic(text: String) {
         val r = router ?: return
         val clean = text.trim()
         if (clean.isEmpty()) return
-        r.onLocalSend(signed(PacketType.PUBLIC_MESSAGE, Payloads.encodePublicText(clean)))
+        val pkt = signed(PacketType.PUBLIC_MESSAGE, Payloads.encodePublicText(clean))
+        r.onLocalSend(pkt)
+
+        val prof = profileStore.load()
+        pushPublicMessage(
+            PublicChatMessage(
+                messageIdHex = pkt.messageId.joinToString("") { "%02x".format(it) },
+                senderIdHex = identity.senderId.joinToString("") { "%02x".format(it) },
+                senderNickname = prof.nickname,
+                senderAvatarIndex = prof.avatarIndex.toInt(),
+                text = clean,
+                timestampMs = pkt.timestampMs,
+                isSelf = true,
+                hops = 0,
+            )
+        )
+    }
+
+    /** Broadcasts a channel message across the BLE mesh and optionally Nostr relays. */
+    suspend fun sendChannelMessage(channel: String, text: String) {
+        val r = router ?: return
+        val id = identity
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        val payload = GroupPayloads.encodeChannelMessage(GroupPayloads.ChannelMessage(channel, clean))
+        val unsigned = MeshPacket(
+            PacketCodec.PROTOCOL_VERSION, PacketType.CHANNEL_MESSAGE, PacketCodec.MAX_TTL, 0,
+            System.currentTimeMillis(), payload, id.senderId, PacketCodec.BROADCAST_ID,
+        )
+        val signedPkt = unsigned.copy(
+            flags = 0x02, // HAS_SIGNATURE
+            signature = id.signEd25519(PacketCodec.signingInput(unsigned)),
+        )
+        r.onLocalBroadcast(signedPkt)
+
+        val prof = profileStore.load()
+        channelManager?.addMessage(
+            ChannelMessageUi(
+                messageIdHex = signedPkt.messageId.joinToString("") { "%02x".format(it) },
+                channel = channel,
+                senderIdHex = id.senderId.joinToString("") { "%02x".format(it) },
+                senderNickname = prof.nickname,
+                senderAvatarIndex = prof.avatarIndex.toInt(),
+                text = clean,
+                timestampMs = signedPkt.timestampMs,
+                isSelf = true,
+            )
+        )
+
+        relayTransport?.publishChannelMessage(channel, clean)
+    }
+
+    /** Sends an encrypted group message. */
+    suspend fun sendGroupMessage(groupIdHex: String, text: String) {
+        val r = router ?: return
+        val gm = groupManager ?: return
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        val pkt = gm.createOutgoingGroupPacket(groupIdHex, clean) ?: return
+        r.onLocalBroadcast(pkt)
+    }
+
+    /** Creates a new group and sends Noise-encrypted invites to members. */
+    suspend fun createGroup(name: String, avatarIndex: Byte, initialMembers: List<GroupPayloads.RosterMember>) {
+        val gm = groupManager ?: return
+        val sc = secureChannel ?: return
+        val (_, invites) = gm.createGroup(name, avatarIndex, initialMembers)
+        for ((peerIdHex, inviteBytes) in invites) {
+            sc.sendRaw(peerIdHex, inviteBytes)
+        }
+    }
+
+    /** Executes IRC-style slash command. */
+    suspend fun executeCommand(commandText: String, activeChannel: String = "#general") {
+        val result = CommandParser.parse(commandText)
+        when (result) {
+            is CommandParser.ParseResult.NotCommand -> {
+                if (activeChannel.startsWith("#")) {
+                    sendChannelMessage(activeChannel, result.text)
+                } else {
+                    sendPublic(result.text)
+                }
+            }
+            is CommandParser.ParseResult.Executable -> {
+                when (val cmd = result.command) {
+                    is CommandParser.ChatCommand.Help -> {
+                        val helpText = CommandParser.formatHelp(cmd.topic)
+                        pushSystemNotification("Meshline Help", helpText)
+                    }
+                    is CommandParser.ChatCommand.Join -> {
+                        channelManager?.setActiveChannel(cmd.channel)
+                        pushSystemNotification("Channel Joined", "Switched to ${cmd.channel}")
+                    }
+                    is CommandParser.ChatCommand.Channels -> {
+                        val active = channelManager?.currentActiveChannel() ?: "#general"
+                        pushSystemNotification("Channels", "Active channel: $active")
+                    }
+                    is CommandParser.ChatCommand.Msg -> {
+                        secureChannel?.send(cmd.recipient, cmd.messageText)
+                    }
+                    is CommandParser.ChatCommand.Who -> {
+                        val count = connectedPeers.size
+                        pushSystemNotification("Mesh Neighbours", "$count active direct peer link(s) in radio range.")
+                    }
+                    is CommandParser.ChatCommand.Nick -> {
+                        val current = profileStore.load()
+                        profileStore.save(current.copy(nickname = cmd.newNick.take(32)))
+                        pushSystemNotification("Nickname Updated", "Your nickname is now: ${cmd.newNick.take(32)}")
+                        sendAnnounce()
+                    }
+                    is CommandParser.ChatCommand.Block -> {
+                        contacts.block(cmd.target)
+                        pushSystemNotification("Peer Blocked", "Blocked: ${cmd.target}")
+                    }
+                    is CommandParser.ChatCommand.Unblock -> {
+                        contacts.unblock(cmd.target)
+                        pushSystemNotification("Peer Unblocked", "Unblocked: ${cmd.target}")
+                    }
+                    is CommandParser.ChatCommand.Clear -> {
+                        if (activeChannel.startsWith("#")) {
+                            channelManager?.clearChannelMessages(activeChannel)
+                        }
+                    }
+                    is CommandParser.ChatCommand.Slap -> {
+                        val nick = profileStore.load().nickname
+                        val slapText = "* $nick slaps ${cmd.target} around a bit with a large trout *"
+                        if (activeChannel.startsWith("#")) {
+                            sendChannelMessage(activeChannel, slapText)
+                        } else {
+                            sendPublic(slapText)
+                        }
+                    }
+                }
+            }
+            is CommandParser.ParseResult.Unknown -> {
+                pushSystemNotification("Unknown Command", "Unknown command: /${result.commandName}. Type /help for assistance.")
+            }
+            is CommandParser.ParseResult.Error -> {
+                pushSystemNotification("Command Error", "${result.message}\nUsage: ${result.usage}")
+            }
+        }
     }
 
     private fun signed(type: PacketType, payload: ByteArray): MeshPacket {
@@ -355,7 +565,7 @@ class BleMeshService : Service() {
             System.currentTimeMillis(), payload, id.senderId, PacketCodec.BROADCAST_ID,
         )
         return unsigned.copy(
-            flags = 0x02, // HAS_SIGNATURE (broadcast, §3)
+            flags = 0x02, // HAS_SIGNATURE
             signature = id.signEd25519(PacketCodec.signingInput(unsigned)),
         )
     }
@@ -392,11 +602,6 @@ class BleMeshService : Service() {
         }
     }
 
-    /**
-     * Turns a rejected foreground-service start into something the user can
-     * act on. The old behaviour was a log line only, so the mesh simply never
-     * came up and nobody knew why.
-     */
     private fun describeFgsFailure(e: Exception): String = when {
         e is SecurityException && Build.VERSION.SDK_INT >= 34 ->
             "Android 14 refused the connected-device foreground service. The " +
@@ -408,7 +613,6 @@ class BleMeshService : Service() {
         else -> "The mesh service could not start (${e.javaClass.simpleName})."
     }
 
-    /** The Bluetooth permissions the transport needs, missing ones named. */
     private fun missingBlePermissions(): List<String> {
         val out = mutableListOf<String>()
         fun granted(permission: String) =
@@ -424,9 +628,6 @@ class BleMeshService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // A start that was refused before (foreground or permission) left the
-        // service un-initialized: retry now — the user may have just granted
-        // the permission and tapped "Start mesh" again.
         tryInitialize()
         when (intent?.action) {
             ACTION_SEND_PUBLIC -> {
@@ -475,14 +676,80 @@ class BleMeshService : Service() {
                 if (peer != null) scope.launch { secureChannel?.rejectKeyChange(peer) }
             }
             ACTION_PANIC_WIPE -> scope.launch { panicWipe() }
+            ACTION_CREATE_GROUP -> {
+                val name = intent.getStringExtra(EXTRA_GROUP_NAME) ?: "Mesh Group"
+                val icon = intent.getByteExtra(EXTRA_AVATAR_INDEX, 0)
+                val pubkeys = intent.getStringArrayExtra(EXTRA_MEMBERS_PUBLIC_KEYS) ?: emptyArray()
+                scope.launch {
+                    val allContacts = contacts.all()
+                    val members = pubkeys.mapNotNull { hexKey ->
+                        runCatching {
+                            val pk = hexKey.hexToBytes()
+                            val c = allContacts.firstOrNull { it.ed25519PublicKey.contentEquals(pk) }
+                            GroupPayloads.RosterMember(
+                                ed25519PublicKey = pk,
+                                nickname = c?.nickname ?: hexKey.take(8),
+                                avatarIndex = c?.avatarIndex?.toByte() ?: 0,
+                            )
+                        }.getOrNull()
+                    }
+                    createGroup(name, icon, members)
+                }
+            }
+            ACTION_SEND_GROUP_MESSAGE -> {
+                val groupId = intent.getStringExtra(EXTRA_GROUP_ID)
+                val text = intent.getStringExtra(EXTRA_TEXT)
+                if (groupId != null && text != null) {
+                    scope.launch { sendGroupMessage(groupId, text) }
+                }
+            }
+            ACTION_ACCEPT_GROUP_INVITE -> {
+                intent.getStringExtra(EXTRA_GROUP_ID)?.let { gid ->
+                    groupManager?.acceptInvite(gid)
+                }
+            }
+            ACTION_DECLINE_GROUP_INVITE -> {
+                intent.getStringExtra(EXTRA_GROUP_ID)?.let { gid ->
+                    groupManager?.declineInvite(gid)
+                }
+            }
+            ACTION_LEAVE_GROUP -> {
+                intent.getStringExtra(EXTRA_GROUP_ID)?.let { gid ->
+                    groupManager?.leaveGroup(gid)
+                }
+            }
+            ACTION_CLEAR_GROUP_UNREAD -> {
+                intent.getStringExtra(EXTRA_GROUP_ID)?.let { gid ->
+                    groupManager?.clearUnread(gid)
+                }
+            }
+            ACTION_SEND_CHANNEL_MESSAGE -> {
+                val ch = intent.getStringExtra(EXTRA_CHANNEL) ?: "#general"
+                val text = intent.getStringExtra(EXTRA_TEXT)
+                if (text != null) {
+                    scope.launch { sendChannelMessage(ch, text) }
+                }
+            }
+            ACTION_SET_ACTIVE_CHANNEL -> {
+                intent.getStringExtra(EXTRA_CHANNEL)?.let { ch ->
+                    channelManager?.setActiveChannel(ch)
+                }
+            }
+            ACTION_SET_INTERNET_RELAY -> {
+                val enabled = intent.getBooleanExtra(EXTRA_ENABLED, false)
+                relayTransport?.setEnabled(enabled)
+            }
+            ACTION_EXECUTE_COMMAND -> {
+                val cmdText = intent.getStringExtra(EXTRA_COMMAND_TEXT) ?: ""
+                val ch = intent.getStringExtra(EXTRA_CHANNEL) ?: "#general"
+                if (cmdText.isNotBlank()) {
+                    scope.launch { executeCommand(cmdText, ch) }
+                }
+            }
         }
         return START_STICKY
     }
 
-    /**
-     * Panic wipe: the identity, the contacts, every session and every message
-     * go. The app comes back with a **new** identity on the next launch.
-     */
     private suspend fun panicWipe() {
         PanicWiper(
             context = applicationContext,
@@ -493,6 +760,10 @@ class BleMeshService : Service() {
         ).wipe(secureChannel)
         setPrivateMessages(emptyList())
         setPrivatePeers(emptyList())
+        setGroups(emptyList())
+        setGroupMessages(emptyMap())
+        setPendingGroupInvites(emptyList())
+        setPublicMessages(emptyList())
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -502,11 +773,11 @@ class BleMeshService : Service() {
         jobs.forEach { it.cancel() }
         transport?.stopInternal()
         contactsStore?.close()
+        relayTransport?.stop()
         scope.cancel()
         super.onDestroy()
     }
 
-    /** Debug overlay flows (Phase C #1) + send action for the composer. */
     companion object Bridge {
         const val ACTION_SEND_PUBLIC = "com.meshline.app.action.SEND_PUBLIC"
         const val ACTION_SEND_PRIVATE = "com.meshline.app.action.SEND_PRIVATE"
@@ -518,16 +789,33 @@ class BleMeshService : Service() {
         const val ACTION_ACCEPT_KEY = "com.meshline.app.action.ACCEPT_KEY"
         const val ACTION_REJECT_KEY = "com.meshline.app.action.REJECT_KEY"
         const val ACTION_PANIC_WIPE = "com.meshline.app.action.PANIC_WIPE"
+        const val ACTION_CREATE_GROUP = "com.meshline.app.action.CREATE_GROUP"
+        const val ACTION_SEND_GROUP_MESSAGE = "com.meshline.app.action.SEND_GROUP_MESSAGE"
+        const val ACTION_ACCEPT_GROUP_INVITE = "com.meshline.app.action.ACCEPT_GROUP_INVITE"
+        const val ACTION_DECLINE_GROUP_INVITE = "com.meshline.app.action.DECLINE_GROUP_INVITE"
+        const val ACTION_LEAVE_GROUP = "com.meshline.app.action.LEAVE_GROUP"
+        const val ACTION_CLEAR_GROUP_UNREAD = "com.meshline.app.action.CLEAR_GROUP_UNREAD"
+        const val ACTION_SEND_CHANNEL_MESSAGE = "com.meshline.app.action.SEND_CHANNEL_MESSAGE"
+        const val ACTION_SET_ACTIVE_CHANNEL = "com.meshline.app.action.SET_ACTIVE_CHANNEL"
+        const val ACTION_SET_INTERNET_RELAY = "com.meshline.app.action.SET_INTERNET_RELAY"
+        const val ACTION_EXECUTE_COMMAND = "com.meshline.app.action.EXECUTE_COMMAND"
+
         const val EXTRA_TEXT = "text"
         const val EXTRA_PEER_ID = "peerIdHex"
         const val EXTRA_MESSAGE_ID = "messageIdHex"
         const val EXTRA_RETENTION_DAYS = "retentionDays"
+        const val EXTRA_GROUP_ID = "groupIdHex"
+        const val EXTRA_GROUP_NAME = "groupName"
+        const val EXTRA_AVATAR_INDEX = "avatarIndex"
+        const val EXTRA_MEMBERS_PUBLIC_KEYS = "membersPubkeys"
+        const val EXTRA_CHANNEL = "channel"
+        const val EXTRA_ENABLED = "enabled"
+        const val EXTRA_COMMAND_TEXT = "commandText"
 
         private const val CHANNEL_ID = "meshline_mesh"
         private const val NOTIFICATION_ID = 1
-        private const val INTERVAL_UNITS: Byte = 3 // 30 s announce cadence
+        private const val INTERVAL_UNITS: Byte = 3
 
-        /** Re-announce cadence while a peer has not yet proved its identity. */
         private const val RE_ANNOUNCE_INTERVAL_MS: Long = 5_000L
         private const val TAG = "BleMeshService"
 
@@ -542,21 +830,44 @@ class BleMeshService : Service() {
         private val _stats = MutableStateFlow(MeshStatsSnapshot())
         val stats: Flow<MeshStatsSnapshot> = _stats.asStateFlow()
 
-        /**
-         * Why the mesh service could not start (a missing Bluetooth permission,
-         * a blocked foreground-service start). The UI shows it — the mesh
-         * simply not coming up is not a usable error message.
-         */
         private val _startError = MutableStateFlow<String?>(null)
         val startError: StateFlow<String?> = _startError.asStateFlow()
 
-        // ---- D2: the private-chat state the UI reads ----
+        // Private Chat
         private val _privateMessages = MutableStateFlow<List<PrivateChatMessage>>(emptyList())
         val privateMessages: StateFlow<List<PrivateChatMessage>> = _privateMessages.asStateFlow()
         private val _privatePeers = MutableStateFlow<List<PrivatePeer>>(emptyList())
         val privatePeers: StateFlow<List<PrivatePeer>> = _privatePeers.asStateFlow()
         private val _keyChange = MutableStateFlow<KeyChangeEvent?>(null)
         val keyChange: StateFlow<KeyChangeEvent?> = _keyChange.asStateFlow()
+
+        // Public Nearby Chat
+        private val _publicChatMessages = MutableStateFlow<List<PublicChatMessage>>(emptyList())
+        val publicChatMessages: StateFlow<List<PublicChatMessage>> = _publicChatMessages.asStateFlow()
+
+        // Groups
+        private val _groups = MutableStateFlow<List<GroupItem>>(emptyList())
+        val groups: StateFlow<List<GroupItem>> = _groups.asStateFlow()
+        private val _groupMessages = MutableStateFlow<Map<String, List<GroupMessageUi>>>(emptyMap())
+        val groupMessages: StateFlow<Map<String, List<GroupMessageUi>>> = _groupMessages.asStateFlow()
+        private val _pendingGroupInvites = MutableStateFlow<List<PendingGroupInvite>>(emptyList())
+        val pendingGroupInvites: StateFlow<List<PendingGroupInvite>> = _pendingGroupInvites.asStateFlow()
+
+        // Channels
+        private val _channels = MutableStateFlow<List<ChannelItem>>(ChannelManager.DEFAULT_CHANNELS)
+        val channels: StateFlow<List<ChannelItem>> = _channels.asStateFlow()
+        private val _activeChannel = MutableStateFlow("#general")
+        val activeChannel: StateFlow<String> = _activeChannel.asStateFlow()
+        private val _channelMessages = MutableStateFlow<Map<String, List<ChannelMessageUi>>>(emptyMap())
+        val channelMessages: StateFlow<Map<String, List<ChannelMessageUi>>> = _channelMessages.asStateFlow()
+
+        // Internet Relay
+        private val _relayStatus = MutableStateFlow(RelayStatus())
+        val relayStatus: StateFlow<RelayStatus> = _relayStatus.asStateFlow()
+
+        // System notification
+        private val _systemNotification = MutableStateFlow<String?>(null)
+        val systemNotification: StateFlow<String?> = _systemNotification.asStateFlow()
 
         internal fun setPeers(v: List<PeerInfo>) { _peers.value = v }
         internal fun pushMessage(m: ReceivedMessageInfo) { _messages.value = (_messages.value + m).takeLast(50) }
@@ -567,6 +878,22 @@ class BleMeshService : Service() {
         internal fun setPrivateMessages(v: List<PrivateChatMessage>) { _privateMessages.value = v }
         internal fun setPrivatePeers(v: List<PrivatePeer>) { _privatePeers.value = v }
         internal fun setKeyChange(v: KeyChangeEvent?) { _keyChange.value = v }
+
+        internal fun pushPublicMessage(m: PublicChatMessage) {
+            _publicChatMessages.value = (_publicChatMessages.value + m).takeLast(200)
+        }
+        internal fun setPublicMessages(v: List<PublicChatMessage>) { _publicChatMessages.value = v }
+        internal fun setGroups(g: List<GroupItem>) { _groups.value = g }
+        internal fun setGroupMessages(m: Map<String, List<GroupMessageUi>>) { _groupMessages.value = m }
+        internal fun setPendingGroupInvites(invites: List<PendingGroupInvite>) { _pendingGroupInvites.value = invites }
+        internal fun setChannels(c: List<ChannelItem>) { _channels.value = c }
+        internal fun setActiveChannel(a: String) { _activeChannel.value = a }
+        internal fun setChannelMessages(m: Map<String, List<ChannelMessageUi>>) { _channelMessages.value = m }
+        internal fun setRelayStatus(s: RelayStatus) { _relayStatus.value = s }
+        internal fun pushSystemNotification(title: String, msg: String) {
+            _systemNotification.value = "$title: $msg"
+        }
+        fun clearSystemNotification() { _systemNotification.value = null }
 
         private fun String.hexToBytes(): ByteArray =
             chunked(2).map { it.toInt(16).toByte() }.toByteArray()

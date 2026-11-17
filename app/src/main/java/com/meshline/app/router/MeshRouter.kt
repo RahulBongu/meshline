@@ -359,7 +359,8 @@ class MeshRouter(
     }
 
     private fun mustBeSigned(type: PacketType): Boolean = when (type) {
-        PacketType.ANNOUNCE, PacketType.PUBLIC_MESSAGE, PacketType.RECEIPT, PacketType.LEAVE -> true
+        PacketType.ANNOUNCE, PacketType.PUBLIC_MESSAGE, PacketType.RECEIPT, PacketType.LEAVE,
+        PacketType.CHANNEL_MESSAGE, PacketType.GROUP_MESSAGE, PacketType.GROUP_CONTROL -> true
         else -> false
     }
 
@@ -582,7 +583,8 @@ class MeshRouter(
 
     /** True for packet types that carry user content (they wait for the settle window). */
     private fun isContentType(type: PacketType): Boolean = when (type) {
-        PacketType.PUBLIC_MESSAGE, PacketType.PRIVATE_MESSAGE, PacketType.RECEIPT, PacketType.FRAGMENT -> true
+        PacketType.PUBLIC_MESSAGE, PacketType.PRIVATE_MESSAGE, PacketType.RECEIPT,
+        PacketType.FRAGMENT, PacketType.CHANNEL_MESSAGE, PacketType.GROUP_MESSAGE, PacketType.GROUP_CONTROL -> true
         else -> false
     }
 

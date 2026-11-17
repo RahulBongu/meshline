@@ -32,11 +32,86 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.meshline.app.MeshlineColors
+import com.meshline.app.groups.GroupItem
+import com.meshline.app.groups.PendingGroupInvite
 import com.meshline.app.protocol.AvatarTable
 import com.meshline.app.service.KeyChangeEvent
 import com.meshline.app.service.PrivateChatMessage
 import com.meshline.app.service.PrivatePeer
+import com.meshline.app.storage.ContactEntity
 import com.meshline.app.storage.OutboxState
+
+/**
+ * Unified Chats screen hosting 1-on-1 Direct (Noise XX E2EE) and Group (ChaCha20-Poly1305) chats.
+ */
+@Composable
+fun ChatsUnifiedScreen(
+    peers: List<PrivatePeer>,
+    groups: List<GroupItem>,
+    pendingInvites: List<PendingGroupInvite>,
+    contacts: List<ContactEntity>,
+    onOpenPeer: (PrivatePeer) -> Unit,
+    onOpenGroup: (GroupItem) -> Unit,
+    onAcceptInvite: (String) -> Unit,
+    onDeclineInvite: (String) -> Unit,
+    onCreateGroup: (name: String, avatarIndex: Byte, selectedContacts: List<ContactEntity>) -> Unit,
+) {
+    var subTab by remember { mutableIntStateOf(0) }
+    var showCreateGroupDialog by remember { mutableStateOf(false) }
+
+    Surface(color = MeshlineColors.Background, modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Tab(
+                    selected = subTab == 0,
+                    onClick = { subTab = 0 },
+                    text = { Text("Direct (${peers.size})", color = if (subTab == 0) MeshlineColors.Accent else MeshlineColors.TextSecondary) },
+                )
+                Tab(
+                    selected = subTab == 1,
+                    onClick = { subTab = 1 },
+                    text = {
+                        val totalGroupBadge = groups.sumOf { it.unreadCount } + pendingInvites.size
+                        Text(
+                            "Groups (${groups.size})" + if (totalGroupBadge > 0) " (+$totalGroupBadge)" else "",
+                            color = if (subTab == 1) MeshlineColors.Accent else MeshlineColors.TextSecondary,
+                        )
+                    },
+                )
+            }
+
+            Spacer(Modifier.height(4.dp))
+
+            if (subTab == 0) {
+                PrivatePeerList(peers = peers, onOpen = onOpenPeer)
+            } else {
+                GroupList(
+                    groups = groups,
+                    pendingInvites = pendingInvites,
+                    onOpenGroup = onOpenGroup,
+                    onAcceptInvite = onAcceptInvite,
+                    onDeclineInvite = onDeclineInvite,
+                    onCreateGroupClick = { showCreateGroupDialog = true },
+                )
+            }
+        }
+    }
+
+    if (showCreateGroupDialog) {
+        CreateGroupDialog(
+            availableContacts = contacts.filter { it.verified },
+            onDismiss = { showCreateGroupDialog = false },
+            onCreate = { name, icon, selected ->
+                onCreateGroup(name, icon, selected)
+                showCreateGroupDialog = false
+            },
+        )
+    }
+}
 
 /**
  * The **Chats** screen with two tabs: Nearby (the signed public feed) and
