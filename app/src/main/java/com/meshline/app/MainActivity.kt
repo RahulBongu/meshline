@@ -5,10 +5,12 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -79,6 +81,10 @@ import com.meshline.app.ui.ProfileAndSettingsScreen
 import com.meshline.app.ui.ScanConfirmScreen
 import com.meshline.app.ui.ScanQRScreen
 import com.meshline.app.ui.SecureStorageResetDialog
+import com.meshline.app.ui.theme.AppThemeMode
+import com.meshline.app.ui.theme.MeshlineDesign
+import com.meshline.app.ui.theme.MeshlineTheme
+import com.meshline.app.ui.theme.ThemeStore
 import kotlinx.coroutines.launch
 
 /**
@@ -98,9 +104,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         requestBlePermissionsIfNeeded()
         retention = RetentionStore(applicationContext).load()
+        val themeStore = ThemeStore(applicationContext)
+
         setContent {
-            MeshlineTheme {
+            var themeMode by remember { mutableStateOf(themeStore.load()) }
+
+            MeshlineTheme(mode = themeMode) {
                 App(
+                    themeMode = themeMode,
+                    onSetThemeMode = { newMode ->
+                        themeMode = newMode
+                        themeStore.save(newMode)
+                    },
                     onStart = { startMesh() },
                     onSendPublic = { text -> sendPublic(text) },
                     onSendPrivate = { peer, text -> sendPrivate(peer, text) },
@@ -319,6 +334,8 @@ private enum class Screen { MAIN, MY_QR, SCAN, CONTACTS, PRIVATE_CHAT, GROUP_CHA
 
 @Composable
 private fun App(
+    themeMode: AppThemeMode,
+    onSetThemeMode: (AppThemeMode) -> Unit,
     onStart: () -> Unit,
     onSendPublic: (String) -> Unit,
     onSendPrivate: (String, String) -> Unit,
@@ -342,6 +359,7 @@ private fun App(
     onSetInternetRelay: (enabled: Boolean) -> Unit,
     onExecuteCommand: (commandText: String, activeChannel: String) -> Unit,
 ) {
+    val colors = MeshlineDesign.colors
     val app = LocalContext.current.applicationContext
     val identityStore = remember { AndroidKeystoreIdentityStore(app) }
     val profileStore = remember { ProfileStore(app) }
@@ -359,6 +377,14 @@ private fun App(
     var openPeerId by remember { mutableStateOf<String?>(null) }
     var openGroupId by remember { mutableStateOf<String?>(null) }
     var wipeArmed by remember { mutableStateOf(false) }
+
+    // Intercept hardware/gesture Back button when inside any sub-screen (Defect B-01 fix)
+    BackHandler(enabled = screen != Screen.MAIN) {
+        if (screen == Screen.GROUP_CHAT && openGroupId != null) {
+            onClearGroupUnread(openGroupId!!)
+        }
+        screen = Screen.MAIN
+    }
 
     // State flows from BleMeshService
     val privateMessages by BleMeshService.privateMessages.collectAsState()
@@ -438,10 +464,10 @@ private fun App(
 
     if (id == null || prof == null) {
         Box(
-            modifier = Modifier.fillMaxSize().background(MeshlineColors.Background),
+            modifier = Modifier.fillMaxSize().background(colors.background),
             contentAlignment = Alignment.Center,
         ) {
-            Text("Initializing Meshline cryptographic identity…", color = MeshlineColors.TextSecondary)
+            Text("Initializing Meshline cryptographic identity…", color = colors.textSecondary)
         }
         return
     }
@@ -552,8 +578,14 @@ private fun App(
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 bottomBar = {
                     NavigationBar(
-                        containerColor = Color(0xFF101410),
-                        contentColor = MeshlineColors.TextPrimary,
+                        containerColor = colors.surface,
+                        contentColor = colors.textPrimary,
+                        tonalElevation = 0.dp,
+                        modifier = Modifier.border(
+                            width = 0.5.dp,
+                            color = colors.border,
+                            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                        ),
                     ) {
                         val totalGroupBadge = groups.sumOf { it.unreadCount } + pendingGroupInvites.size
                         NavigationBarItem(
@@ -568,16 +600,16 @@ private fun App(
                                                 .align(Alignment.TopEnd)
                                                 .size(10.dp)
                                                 .clip(CircleShape)
-                                                .background(MeshlineColors.Accent)
+                                                .background(colors.primary)
                                         )
                                     }
                                 }
                             },
                             label = { Text("Chats", fontSize = 11.sp) },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = MeshlineColors.Accent,
-                                selectedTextColor = MeshlineColors.Accent,
-                                indicatorColor = Color(0xFF1E2A20),
+                                selectedIconColor = colors.primary,
+                                selectedTextColor = colors.primary,
+                                indicatorColor = colors.primary.copy(alpha = 0.15f),
                             ),
                         )
                         NavigationBarItem(
@@ -592,16 +624,16 @@ private fun App(
                                                 .align(Alignment.TopEnd)
                                                 .size(10.dp)
                                                 .clip(CircleShape)
-                                                .background(MeshlineColors.Accent)
+                                                .background(colors.primary)
                                         )
                                     }
                                 }
                             },
                             label = { Text("Nearby (${peers.size})", fontSize = 11.sp) },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = MeshlineColors.Accent,
-                                selectedTextColor = MeshlineColors.Accent,
-                                indicatorColor = Color(0xFF1E2A20),
+                                selectedIconColor = colors.primary,
+                                selectedTextColor = colors.primary,
+                                indicatorColor = colors.primary.copy(alpha = 0.15f),
                             ),
                         )
                         NavigationBarItem(
@@ -610,23 +642,23 @@ private fun App(
                             icon = {
                                 val chBadge = channels.sumOf { it.unreadCount }
                                 Box {
-                                    Text("#", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                    Text("#", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = if (currentTab == MainTab.CHANNELS) colors.primary else colors.textSecondary)
                                     if (chBadge > 0) {
                                         Box(
                                             modifier = Modifier
                                                 .align(Alignment.TopEnd)
                                                 .size(10.dp)
                                                 .clip(CircleShape)
-                                                .background(MeshlineColors.Accent)
+                                                .background(colors.primary)
                                         )
                                     }
                                 }
                             },
                             label = { Text("Channels", fontSize = 11.sp) },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = MeshlineColors.Accent,
-                                selectedTextColor = MeshlineColors.Accent,
-                                indicatorColor = Color(0xFF1E2A20),
+                                selectedIconColor = colors.primary,
+                                selectedTextColor = colors.primary,
+                                indicatorColor = colors.primary.copy(alpha = 0.15f),
                             ),
                         )
                         NavigationBarItem(
@@ -635,9 +667,9 @@ private fun App(
                             icon = { Text("⚙", fontSize = 18.sp) },
                             label = { Text("Settings", fontSize = 11.sp) },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = MeshlineColors.Accent,
-                                selectedTextColor = MeshlineColors.Accent,
-                                indicatorColor = Color(0xFF1E2A20),
+                                selectedIconColor = colors.primary,
+                                selectedTextColor = colors.primary,
+                                indicatorColor = colors.primary.copy(alpha = 0.15f),
                             ),
                         )
                     }
@@ -703,6 +735,8 @@ private fun App(
                                 contactsCount = contacts.size,
                                 retention = retention,
                                 relayStatus = relayStatus,
+                                themeMode = themeMode,
+                                onSetThemeMode = onSetThemeMode,
                                 onSaveProfile = { newNick, newAvatar ->
                                     profileStore.save(Profile(newNick, newAvatar))
                                     profile = profileStore.load()
@@ -729,25 +763,4 @@ private fun App(
             }
         }
     }
-}
-
-/** Deep charcoal with mint neon accent palette. */
-object MeshlineColors {
-    val Background = Color(0xFF0C100D)
-    val Surface = Color(0xFF131A14)
-    val Accent = Color(0xFF10B981) // Modern polished emerald mint
-    val TextPrimary = Color(0xFFECFDF5)
-    val TextSecondary = Color(0xFF94A3B8)
-}
-
-@Composable
-fun MeshlineTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = MaterialTheme.colorScheme.copy(
-            primary = MeshlineColors.Accent,
-            background = MeshlineColors.Background,
-            surface = MeshlineColors.Surface,
-        ),
-        content = content,
-    )
 }
