@@ -157,7 +157,7 @@ fun ProfileAndSettingsScreen(
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(colors.surfaceElevated)
+                                .background(colors.primarySoft)
                                 .border(1.dp, colors.primary, RoundedCornerShape(10.dp))
                                 .clickable(onClick = onMyQr)
                                 .padding(vertical = 10.dp),
@@ -170,7 +170,7 @@ fun ProfileAndSettingsScreen(
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(colors.surfaceElevated)
+                                .background(colors.primarySoft)
                                 .border(1.dp, colors.primary, RoundedCornerShape(10.dp))
                                 .clickable(onClick = onScanQr)
                                 .padding(vertical = 10.dp),
@@ -188,7 +188,7 @@ fun ProfileAndSettingsScreen(
             SettingsSectionCard(title = "APPEARANCE") {
                 Column {
                     Text("Theme Mode", color = colors.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("Select display appearance", color = colors.textSecondary, fontSize = 12.sp)
+                    Text("Select display appearance (System, Light, Dark)", color = colors.textSecondary, fontSize = 12.sp)
                     Spacer(Modifier.height(10.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -196,11 +196,16 @@ fun ProfileAndSettingsScreen(
                     ) {
                         AppThemeMode.values().forEach { mode ->
                             val isSelected = themeMode == mode
+                            val label = when (mode) {
+                                AppThemeMode.SYSTEM -> "System"
+                                AppThemeMode.LIGHT -> "Light"
+                                AppThemeMode.DARK -> "Dark"
+                            }
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
                                     .clip(RoundedCornerShape(9999.dp))
-                                    .background(if (isSelected) colors.primary.copy(alpha = 0.15f) else colors.surfaceElevated)
+                                    .background(if (isSelected) colors.primarySoft else colors.surfaceElevated)
                                     .border(
                                         width = 1.dp,
                                         color = if (isSelected) colors.primary else colors.border,
@@ -211,7 +216,7 @@ fun ProfileAndSettingsScreen(
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Text(
-                                    text = mode.name.lowercase().replaceFirstChar { it.uppercase() },
+                                    text = label,
                                     color = if (isSelected) colors.primary else colors.textSecondary,
                                     fontSize = 12.sp,
                                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
@@ -327,7 +332,7 @@ fun ProfileAndSettingsScreen(
                                 modifier = Modifier
                                     .weight(1f)
                                     .clip(RoundedCornerShape(9999.dp))
-                                    .background(if (isSelected) colors.primary.copy(alpha = 0.15f) else colors.surfaceElevated)
+                                    .background(if (isSelected) colors.primarySoft else colors.surfaceElevated)
                                     .border(
                                         width = 1.dp,
                                         color = if (isSelected) colors.primary else colors.border,

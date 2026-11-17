@@ -132,7 +132,7 @@ fun ChannelsScreen(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(9999.dp))
-                            .background(if (isSelected) colors.primary.copy(alpha = 0.15f) else colors.surface)
+                            .background(if (isSelected) colors.primarySoft else colors.surfaceContainerLow)
                             .border(
                                 width = 1.dp,
                                 color = if (isSelected) colors.primary else colors.border,

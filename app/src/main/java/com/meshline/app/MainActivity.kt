@@ -609,7 +609,9 @@ private fun App(
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = colors.primary,
                                 selectedTextColor = colors.primary,
-                                indicatorColor = colors.primary.copy(alpha = 0.15f),
+                                unselectedIconColor = colors.textSecondary,
+                                unselectedTextColor = colors.textSecondary,
+                                indicatorColor = colors.primarySoft,
                             ),
                         )
                         NavigationBarItem(
@@ -624,7 +626,7 @@ private fun App(
                                                 .align(Alignment.TopEnd)
                                                 .size(10.dp)
                                                 .clip(CircleShape)
-                                                .background(colors.primary)
+                                                .background(colors.statusConnected)
                                         )
                                     }
                                 }
@@ -633,7 +635,9 @@ private fun App(
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = colors.primary,
                                 selectedTextColor = colors.primary,
-                                indicatorColor = colors.primary.copy(alpha = 0.15f),
+                                unselectedIconColor = colors.textSecondary,
+                                unselectedTextColor = colors.textSecondary,
+                                indicatorColor = colors.primarySoft,
                             ),
                         )
                         NavigationBarItem(
@@ -658,7 +662,9 @@ private fun App(
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = colors.primary,
                                 selectedTextColor = colors.primary,
-                                indicatorColor = colors.primary.copy(alpha = 0.15f),
+                                unselectedIconColor = colors.textSecondary,
+                                unselectedTextColor = colors.textSecondary,
+                                indicatorColor = colors.primarySoft,
                             ),
                         )
                         NavigationBarItem(
@@ -669,7 +675,9 @@ private fun App(
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = colors.primary,
                                 selectedTextColor = colors.primary,
-                                indicatorColor = colors.primary.copy(alpha = 0.15f),
+                                unselectedIconColor = colors.textSecondary,
+                                unselectedTextColor = colors.textSecondary,
+                                indicatorColor = colors.primarySoft,
                             ),
                         )
                     }

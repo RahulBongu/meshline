@@ -1,114 +1,123 @@
-# Meshline Mobile Messenger — UI Design System
+# Meshline Mobile Messenger — Complete UI Design System
+## Premium Light & Dark Design via Google Stitch MCP
 
-**Design Source of Truth:** Google Stitch MCP Project `projects/2058343025590670872`  
-**Design System Asset:** `assets/ec6d8c0eaa624c8db4eb0bf5a2fac2bd`  
-**Target Platform:** Native Android (Jetpack Compose / Material 3)
+**Design Source of Truth:** Google Stitch MCP Project `Meshline — Premium Messaging UI` (`projects/13815013391327039542`)  
+**Design Systems:** Light Mode (`assets/bb624ca0c7ac4c8087e8377baf4677a5`) & Dark Mode (`assets/090df621b80b4de18b978a5859105347`)  
+**Target Platform:** Native Android (Jetpack Compose / Material 3)  
+**Supported Appearance Modes:** `System default`, `Light`, and `Dark` (fully persistent via `ThemeStore`)
 
 ---
 
 ## 1. Brand Narrative & Visual Identity
 
-Meshline fuses the effortless, high-density conversation navigation of **WhatsApp** with the confident visual polish, refined typography, and tactile delight of **Instagram**.
+Meshline transforms decentralized, offline-first peer-to-peer messaging into a premium, approachable consumer experience that balances the immediate conversational utility of **WhatsApp** with the visual restraint, editorial composure, and refined micro-typography of **Instagram**.
 
-- **Atmosphere:** Deep obsidian-charcoal surfaces (`#121417` / `#111316`) designed specifically for OLED contrast, minimal eye strain, and infinite spatial depth.
-- **Accent Rhythm:** A vibrant **Mint Emerald** (`#00E599`) focal point reserved exclusively for active intent: outgoing message bubbles, unread counters, primary CTA buttons, and verified encryption status.
-- **Surfaces & Tactility:** Layers constructed through chromatic separation and 1px hairline borders (`#252930`) rather than high-spread artificial drop shadows.
+### Core Design Philosophy: Consumer First, No Hacker Aesthetic
+- **Elimination of Neon Green Hacker Aesthetic:** The excessive neon-green-on-black terminal look has been completely replaced with a sophisticated neutral foundation and restrained indigo/periwinkle brand accents.
+- **Strict Semantic Status Color Role:** Green is strictly a semantic status color (`#10B981` in light, `#34D399` in dark) reserved for online presence, live audio indicators, and successful cryptographic handshake delivery. It is **never** used as an abrasive background or primary brand accent.
+- **Three Persistent Appearance Modes:** Users can seamlessly choose between **System default**, **Light**, and **Dark** in Settings. Preferences are persisted across app restarts via `SharedPreferences`.
 
 ---
 
 ## 2. Color System & Design Tokens
 
-### 2.1 Dark Palette (Default OLED)
+### 2.1 Refined Light Palette (Daylight & Clarity)
 
-| Token Name | Hex Code | Purpose |
-| :--- | :--- | :--- |
-| `Canvas / Background` | `#121417` | Screen background base layer |
-| `Surface Container Low` | `#16191D` | Search bar fill, list item backings |
-| `Surface Card / Incoming Bubble` | `#1A1D21` | Message cards, incoming message bubbles |
-| `Surface Elevated / Header / Sheets` | `#22272E` | Top app bars, bottom composer docks, modal sheets |
-| `Border / Hairline Outline` | `#252930` | 1px perimeter outlines, dividers, chip borders |
-| `Primary Accent (Mint Emerald)` | `#00E599` | Primary FAB, outgoing bubbles, unread pills, active tabs |
-| `Primary On-Accent (Obsidian)` | `#0B0D0F` | Text and icons rendered inside `#00E599` surfaces |
-| `Secondary Accent (Deep Mint)` | `#10B981` | Verified peer shields, secondary encryption badges |
-| `Text Primary` | `#F3F4F6` | Message titles, incoming chat text, primary headings |
-| `Text Secondary` | `#9CA3AF` | Subtitles, timestamps, peer IDs, delivery status labels |
-| `Text Muted` | `#6B7280` | Placeholders, inactive tab labels, empty state captions |
-| `Danger / Panic` | `#EF4444` | Emergency panic wipe button, blocked peer indicators |
+| Token Name | Compose Token | Hex Code | Purpose |
+| :--- | :--- | :--- | :--- |
+| `Canvas / Background` | `colors.background` | `#F6F7FB` | Crisp, luminous cool light gray ground canvas |
+| `Primary Surface` | `colors.surface` | `#FFFFFF` | Pure white top app bars, incoming chat cards, dialogs |
+| `Surface Elevated` | `colors.surfaceElevated` | `#FFFFFF` | Layered cards and action sheets |
+| `Surface Container Low` | `colors.surfaceContainerLow` | `#F0F2F8` | Recessed search fields, message input dock, inactive pills |
+| `Border / Divider` | `colors.border` | `#E3E7EF` | Delicate 1px structural outlines, dividers, chat delimiters |
+| `Brand Primary Accent` | `colors.primary` | `#5368C8` | Refined Royal Indigo for buttons, active pills, outgoing bubbles |
+| `On-Primary Text` | `colors.onPrimary` | `#FFFFFF` | Pure white text/icons on primary accent surfaces |
+| `Soft Accent Container`| `colors.primarySoft` | `#E9EDFF` | Contextual chip backgrounds, active filter pills, unread tags |
+| `Secondary Text` | `colors.secondary` | `#687386` | Muted slate for subtitles, metadata, secondary captions |
+| `Primary Text` | `colors.textPrimary` | `#1B2028` | Deep charcoal for optimal reading comfort and contrast |
+| `Secondary Text` | `colors.textSecondary` | `#687386` | Timestamps, read receipts, peer IDs, delivery status labels |
+| `Muted Text` | `colors.textMuted` | `#9AA4B2` | Placeholders, inactive tab labels, empty states |
+| `Status Connected` | `colors.statusConnected` | `#10B981` | Natural emerald green strictly for online presence |
+| `Status Warning` | `colors.statusWarning` | `#F59E0B` | Semantic amber for pending handshakes / warnings |
+| `Danger / Panic` | `colors.danger` | `#EF4444` | Semantic red for emergency panic wipe and key rejections |
+| `Outgoing Bubble` | `colors.bubbleOutgoing` | `#5368C8` | Royal Indigo outgoing message container |
+| `Outgoing Bubble Text`| `colors.bubbleOutgoingText` | `#FFFFFF` | High-contrast white text on outgoing bubble |
+| `Incoming Bubble` | `colors.bubbleIncoming` | `#FFFFFF` | Crisp white incoming message container |
+| `Incoming Bubble Text`| `colors.bubbleIncomingText` | `#1B2028` | Deep charcoal text on incoming bubble |
 
-### 2.2 Light Palette (Complementary High-Contrast Mode)
+### 2.2 Refined Dark Palette (Nighttime & OLED Composure)
 
-| Token Name | Hex Code | Purpose |
-| :--- | :--- | :--- |
-| `Canvas / Background` | `#F8FAFC` | Light mode background |
-| `Surface Card / Incoming Bubble` | `#FFFFFF` | Incoming chat bubbles, list cards |
-| `Surface Elevated / Header` | `#FFFFFF` | App bar, bottom navigation with subtle divider |
-| `Border / Outline` | `#E2E8F0` | Dividers and card borders |
-| `Primary Accent (Mint Emerald)` | `#059669` | High-contrast mint emerald for daylight readability |
-| `Primary On-Accent` | `#FFFFFF` | Text on primary accent buttons |
-| `Text Primary` | `#0F172A` | Primary text and headings |
-| `Text Secondary` | `#475569` | Subtitles, timestamps |
-| `Text Muted` | `#94A3B8` | Placeholders and inactive states |
+| Token Name | Compose Token | Hex Code | Purpose |
+| :--- | :--- | :--- | :--- |
+| `Canvas / Background` | `colors.background` | `#11141A` | Deep cool night charcoal canvas (no harsh ink-black) |
+| `Primary Surface` | `colors.surface` | `#1A1F28` | Incoming message cards, list containers, nav bar backing |
+| `Surface Elevated` | `colors.surfaceElevated` | `#222834` | Dynamic popovers, bottom action sheets, modal overlays |
+| `Surface Container Low` | `colors.surfaceContainerLow` | `#181C24` | Sunken search fields, composer input docks |
+| `Border / Divider` | `colors.border` | `#303746` | Low-contrast 1px boundary lines preventing optical bleeding |
+| `Brand Primary Accent` | `colors.primary` | `#A4B2FF` | Refined Soft Periwinkle-Indigo for active tabs, CTAs, tags |
+| `On-Primary Text` | `colors.onPrimary` | `#11141A` | Deep night charcoal text on periwinkle primary buttons |
+| `Soft Accent Container`| `colors.primarySoft` | `#282F49` | Subdued indigo tint container for outgoing bubbles, active pills |
+| `Secondary Text` | `colors.secondary` | `#A0A8B7` | Soft cool gray for subtitles, secondary metadata |
+| `Primary Text` | `colors.textPrimary` | `#F1F3F8` | Crisp light text delivering comfortable reading contrast |
+| `Secondary Text` | `colors.textSecondary` | `#A0A8B7` | Timestamps, read receipts, peer IDs, delivery status labels |
+| `Muted Text` | `colors.textMuted` | `#6E788B` | Placeholders, inactive tab labels, empty states |
+| `Status Connected` | `colors.statusConnected` | `#34D399` | Semantic emerald green dot strictly for online peer presence |
+| `Status Warning` | `colors.statusWarning` | `#FBBF24` | Semantic amber for pending handshakes / warnings |
+| `Danger / Panic` | `colors.danger` | `#F87171` | Semantic red for emergency panic wipe and key rejections |
+| `Outgoing Bubble` | `colors.bubbleOutgoing` | `#282F49` | Deep indigo tint container for outgoing messages |
+| `Outgoing Bubble Text`| `colors.bubbleOutgoingText` | `#F1F3F8` | Crisp light text on outgoing bubble |
+| `Incoming Bubble` | `colors.bubbleIncoming` | `#1A1F28` | Slate container with 1px `#303746` border for incoming |
+| `Incoming Bubble Text`| `colors.bubbleIncomingText` | `#F1F3F8` | Crisp light text on incoming bubble |
 
 ---
 
 ## 3. Typography Hierarchy
 
-| Level | Font Family | Size | Weight | Line Height | Usage |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `Display Large` | Plus Jakarta Sans | 32sp | Bold (700) | 38sp | Hero counters, onboarding headers |
-| `Headline Large` | Plus Jakarta Sans | 24sp | Semi-Bold (600) | 30sp | Screen titles ('Meshline', 'Nearby') |
-| `Headline Medium`| Plus Jakarta Sans | 20sp | Semi-Bold (600) | 26sp | Dialog headers, section titles |
-| `Title Small` | Plus Jakarta Sans | 16sp | Semi-Bold (600) | 22sp | Conversation partner names, group names |
-| `Body Large` | Geist / Inter | 16sp | Regular (400) | 24sp | Message bubble body text |
-| `Body Medium` | Geist / Inter | 14sp | Regular (400) | 20sp | Conversation list previews, descriptions |
-| `Body Small` | Geist / Inter | 13sp | Regular (400) | 18sp | Diagnostic logs, peer hop telemetry |
-| `Label Medium` | Geist / Inter | 12sp | Medium (500) | 16sp | Timestamps, channel pill chips |
-| `Label Extra Small` | Geist / Inter | 10sp | Semi-Bold (600) | 14sp | Unread badge counters, status indicators |
+The typographic scale uses **Inter** / **Plus Jakarta Sans** with clean geometric precision and humanistic proportions:
+
+| Level | Size | Weight | Line Height | Usage |
+| :--- | :--- | :--- | :--- | :--- |
+| `Display Large` | 32sp | Bold (700) | 40sp | Hero stats, large identity headers |
+| `Headline Large` | 26sp | Semi-Bold (600) | 34sp | Top screen headers ('Meshline', 'Nearby') |
+| `Headline Medium`| 20sp | Semi-Bold (600) | 28sp | Dialog titles, section headers |
+| `Title Medium` | 16sp | Semi-Bold (600) | 22sp | Conversation partner names, group names |
+| `Body Large` | 16sp | Regular (400) | 24sp | Primary message bubble text |
+| `Body Medium` | 14sp | Regular (400) | 20sp | Conversation list previews, settings copy |
+| `Body Small` | 13sp | Regular (400) | 18sp | Diagnostic telemetry, peer hop routing |
+| `Label Medium` | 12sp | Medium (500) | 16sp | Timestamps, channel pill chips |
+| `Label Small` | 11sp | Semi-Bold (600) | 14sp | Unread badge counts, mesh status indicators |
 
 ---
 
-## 4. Spacing, Shapes, and Radii
+## 4. Layout, Elevation, and Geometry
 
-- **Grid Baseline:** 4dp baseline rhythm.
-- **Spacing Scale:**
-  - `space-xs`: `4dp` (message clumping from same sender)
-  - `space-sm`: `8dp` (badge padding, avatar to text gap)
-  - `space-md`: `12dp` (message transition between different senders)
-  - `space-lg`: `16dp` (screen horizontal margins, card padding)
-  - `space-xl`: `24dp` (section vertical separation)
+- **Grid Baseline:** 4dp / 8dp fluid mobile layout with 16dp horizontal screen padding.
+- **Depth without Heavy Shadows:** Tonal stepping (`background` -> `surface` -> `surfaceElevated`) coupled with 1px hairline structural borders (`colors.border`).
 - **Corner Radii:**
-  - `Full Pill (9999dp)`: Search bar, filter chips, CTA buttons, unread badges.
-  - `Bubble Outgoing`: `18dp` with bottom-right anchor corner tapered to `4dp`.
-  - `Bubble Incoming`: `18dp` with bottom-left anchor corner tapered to `4dp`.
-  - `Cards`: `16dp` rounded corners with 1dp border `#252930`.
+  - `Pill (9999dp)`: Search input, filter chips, CTA buttons, unread counters, status pills.
+  - `Message Outgoing`: `18dp` with bottom-right anchor corner tapered to `4dp`.
+  - `Message Incoming`: `18dp` with bottom-left anchor corner tapered to `4dp`.
+  - `Cards & Dialogs`: `14dp` to `18dp` with subtle 1px border.
+  - `Avatars`: Full 50% circular masks with 10–12dp semantic presence dot indicator masked by 2dp surface border.
 
 ---
 
-## 5. Component Specifications
+## 5. Screen Component Breakdown
 
-### 5.1 Conversation Inbox Item
-- Left: 48dp circular avatar with fallback fruit/identicon and optional 10dp emerald online/mesh dot.
-- Center Column:
-  - Top Row: Contact Name (Semi-Bold 16sp) + Verified Shield badge if QR-verified.
-  - Bottom Row: Delivery status icon (Double checkmark in mint if delivered/read, single if sent) + Message preview (truncated to 1 line).
-- Right Column: Timestamp (Label 12sp) + Unread Pill (vibrant `#00E599` badge with `#0B0D0F` text).
-
-### 5.2 Message Bubbles & Delivery States
-- **Incoming**: Solid `#1A1D21` fill with 1dp border in `#252930`. White primary text. Timestamp and sender nickname inside bubble.
-- **Outgoing**: Vibrant `#00E599` fill. Dark obsidian `#0B0D0F` typography.
-- **Delivery Icons**:
-  - `QUEUED`: Hollow clock / circle icon.
-  - `SENT`: Single checkmark.
-  - `DELIVERED`: Double checkmarks in muted obsidian.
-  - `READ`: Double checkmarks in dark accent.
-  - `NOT_DELIVERED`: Small red alert indicator with tap-to-retry.
-
-### 5.3 Bottom Navigation & Action Dock
-- Fixed 4-tab bottom navigation with glassmorphism surface `#1A1D21` and top hairline border `#252930`.
-- Tabs: `Chats`, `Nearby`, `Channels`, `Settings`.
-- Active tab uses `#00E599` icon tint and text label. Inactive tabs use `#9CA3AF`.
-
-### 5.4 Nearby Mesh Radar
-- Tactile hero card displaying real-time peer count, BLE transmission mode, and hop limit.
-- Radar pulse circle with reachable peer dots showing signal RSSI.
-- Live public broadcast stream below the hero card.
+1. **Top Bar & Mesh Status Indicator:**
+   - Bold title 'Meshline' paired with a compact pill chip: `Mesh Active • X Online` with a green semantic status dot (`#10B981` / `#34D399`) and soft indigo background (`colors.primarySoft`).
+2. **Search & Filter Row:**
+   - Pill-shaped search bar with muted slate icon and placeholder.
+   - Filter chips: `All`, `Unread`, `Direct`, `Groups`, `Nearby Mesh` with `colors.primarySoft` background and `colors.primary` border when active.
+3. **Conversation List Items:**
+   - 50dp circular avatar with fallback fruit/identicon and online presence pip.
+   - Name in `titleMedium` (`colors.textPrimary`), QR verification checkmark (`colors.statusConnected`).
+   - Single-line truncated preview (`colors.textSecondary`).
+   - Trailing unread badge in `colors.primary` with `colors.onPrimary` text.
+4. **Docked Bottom Navigation Bar:**
+   - Docked on `colors.surface` with hairline top border (`colors.border`).
+   - Selected items highlight with `colors.primary` text/icon and `colors.primarySoft` indicator.
+   - Semantic green badge for active nearby peers.
+5. **Appearance Selector (Settings):**
+   - 3-segment pill selector: `System`, `Light`, `Dark`.
+   - Selected segment highlights with `colors.primarySoft` fill and `colors.primary` border.

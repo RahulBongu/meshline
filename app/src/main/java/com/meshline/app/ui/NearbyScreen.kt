@@ -100,23 +100,29 @@ fun NearbyScreen(
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Bold,
                     )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(top = 2.dp),
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 3.dp)
+                            .clip(RoundedCornerShape(9999.dp))
+                            .background(colors.primarySoft)
+                            .border(0.5.dp, colors.border, RoundedCornerShape(9999.dp))
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(if (startError == null) colors.primary else colors.danger)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = if (startError == null) "BLE Active • Dual GATT" else "BLE Error",
-                            color = if (startError == null) colors.primary else colors.danger,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(if (startError == null) colors.statusConnected else colors.danger)
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                text = if (startError == null) "BLE Active • Dual GATT" else "BLE Error",
+                                color = if (startError == null) colors.primary else colors.danger,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
                     }
                 }
 
@@ -173,7 +179,7 @@ fun NearbyScreen(
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(9999.dp))
-                                .background(colors.primary.copy(alpha = 0.15f))
+                                .background(colors.primarySoft)
                                 .padding(horizontal = 10.dp, vertical = 4.dp),
                         ) {
                             Text(

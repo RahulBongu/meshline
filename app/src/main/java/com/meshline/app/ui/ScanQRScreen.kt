@@ -6,16 +6,22 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
@@ -27,6 +33,7 @@ import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
+import com.meshline.app.ui.theme.MeshlineDesign
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -82,6 +89,7 @@ internal fun rotateLuminance(data: ByteArray, w: Int, h: Int, degrees: Int): Tri
 
 @Composable
 fun ScanQRScreen(onScanned: (String) -> Unit, error: String? = null, onBack: () -> Unit = {}) {
+    val colors = com.meshline.app.ui.theme.MeshlineDesign.colors
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
@@ -91,58 +99,66 @@ fun ScanQRScreen(onScanned: (String) -> Unit, error: String? = null, onBack: () 
         onDispose { analyzerExecutor.shutdown() }
     }
 
-    Column(modifier = Modifier.padding(16.dp)) {
-        androidx.compose.material3.TextButton(onClick = onBack) {
-            androidx.compose.material3.Text("← Back")
-        }
-        Text("Scan a Meshline QR code", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            "Hold steady and fill the frame. Only QR codes are decoded.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        if (error != null) {
-            Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-        }
-        AndroidView(
-            modifier = Modifier
-                .padding(top = 16.dp)
-                .fillMaxWidth()
-                .height(360.dp),
-            factory = { ctx ->
-                val previewView = PreviewView(ctx).apply {
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
-                }
-                val cameraProvider = cameraProviderFuture.get()
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
-                }
-                val analysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build().apply {
-                        setAnalyzer(analyzerExecutor) { image ->
-                            if (handled.get()) {
-                                image.close()
-                                return@setAnalyzer
-                            }
-                            val result = decodeFrame(image, image.imageInfo.rotationDegrees)
-                            if (result != null && handled.compareAndSet(false, true)) {
-                                previewView.post { onScanned(result) }
+    Surface(
+        color = colors.background,
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            TextButton(onClick = onBack) {
+                Text("← Back", color = colors.primary)
+            }
+            Text("Scan a Meshline QR code", color = colors.textPrimary, style = MaterialTheme.typography.headlineSmall)
+            Text(
+                "Hold steady and fill the frame. Only QR codes are decoded.",
+                color = colors.textSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (error != null) {
+                Text(error, color = colors.danger, style = MaterialTheme.typography.bodySmall)
+            }
+            AndroidView(
+                modifier = Modifier
+                    .padding(top = 16.dp)
+                    .fillMaxWidth()
+                    .height(360.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .border(1.dp, colors.border, RoundedCornerShape(16.dp)),
+                factory = { ctx ->
+                    val previewView = PreviewView(ctx).apply {
+                        scaleType = PreviewView.ScaleType.FILL_CENTER
+                    }
+                    val cameraProvider = cameraProviderFuture.get()
+                    val preview = Preview.Builder().build().also {
+                        it.setSurfaceProvider(previewView.surfaceProvider)
+                    }
+                    val analysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build().apply {
+                            setAnalyzer(analyzerExecutor) { image ->
+                                if (handled.get()) {
+                                    image.close()
+                                    return@setAnalyzer
+                                }
+                                val result = decodeFrame(image, image.imageInfo.rotationDegrees)
+                                if (result != null && handled.compareAndSet(false, true)) {
+                                    previewView.post { onScanned(result) }
+                                }
                             }
                         }
+                    try {
+                        cameraProvider.unbindAll()
+                        cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            CameraSelector.DEFAULT_BACK_CAMERA,
+                            preview,
+                            analysis,
+                        )
+                    } catch (_: Exception) {
+                        // Camera unavailable or permission revoked; the caller shows the error.
                     }
-                try {
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        analysis,
-                    )
-                } catch (_: Exception) {
-                    // Camera unavailable or permission revoked; the caller shows the error.
-                }
-                previewView
-            },
-        )
+                    previewView
+                },
+            )
+        }
     }
 }

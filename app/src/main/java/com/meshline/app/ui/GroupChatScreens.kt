@@ -127,7 +127,7 @@ fun CreateGroupDialog(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(if (selectedAvatar == idx) colors.primary.copy(alpha = 0.2f) else colors.surface)
+                                .background(if (selectedAvatar == idx) colors.primarySoft else colors.surface)
                                 .border(
                                     width = if (selectedAvatar == idx) 1.5.dp else 0.dp,
                                     color = if (selectedAvatar == idx) colors.primary else Color.Transparent,
@@ -150,7 +150,7 @@ fun CreateGroupDialog(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(if (selectedAvatar == idx) colors.primary.copy(alpha = 0.2f) else colors.surface)
+                                .background(if (selectedAvatar == idx) colors.primarySoft else colors.surface)
                                 .border(
                                     width = if (selectedAvatar == idx) 1.5.dp else 0.dp,
                                     color = if (selectedAvatar == idx) colors.primary else Color.Transparent,

@@ -172,7 +172,7 @@ fun ScanConfirmScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("✓", color = colors.primary, fontSize = 48.sp, fontWeight = FontWeight.Bold)
+                    Text("✓", color = colors.statusConnected, fontSize = 48.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(12.dp))
                     Text(
                         "Verified Contact Found",
@@ -323,7 +323,7 @@ fun ContactsScreen(
                                         )
                                         if (c.verified) {
                                             Spacer(Modifier.width(6.dp))
-                                            Text("✓", color = colors.secondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                            Text("✓", color = colors.statusConnected, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                         }
                                         if (c.blocked) {
                                             Spacer(Modifier.width(6.dp))

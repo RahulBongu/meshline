@@ -127,4 +127,23 @@ class ChatFilterTest {
         assertEquals("7 days", retentionLabel(MessageRetention.SEVEN_DAYS))
         assertEquals("30 days", retentionLabel(MessageRetention.THIRTY_DAYS))
     }
+
+    @Test
+    fun testLightAndDarkDesignTokens() {
+        // Verify Dark Theme tokens match Stitch MCP design specifications
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF11141A), com.meshline.app.ui.theme.DarkMeshlineColors.background)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF1A1F28), com.meshline.app.ui.theme.DarkMeshlineColors.surface)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFA4B2FF), com.meshline.app.ui.theme.DarkMeshlineColors.primary)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF282F49), com.meshline.app.ui.theme.DarkMeshlineColors.primarySoft)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF34D399), com.meshline.app.ui.theme.DarkMeshlineColors.statusConnected)
+        org.junit.Assert.assertTrue(com.meshline.app.ui.theme.DarkMeshlineColors.isDark)
+
+        // Verify Light Theme tokens match Stitch MCP design specifications
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFF6F7FB), com.meshline.app.ui.theme.LightMeshlineColors.background)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFFFFFFF), com.meshline.app.ui.theme.LightMeshlineColors.surface)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF5368C8), com.meshline.app.ui.theme.LightMeshlineColors.primary)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFE9EDFF), com.meshline.app.ui.theme.LightMeshlineColors.primarySoft)
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF10B981), com.meshline.app.ui.theme.LightMeshlineColors.statusConnected)
+        org.junit.Assert.assertFalse(com.meshline.app.ui.theme.LightMeshlineColors.isDark)
+    }
 }

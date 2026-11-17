@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.Color
 
 /**
  * App theme mode preference.
+ * Supports three persistent appearance options: System default, Dark, and Light.
  */
 enum class AppThemeMode {
     SYSTEM,
@@ -21,14 +22,14 @@ enum class AppThemeMode {
 }
 
 /**
- * Persistent theme storage.
+ * Persistent theme storage using SharedPreferences.
  */
 class ThemeStore(context: Context) {
     private val prefs = context.getSharedPreferences("meshline_theme_prefs", Context.MODE_PRIVATE)
 
     fun load(): AppThemeMode {
-        val name = prefs.getString("theme_mode", AppThemeMode.DARK.name) ?: AppThemeMode.DARK.name
-        return runCatching { AppThemeMode.valueOf(name) }.getOrDefault(AppThemeMode.DARK)
+        val name = prefs.getString("theme_mode", AppThemeMode.SYSTEM.name) ?: AppThemeMode.SYSTEM.name
+        return runCatching { AppThemeMode.valueOf(name) }.getOrDefault(AppThemeMode.SYSTEM)
     }
 
     fun save(mode: AppThemeMode) {
@@ -37,7 +38,9 @@ class ThemeStore(context: Context) {
 }
 
 /**
- * Meshline semantic color design tokens extracted from Google Stitch.
+ * Meshline semantic color design tokens extracted from Google Stitch MCP.
+ * Engineered for consumer messaging with premium indigo/periwinkle brand accents
+ * and dedicated semantic status colors (no cyberpunk/hacker neon green).
  */
 @Immutable
 data class MeshlineColors(
@@ -48,10 +51,13 @@ data class MeshlineColors(
     val border: Color,
     val primary: Color,
     val onPrimary: Color,
+    val primarySoft: Color,
     val secondary: Color,
     val textPrimary: Color,
     val textSecondary: Color,
     val textMuted: Color,
+    val statusConnected: Color,
+    val statusWarning: Color,
     val danger: Color,
     val bubbleOutgoing: Color,
     val bubbleOutgoingText: Color,
@@ -60,43 +66,59 @@ data class MeshlineColors(
     val isDark: Boolean,
 )
 
+/**
+ * Refined Dark Theme Palette
+ * Target: Deep cool night charcoal, slate containers, soft periwinkle brand accent,
+ * and restrained emerald green strictly for online presence.
+ */
 val DarkMeshlineColors = MeshlineColors(
-    background = Color(0xFF111316),
-    surface = Color(0xFF1A1D21),
-    surfaceElevated = Color(0xFF22272E),
-    surfaceContainerLow = Color(0xFF16191D),
-    border = Color(0xFF252930),
-    primary = Color(0xFF00E599), // Mint Emerald
-    onPrimary = Color(0xFF0B0D0F), // Deep Obsidian
-    secondary = Color(0xFF10B981), // Deep Mint
-    textPrimary = Color(0xFFF3F4F6),
-    textSecondary = Color(0xFF9CA3AF),
-    textMuted = Color(0xFF6B7280),
-    danger = Color(0xFFEF4444),
-    bubbleOutgoing = Color(0xFF00E599),
-    bubbleOutgoingText = Color(0xFF0B0D0F),
-    bubbleIncoming = Color(0xFF1A1D21),
-    bubbleIncomingText = Color(0xFFF3F4F6),
+    background = Color(0xFF11141A),
+    surface = Color(0xFF1A1F28),
+    surfaceElevated = Color(0xFF222834),
+    surfaceContainerLow = Color(0xFF181C24),
+    border = Color(0xFF303746),
+    primary = Color(0xFFA4B2FF), // Refined Soft Indigo Periwinkle
+    onPrimary = Color(0xFF11141A),
+    primarySoft = Color(0xFF282F49), // Subdued indigo tint container
+    secondary = Color(0xFFA0A8B7),
+    textPrimary = Color(0xFFF1F3F8),
+    textSecondary = Color(0xFFA0A8B7),
+    textMuted = Color(0xFF6E788B),
+    statusConnected = Color(0xFF34D399), // Semantic emerald green for peer presence
+    statusWarning = Color(0xFFFBBF24), // Semantic amber
+    danger = Color(0xFFF87171), // Semantic red
+    bubbleOutgoing = Color(0xFF282F49),
+    bubbleOutgoingText = Color(0xFFF1F3F8),
+    bubbleIncoming = Color(0xFF1A1F28),
+    bubbleIncomingText = Color(0xFFF1F3F8),
     isDark = true,
 )
 
+/**
+ * Refined Light Theme Palette
+ * Target: Clean cool light gray, crisp white surfaces, royal indigo brand accent,
+ * soft indigo tints, and natural emerald green strictly for online presence.
+ */
 val LightMeshlineColors = MeshlineColors(
-    background = Color(0xFFF8FAFC),
+    background = Color(0xFFF6F7FB),
     surface = Color(0xFFFFFFFF),
     surfaceElevated = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFF1F5F9),
-    border = Color(0xFFE2E8F0),
-    primary = Color(0xFF059669), // Readable Emerald in daylight
+    surfaceContainerLow = Color(0xFFF0F2F8),
+    border = Color(0xFFE3E7EF),
+    primary = Color(0xFF5368C8), // Refined Royal Indigo
     onPrimary = Color(0xFFFFFFFF),
-    secondary = Color(0xFF10B981),
-    textPrimary = Color(0xFF0F172A),
-    textSecondary = Color(0xFF475569),
-    textMuted = Color(0xFF94A3B8),
-    danger = Color(0xFFDC2626),
-    bubbleOutgoing = Color(0xFFD1FAE5), // Mint tint for daylight
-    bubbleOutgoingText = Color(0xFF065F46),
+    primarySoft = Color(0xFFE9EDFF), // Pale indigo wash container
+    secondary = Color(0xFF687386),
+    textPrimary = Color(0xFF1B2028),
+    textSecondary = Color(0xFF687386),
+    textMuted = Color(0xFF9AA4B2),
+    statusConnected = Color(0xFF10B981), // Semantic emerald green for peer presence
+    statusWarning = Color(0xFFF59E0B), // Semantic amber
+    danger = Color(0xFFEF4444), // Semantic red
+    bubbleOutgoing = Color(0xFF5368C8),
+    bubbleOutgoingText = Color(0xFFFFFFFF),
     bubbleIncoming = Color(0xFFFFFFFF),
-    bubbleIncomingText = Color(0xFF0F172A),
+    bubbleIncomingText = Color(0xFF1B2028),
     isDark = false,
 )
 
@@ -110,7 +132,7 @@ object MeshlineDesign {
 
 @Composable
 fun MeshlineTheme(
-    mode: AppThemeMode = AppThemeMode.DARK,
+    mode: AppThemeMode = AppThemeMode.SYSTEM,
     content: @Composable () -> Unit,
 ) {
     val isDark = when (mode) {
@@ -125,17 +147,25 @@ fun MeshlineTheme(
         darkColorScheme(
             primary = meshlineColors.primary,
             onPrimary = meshlineColors.onPrimary,
+            primaryContainer = meshlineColors.primarySoft,
+            onPrimaryContainer = meshlineColors.primary,
             background = meshlineColors.background,
             surface = meshlineColors.surface,
             onSurface = meshlineColors.textPrimary,
+            outline = meshlineColors.border,
+            error = meshlineColors.danger,
         )
     } else {
         lightColorScheme(
             primary = meshlineColors.primary,
             onPrimary = meshlineColors.onPrimary,
+            primaryContainer = meshlineColors.primarySoft,
+            onPrimaryContainer = meshlineColors.primary,
             background = meshlineColors.background,
             surface = meshlineColors.surface,
             onSurface = meshlineColors.textPrimary,
+            outline = meshlineColors.border,
+            error = meshlineColors.danger,
         )
     }
 

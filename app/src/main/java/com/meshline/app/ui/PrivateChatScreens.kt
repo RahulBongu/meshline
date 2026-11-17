@@ -128,23 +128,29 @@ fun ChatsUnifiedScreen(
                             fontSize = 26.sp,
                             fontWeight = FontWeight.Bold,
                         )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(top = 2.dp),
+                        Box(
+                            modifier = Modifier
+                                .padding(top = 3.dp)
+                                .clip(RoundedCornerShape(9999.dp))
+                                .background(colors.primarySoft)
+                                .border(0.5.dp, colors.border, RoundedCornerShape(9999.dp))
+                                .padding(horizontal = 8.dp, vertical = 3.dp),
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(colors.primary)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                text = "Mesh Active • ${peers.count { it.online }} Online",
-                                color = colors.primary,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(colors.statusConnected)
+                                )
+                                Spacer(Modifier.width(5.dp))
+                                Text(
+                                    text = "Mesh Active • ${peers.count { it.online }} Online",
+                                    color = colors.primary,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
                         }
                     }
 
@@ -324,7 +330,7 @@ private fun FilterChipPill(
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(9999.dp))
-            .background(if (selected) colors.primary.copy(alpha = 0.15f) else colors.surface)
+            .background(if (selected) colors.primarySoft else colors.surfaceContainerLow)
             .border(
                 width = 1.dp,
                 color = if (selected) colors.primary else colors.border,
@@ -375,8 +381,8 @@ private fun DirectConversationItem(
                     modifier = Modifier
                         .size(12.dp)
                         .clip(CircleShape)
-                        .background(colors.primary)
-                        .border(2.dp, colors.background, CircleShape)
+                        .background(colors.statusConnected)
+                        .border(2.dp, colors.surface, CircleShape)
                         .align(Alignment.BottomEnd)
                 )
             }
@@ -399,7 +405,7 @@ private fun DirectConversationItem(
                     Spacer(Modifier.width(4.dp))
                     Text(
                         text = "✓",
-                        color = colors.secondary,
+                        color = colors.statusConnected,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
                     )
@@ -431,7 +437,7 @@ private fun DirectConversationItem(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(9999.dp))
-                        .background(colors.primary.copy(alpha = 0.15f))
+                        .background(colors.primarySoft)
                         .padding(horizontal = 8.dp, vertical = 2.dp),
                 ) {
                     Text(
@@ -823,7 +829,11 @@ fun PrivateChatScreen(
                                                 "NOT_DELIVERED" -> "⚠️"
                                                 else -> "✓"
                                             },
-                                            color = if (m.state == "READ" || m.state == "DELIVERED") colors.bubbleOutgoingText else colors.bubbleOutgoingText.copy(alpha = 0.7f),
+                                            color = if (m.state == "READ" || m.state == "DELIVERED") {
+                                                if (colors.isDark) colors.primary else Color.White
+                                            } else {
+                                                if (colors.isDark) colors.textMuted else Color.White.copy(alpha = 0.7f)
+                                            },
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold,
                                         )
