@@ -32,6 +32,9 @@ interface ContactDirectory {
     /** The user rejected a peer: it is blocked. */
     suspend fun block(peerIdHex: String)
 
+    /** Unblocks a peer. */
+    suspend fun unblock(peerIdHex: String)
+
     /** Panic wipe: every contact goes. */
     suspend fun deleteAll()
 }

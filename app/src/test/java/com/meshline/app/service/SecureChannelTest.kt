@@ -120,6 +120,11 @@ class SecureChannelTest {
             contacts.remove(c)
             contacts += c.copy(blocked = true)
         }
+        override suspend fun unblock(peerIdHex: String) {
+            val c = contacts.firstOrNull { it.senderIdHex == peerIdHex } ?: return
+            contacts.remove(c)
+            contacts += c.copy(blocked = false)
+        }
         override suspend fun deleteAll() = contacts.clear()
     }
 

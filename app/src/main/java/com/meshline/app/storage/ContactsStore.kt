@@ -57,8 +57,11 @@ interface ContactsDao {
         OutboxEntity::class,
         SeenMessageEntity::class,
         MessageEntity::class,
+        GroupRecordEntity::class,
+        GroupMessageRecordEntity::class,
+        ChannelMessageRecordEntity::class,
     ],
-    version = 6,
+    version = 7,
     // The schema of every version is exported to app/schemas/ (see the KSP
     // arguments in build.gradle.kts) so the instrumented migration test can
     // build a v1 database and walk it up to the current version.
@@ -70,6 +73,9 @@ abstract class MeshlineDatabase : RoomDatabase() {
     abstract fun outboxDao(): OutboxDao
     abstract fun seenMessageDao(): SeenMessageDao
     abstract fun messagesDao(): MessagesDao
+    abstract fun groupsDao(): GroupsDao
+    abstract fun groupMessagesDao(): GroupMessagesDao
+    abstract fun channelMessagesDao(): ChannelMessagesDao
 
     companion object {
         /**
@@ -200,6 +206,59 @@ abstract class MeshlineDatabase : RoomDatabase() {
                     )
                 }
                 db.execSQL("DROP TABLE IF EXISTS `inbox`")
+            }
+        }
+
+        /**
+         * v6 → v7 adds `groups`, `group_messages`, and `channel_messages` tables (Phase E & Channels).
+         */
+        val MIGRATION_6_7 = object : androidx.room.migration.Migration(6, 7) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `groups` (
+                        `groupIdHex` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `avatarIndex` INTEGER NOT NULL,
+                        `epoch` INTEGER NOT NULL,
+                        `epochKey` BLOB NOT NULL,
+                        `adminEd25519Pk` BLOB NOT NULL,
+                        `groupTagHex` TEXT NOT NULL,
+                        `joinedAtMs` INTEGER NOT NULL,
+                        `lastActivityMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`groupIdHex`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `group_messages` (
+                        `messageIdHex` TEXT NOT NULL,
+                        `groupIdHex` TEXT NOT NULL,
+                        `senderIdHex` TEXT NOT NULL,
+                        `senderNickname` TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `epoch` INTEGER NOT NULL,
+                        `timestampMs` INTEGER NOT NULL,
+                        `isSelf` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageIdHex`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `channel_messages` (
+                        `messageIdHex` TEXT NOT NULL,
+                        `channel` TEXT NOT NULL,
+                        `senderIdHex` TEXT NOT NULL,
+                        `senderNickname` TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `timestampMs` INTEGER NOT NULL,
+                        `isSelf` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageIdHex`)
+                    )
+                    """.trimIndent()
+                )
             }
         }
     }

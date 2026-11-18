@@ -95,6 +95,7 @@ class SecureChannel(
     /** The message retention in days (0 = keep everything, FR-15). */
     private val retentionDays: () -> Int = { 0 },
     private val nowProvider: () -> Long = { System.currentTimeMillis() },
+    private val onGroupInvite: ((ByteArray) -> Unit)? = null,
 ) {
     /** The Noise session engine. */
     val sessions = SessionManager(
@@ -183,17 +184,21 @@ class SecureChannel(
         // the first copy is stored and shown.
         sendReceipt(peerId, result.envelope.messageId, Payloads.Receipt.KIND_DELIVERED)
         if (result.isNew) {
-            messageStore.upsert(
-                MessageEntity(
-                    messageIdHex = hex(result.envelope.messageId),
-                    peerIdHex = peerHex,
-                    outgoing = false,
-                    text = result.envelope.text.copyOf(),
-                    createdAtMs = result.envelope.sentAtMs,
-                    state = OutboxState.DELIVERED.name,
+            if (com.meshline.app.protocol.GroupPayloads.isGroupInvite(result.envelope.text)) {
+                onGroupInvite?.invoke(result.envelope.text)
+            } else {
+                messageStore.upsert(
+                    MessageEntity(
+                        messageIdHex = hex(result.envelope.messageId),
+                        peerIdHex = peerHex,
+                        outgoing = false,
+                        text = result.envelope.text.copyOf(),
+                        createdAtMs = result.envelope.sentAtMs,
+                        state = OutboxState.DELIVERED.name,
+                    )
                 )
-            )
-            refresh()
+                refresh()
+            }
         }
     }
 
@@ -258,6 +263,16 @@ class SecureChannel(
                 state = OutboxState.QUEUED.name,
             )
         )
+        refresh()
+        return true
+    }
+
+    /**
+     * Sends raw bytes (e.g. Group Invites) inside a Noise encrypted envelope.
+     */
+    suspend fun sendRaw(peerIdHex: String, payload: ByteArray): Boolean {
+        val peerId = peerIdHex.hexToBytes()
+        messenger.send(peerId, peerIdHex, payload)
         refresh()
         return true
     }

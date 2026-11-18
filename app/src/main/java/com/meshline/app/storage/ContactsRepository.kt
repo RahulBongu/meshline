@@ -104,6 +104,11 @@ class ContactsRepository(private val context: Context) : ContactDirectory {
         runCatching { open().contactsDao().setBlocked(peerIdHex, true) }
     }
 
+    /** Unblocks a peer. */
+    override suspend fun unblock(peerIdHex: String) {
+        runCatching { open().contactsDao().setBlocked(peerIdHex, false) }
+    }
+
     /** Panic wipe: every contact goes with the identity. */
     override suspend fun deleteAll() {
         runCatching { open().contactsDao().deleteAll() }
