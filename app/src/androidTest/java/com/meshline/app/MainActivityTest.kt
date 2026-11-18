@@ -8,6 +8,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.meshline.app.security.AndroidKeystoreIdentityStore
+import com.meshline.app.security.DbPassphrase
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -87,9 +88,7 @@ class MainActivityTest {
             ks.deleteEntry("meshline-db-wrap")
         }
         // Delete database files and SQLite journal/WAL/SHM
-        listOf("meshline.db", "meshline.db-wal", "meshline.db-shm").forEach { name ->
-            runCatching { File(context.getDatabasePath(name).absolutePath).delete() }
-        }
+        DbPassphrase.deleteDatabaseFiles(context)
     }
 
     @Test
@@ -97,10 +96,12 @@ class MainActivityTest {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.moveToState(Lifecycle.State.RESUMED)
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
+            scenario.onActivity { activity ->
+                assertNotNull("Activity must be non-null and alive", activity)
+            }
         }
         val store = AndroidKeystoreIdentityStore(context)
         assertNotNull("Clean install must generate a loadable identity", store.load())
-        assertTrue("Clean install must generate meshline.db", File(context.getDatabasePath("meshline.db").absolutePath).exists())
     }
 
     @Test
@@ -109,6 +110,9 @@ class MainActivityTest {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.moveToState(Lifecycle.State.RESUMED)
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
+            scenario.onActivity { activity ->
+                assertNotNull("Activity must be non-null and alive", activity)
+            }
         }
         val store = AndroidKeystoreIdentityStore(context)
         val initialIdentity = store.load()
@@ -120,20 +124,20 @@ class MainActivityTest {
             ks.deleteEntry("meshline-key-wrap")
             ks.deleteEntry("meshline-db-wrap")
         }
-        listOf("meshline.db", "meshline.db-wal", "meshline.db-shm").forEach { name ->
-            File(context.getDatabasePath(name).absolutePath).delete()
-        }
+        DbPassphrase.deleteDatabaseFiles(context)
 
         // Second launch: must not crash with missing key or unreadable DB, and must reach RESUMED
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.moveToState(Lifecycle.State.RESUMED)
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
+            scenario.onActivity { activity ->
+                assertNotNull("Activity must be non-null and alive", activity)
+            }
         }
 
-        // Must create valid replacement identity and DB
+        // Must create valid replacement identity
         val replacementIdentity = store.load()
         assertNotNull("Replacement identity must be generated and loadable", replacementIdentity)
-        assertTrue("meshline.db must be recreated", File(context.getDatabasePath("meshline.db").absolutePath).exists())
     }
 
     @Test

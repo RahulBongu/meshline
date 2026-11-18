@@ -85,6 +85,8 @@ import com.meshline.app.ui.theme.AppThemeMode
 import com.meshline.app.ui.theme.MeshlineDesign
 import com.meshline.app.ui.theme.MeshlineTheme
 import com.meshline.app.ui.theme.ThemeStore
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
@@ -105,6 +107,9 @@ class MainActivity : ComponentActivity() {
         requestBlePermissionsIfNeeded()
         retention = RetentionStore(applicationContext).load()
         val themeStore = ThemeStore(applicationContext)
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { ContactsRepository(applicationContext).all() }
+        }
 
         setContent {
             var themeMode by remember { mutableStateOf(themeStore.load()) }
@@ -423,6 +428,7 @@ private fun App(
         val loaded = runCatching { identityStore.load() }.getOrNull()
         identity = loaded ?: AndroidKeystoreIdentityStore.generateAndStore(app)
         profile = runCatching { profileStore.load() }.getOrNull()
+        runCatching { contactsRepo.all() }
         resetEvent = SecureStorageStatus.consume(app)
         onStart() // Ensure mesh foreground service is active
     }

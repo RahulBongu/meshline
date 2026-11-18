@@ -79,15 +79,24 @@ object DbPassphrase {
         deleteDatabaseFiles(context)
     }
 
-    private fun deleteWrapKey() {
+    internal fun deleteWrapKey() {
         runCatching {
             KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }.deleteEntry(ALIAS)
         }
     }
 
-    private fun deleteDatabaseFiles(context: Context) {
-        listOf(DB_NAME, "$DB_NAME-wal", "$DB_NAME-shm").forEach { name ->
-            runCatching { File(context.getDatabasePath(name).absolutePath).delete() }
+    internal fun deleteDatabaseFiles(context: Context) {
+        runCatching { context.deleteDatabase(DB_NAME) }
+        listOf(DB_NAME, "$DB_NAME-journal", "$DB_NAME-wal", "$DB_NAME-shm").forEach { name ->
+            runCatching {
+                val file = context.getDatabasePath(name)
+                if (file.exists()) {
+                    file.delete()
+                }
+            }
+        }
+        runCatching {
+            context.getDatabasePath(DB_NAME).parentFile?.mkdirs()
         }
     }
 

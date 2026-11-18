@@ -3,6 +3,7 @@ package com.meshline.app.storage
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.meshline.app.security.DbPassphrase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -36,9 +37,7 @@ class DatabaseInstrumentedTest {
     fun cleanup() = deleteDb()
 
     private fun deleteDb() {
-        listOf("meshline.db", "meshline.db-wal", "meshline.db-shm").forEach {
-            File(ctx.getDatabasePath(it).absolutePath).delete()
-        }
+        DbPassphrase.deleteDatabaseFiles(ctx)
     }
 
     private fun contact(hex: String) = ContactEntity(
