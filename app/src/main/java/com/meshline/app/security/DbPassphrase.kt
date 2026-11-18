@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import java.io.File
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -33,6 +34,7 @@ object DbPassphrase {
     private const val GCM_TAG_BITS = 128
     private const val KEY_BYTES = 32
     private const val DB_NAME = "meshline.db"
+    private const val TAG = "DbPassphrase"
 
     /** Returns the existing passphrase, or generates and persists a new one. */
     @Synchronized
@@ -86,13 +88,21 @@ object DbPassphrase {
     }
 
     internal fun deleteDatabaseFiles(context: Context) {
-        runCatching { context.deleteDatabase(DB_NAME) }
-        listOf(DB_NAME, "$DB_NAME-journal", "$DB_NAME-wal", "$DB_NAME-shm").forEach { name ->
-            runCatching {
-                val file = context.getDatabasePath(name)
-                if (file.exists()) {
-                    file.delete()
-                }
+        // The app promises the panic wipe leaves nothing behind: deletions are
+        // verified here, retried, and reported loudly instead of being
+        // swallowed by runCatching. Only file names are ever logged.
+        val names = listOf(DB_NAME, "$DB_NAME-journal", "$DB_NAME-wal", "$DB_NAME-shm")
+        for (name in names) {
+            runCatching { context.deleteDatabase(name) }
+            var file = context.getDatabasePath(name)
+            var attempts = 0
+            while (file.exists() && attempts < 3) {
+                if (file.delete()) break
+                attempts++
+            }
+            file = context.getDatabasePath(name)
+            if (file.exists()) {
+                Log.w(TAG, "unable to delete " + name)
             }
         }
         runCatching {
