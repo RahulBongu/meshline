@@ -75,7 +75,7 @@ class PanicWipeInstrumentedTest {
         val contacts = ContactsRepository(context)
 
         // 1. An identity, a profile, a setting.
-        val identity = AndroidKeystoreIdentityStore.generateAndStore(context)
+        val identity = checkNotNull(AndroidKeystoreIdentityStore.generateAndStore(context))
         profileStore.save(com.meshline.app.profile.Profile("bob", 3))
         retentionStore.save(MessageRetention.SEVEN_DAYS)
         assertTrue("the identity must exist", identityStore.load() != null)

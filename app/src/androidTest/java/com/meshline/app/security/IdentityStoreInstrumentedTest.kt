@@ -73,7 +73,7 @@ class IdentityStoreInstrumentedTest {
         AndroidKeystoreIdentityStore(ctx).wipe()
         assertNull(AndroidKeystoreIdentityStore(ctx).load())
 
-        val id2 = AndroidKeystoreIdentityStore.generateAndStore(ctx)
+        val id2 = checkNotNull(AndroidKeystoreIdentityStore.generateAndStore(ctx))
         val reloaded = AndroidKeystoreIdentityStore(ctx).load()
         assertNotNull(reloaded)
         assertArrayEquals(id2.ed25519PublicKey, reloaded!!.ed25519PublicKey)

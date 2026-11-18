@@ -31,7 +31,7 @@ import javax.crypto.spec.GCMParameterSpec
  */
 interface IdentityStore {
     fun load(): Identity?
-    fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray)
+    fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray): Boolean
     suspend fun wipe()
 }
 
@@ -80,22 +80,30 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
         return identity
     }
 
-    override fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray) {
-        val key = keystoreKey(createIfMissing = true)!!
-        val (edWrapped, edIv) = encrypt(edPrivate, key)
-        val (xWrapped, xIv) = encrypt(xPrivate, key)
-        prefs.edit()
-            .putString("ed_pub", Base64.encodeToString(identity.ed25519PublicKey, Base64.NO_WRAP))
-            .putString("x_pub", Base64.encodeToString(identity.x25519PublicKey, Base64.NO_WRAP))
-            .putString("ed_wrapped", Base64.encodeToString(edWrapped, Base64.NO_WRAP))
-            .putString("x_wrapped", Base64.encodeToString(xWrapped, Base64.NO_WRAP))
-            .putString("ed_iv", Base64.encodeToString(edIv, Base64.NO_WRAP))
-            .putString("x_iv", Base64.encodeToString(xIv, Base64.NO_WRAP))
-            .apply()
+    override fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray): Boolean {
+        return runCatching {
+            val key = keystoreKey(createIfMissing = true) ?: return false
+            val (edWrapped, edIv) = encrypt(edPrivate, key)
+            val (xWrapped, xIv) = encrypt(xPrivate, key)
+            if (edWrapped.isEmpty() || xWrapped.isEmpty() || edIv.isEmpty() || xIv.isEmpty()) {
+                return false
+            }
+            // Stale/corrupt preferences are cleared ONLY after the fresh identity
+            // wrapping key and both private-key encryptions complete successfully.
+            prefs.edit()
+                .clear()
+                .putString("ed_pub", Base64.encodeToString(identity.ed25519PublicKey, Base64.NO_WRAP))
+                .putString("x_pub", Base64.encodeToString(identity.x25519PublicKey, Base64.NO_WRAP))
+                .putString("ed_wrapped", Base64.encodeToString(edWrapped, Base64.NO_WRAP))
+                .putString("x_wrapped", Base64.encodeToString(xWrapped, Base64.NO_WRAP))
+                .putString("ed_iv", Base64.encodeToString(edIv, Base64.NO_WRAP))
+                .putString("x_iv", Base64.encodeToString(xIv, Base64.NO_WRAP))
+                .commit()
+        }.getOrDefault(false)
     }
 
     override suspend fun wipe() {
-        prefs.edit().clear().apply()
+        prefs.edit().clear().commit()
         deleteWrapKey()
     }
 
@@ -106,27 +114,29 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
     }
 
     private fun keystoreKey(createIfMissing: Boolean): SecretKey? {
-        val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        val existing = runCatching {
-            if (ks.containsAlias(ALIAS)) {
-                (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
-            } else null
-        }.getOrNull()
-        if (existing != null) return existing
-        if (!createIfMissing) return null
-        runCatching { ks.deleteEntry(ALIAS) }
-        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-        gen.init(
-            KeyGenParameterSpec.Builder(
-                ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        return runCatching {
+            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val existing = runCatching {
+                if (ks.containsAlias(ALIAS)) {
+                    (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+                } else null
+            }.getOrNull()
+            if (existing != null) return@runCatching existing
+            if (!createIfMissing) return@runCatching null
+            runCatching { ks.deleteEntry(ALIAS) }
+            val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+            gen.init(
+                KeyGenParameterSpec.Builder(
+                    ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(256)
+                    .build()
             )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build()
-        )
-        return gen.generateKey()
+            gen.generateKey()
+        }.getOrNull()
     }
 
     /** Returns ciphertext + the random IV the cipher chose for this operation. */
@@ -149,14 +159,14 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
 
-        fun generateAndStore(context: Context): Identity {
-            val store = AndroidKeystoreIdentityStore(context)
-            // A reset may leave an unusable entry behind (OEM invalidation);
-            // replace it so the new identity is writable and decryptable.
-            store.deleteWrapKey()
-            val (identity, edPriv, xPriv) = IdentityFactory.generate()
-            store.save(identity, edPriv, xPriv)
-            return identity
+        fun generateAndStore(context: Context): Identity? {
+            return runCatching {
+                val store = AndroidKeystoreIdentityStore(context)
+                store.deleteWrapKey()
+                val (identity, edPriv, xPriv) = IdentityFactory.generate()
+                val ok = store.save(identity, edPriv, xPriv)
+                if (ok) identity else null
+            }.getOrNull()
         }
     }
 }
@@ -169,10 +179,11 @@ class InMemoryIdentityStore : IdentityStore {
 
     override fun load(): Identity? = identity
 
-    override fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray) {
+    override fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray): Boolean {
         this.identity = identity
         edWrapped = edPrivate.copyOf()
         xWrapped = xPrivate.copyOf()
+        return true
     }
 
     override suspend fun wipe() {

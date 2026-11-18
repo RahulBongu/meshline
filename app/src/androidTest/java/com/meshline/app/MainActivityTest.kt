@@ -7,7 +7,10 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.meshline.app.security.AndroidKeystoreIdentityStore
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -17,15 +20,15 @@ import java.io.File
 import java.security.KeyStore
 
 /**
- * Instrumented smoke & regression tests for MainActivity (Phase 1).
+ * Instrumented smoke & regression tests for MainActivity.
  *
  * Verifies:
  * 1. Clean launch: launches MainActivity with all prefs, Keystore keys, and DB wiped.
- *    Proves MainActivity reaches RESUMED state on a clean install without crashing.
- * 2. Re-launch after Keystore alias and DB are deleted: proves graceful recovery
+ *    Proves MainActivity reaches RESUMED state on a clean install and creates valid identity/DB.
+ * 2. Re-launch after Keystore aliases and DB are deleted: proves graceful recovery
  *    and generation of a new identity and database when hardware keys are removed.
  * 3. Regression test: stale SharedPreferences with missing Keystore wrap key
- *    fails closed safely and creates a new identity instead of crashing.
+ *    fails closed safely, replaces corrupt data, and creates an observable, loadable fresh identity.
  */
 @RunWith(AndroidJUnit4::class)
 class MainActivityTest {
@@ -34,6 +37,11 @@ class MainActivityTest {
 
     @Before
     fun cleanAll() {
+        runCatching {
+            val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+            automation.executeShellCommand("input keyevent KEYCODE_WAKEUP")
+            automation.executeShellCommand("wm dismiss-keyguard")
+        }
         grantBlePermissions()
         wipeAllStorage()
     }
@@ -68,6 +76,7 @@ class MainActivityTest {
             "meshline_profile",
             "meshline_settings",
             "meshline_secure_storage",
+            "meshline_theme",
         ).forEach { name ->
             context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
         }
@@ -77,34 +86,33 @@ class MainActivityTest {
             ks.deleteEntry("meshline-key-wrap")
             ks.deleteEntry("meshline-db-wrap")
         }
-        // Delete database files
+        // Delete database files and SQLite journal/WAL/SHM
         listOf("meshline.db", "meshline.db-wal", "meshline.db-shm").forEach { name ->
-            File(context.getDatabasePath(name).absolutePath).delete()
+            runCatching { File(context.getDatabasePath(name).absolutePath).delete() }
         }
     }
 
     @Test
     fun launchOnCleanInstallReachesResumed() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            scenario.onActivity { activity ->
-                assertNotNull(activity)
-            }
-            assertTrue(
-                "MainActivity must reach at least STARTED without crash, actual: ${scenario.state}",
-                scenario.state.isAtLeast(Lifecycle.State.STARTED)
-            )
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            assertEquals(Lifecycle.State.RESUMED, scenario.state)
         }
+        val store = AndroidKeystoreIdentityStore(context)
+        assertNotNull("Clean install must generate a loadable identity", store.load())
+        assertTrue("Clean install must generate meshline.db", File(context.getDatabasePath("meshline.db").absolutePath).exists())
     }
 
     @Test
     fun launchAfterKeystoreAliasAndDbDeletedReachesResumed() {
         // First launch to populate identity and DB
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            scenario.onActivity { activity ->
-                assertNotNull(activity)
-            }
-            assertTrue(scenario.state.isAtLeast(Lifecycle.State.STARTED))
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            assertEquals(Lifecycle.State.RESUMED, scenario.state)
         }
+        val store = AndroidKeystoreIdentityStore(context)
+        val initialIdentity = store.load()
+        assertNotNull("Initial identity must be present after first launch", initialIdentity)
 
         // Delete only the Keystore aliases and database files (leaving prefs)
         runCatching {
@@ -116,39 +124,62 @@ class MainActivityTest {
             File(context.getDatabasePath(name).absolutePath).delete()
         }
 
-        // Second launch: must not crash with missing key or unreadable DB
+        // Second launch: must not crash with missing key or unreadable DB, and must reach RESUMED
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            scenario.onActivity { activity ->
-                assertNotNull(activity)
-            }
-            assertTrue(
-                "MainActivity must reach at least STARTED after wiped hardware keys, actual: ${scenario.state}",
-                scenario.state.isAtLeast(Lifecycle.State.STARTED)
-            )
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            assertEquals(Lifecycle.State.RESUMED, scenario.state)
         }
+
+        // Must create valid replacement identity and DB
+        val replacementIdentity = store.load()
+        assertNotNull("Replacement identity must be generated and loadable", replacementIdentity)
+        assertTrue("meshline.db must be recreated", File(context.getDatabasePath("meshline.db").absolutePath).exists())
     }
 
     @Test
-    fun regressionStalePrefsWithMissingKeyDoesNotCrash() {
-        // Simulate stale identity prefs with missing Keystore key
+    fun regressionStalePrefsWithMissingKeyRecoversObservableIdentity() {
+        val fakeEdPub = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        val fakeXPub = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+        // 1. Simulate stale identity prefs with missing Keystore key
         val prefs = context.getSharedPreferences("meshline_identity", Context.MODE_PRIVATE)
         prefs.edit()
-            .putString("ed_pub", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-            .putString("x_pub", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+            .putString("ed_pub", fakeEdPub)
+            .putString("x_pub", fakeXPub)
             .putString("ed_wrapped", "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
             .putString("x_wrapped", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=")
             .putString("ed_iv", "DDDDDDDDDDDDDDDD")
             .putString("x_iv", "EEEEEEEEEEEEEEEE")
             .commit()
 
+        // 2. Launch MainActivity and ensure it drives to RESUMED
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            scenario.onActivity { activity ->
-                assertNotNull(activity)
-            }
-            assertTrue(
-                "MainActivity must handle corrupted/un-decryptable identity without crash, actual: ${scenario.state}",
-                scenario.state.isAtLeast(Lifecycle.State.STARTED)
-            )
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            assertEquals(Lifecycle.State.RESUMED, scenario.state)
         }
+
+        // 3. Verify observable recovery:
+        // - meshline_identity contains valid public/private-key entries
+        assertTrue("ed_pub entry must exist", prefs.contains("ed_pub"))
+        assertTrue("x_pub entry must exist", prefs.contains("x_pub"))
+        assertTrue("ed_wrapped entry must exist", prefs.contains("ed_wrapped"))
+        assertTrue("x_wrapped entry must exist", prefs.contains("x_wrapped"))
+        assertTrue("ed_iv entry must exist", prefs.contains("ed_iv"))
+        assertTrue("x_iv entry must exist", prefs.contains("x_iv"))
+
+        // - The wrapped identity can be loaded through AndroidKeystoreIdentityStore.load()
+        val store = AndroidKeystoreIdentityStore(context)
+        val loaded = store.load()
+        assertNotNull("Identity must be successfully loadable after recovery", loaded)
+
+        // - load() returns an identity different from the deliberately corrupted fake public keys
+        val currentEdPub = prefs.getString("ed_pub", null)
+        val currentXPub = prefs.getString("x_pub", null)
+        assertNotEquals("Recovered ed_pub must differ from fake corrupted key", fakeEdPub, currentEdPub)
+        assertNotEquals("Recovered x_pub must differ from fake corrupted key", fakeXPub, currentXPub)
+        assertEquals(32, loaded!!.ed25519PublicKey.size)
+        assertEquals(32, loaded.x25519PublicKey.size)
+        assertEquals(32, loaded.x25519PrivateKey().size)
+        assertTrue(loaded.signEd25519("meshline".toByteArray()).isNotEmpty())
     }
 }

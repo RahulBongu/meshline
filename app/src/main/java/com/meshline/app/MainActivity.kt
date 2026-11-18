@@ -420,8 +420,9 @@ private fun App(
     }
 
     LaunchedEffect(Unit) {
-        identity = identityStore.load() ?: AndroidKeystoreIdentityStore.generateAndStore(app)
-        profile = profileStore.load()
+        val loaded = runCatching { identityStore.load() }.getOrNull()
+        identity = loaded ?: AndroidKeystoreIdentityStore.generateAndStore(app)
+        profile = runCatching { profileStore.load() }.getOrNull()
         resetEvent = SecureStorageStatus.consume(app)
         onStart() // Ensure mesh foreground service is active
     }

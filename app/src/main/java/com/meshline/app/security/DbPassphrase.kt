@@ -64,16 +64,17 @@ object DbPassphrase {
         cipher.init(Cipher.ENCRYPT_MODE, key)
         val ciphertext = cipher.doFinal(passphrase)
         prefs.edit()
+            .clear()
             .putString("wrapped", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
             .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-            .apply()
+            .commit()
         return passphrase
     }
 
     /** Panic wipe: forget the passphrase and delete the encrypted DB. */
     @Synchronized
     fun wipe(context: Context) {
-        prefs(context).edit().clear().apply()
+        prefs(context).edit().clear().commit()
         deleteWrapKey()
         deleteDatabaseFiles(context)
     }
@@ -94,27 +95,29 @@ object DbPassphrase {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private fun keystoreKey(createIfMissing: Boolean): SecretKey? {
-        val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        val existing = runCatching {
-            if (ks.containsAlias(ALIAS)) {
-                (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
-            } else null
-        }.getOrNull()
-        if (existing != null) return existing
-        if (!createIfMissing) return null
-        runCatching { ks.deleteEntry(ALIAS) }
-        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-        gen.init(
-            KeyGenParameterSpec.Builder(
-                ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        return runCatching {
+            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val existing = runCatching {
+                if (ks.containsAlias(ALIAS)) {
+                    (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+                } else null
+            }.getOrNull()
+            if (existing != null) return@runCatching existing
+            if (!createIfMissing) return@runCatching null
+            runCatching { ks.deleteEntry(ALIAS) }
+            val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+            gen.init(
+                KeyGenParameterSpec.Builder(
+                    ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(256)
+                    .build()
             )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build()
-        )
-        return gen.generateKey()
+            gen.generateKey()
+        }.getOrNull()
     }
 
     private fun decrypt(ciphertext: ByteArray, iv: ByteArray, key: SecretKey): ByteArray {

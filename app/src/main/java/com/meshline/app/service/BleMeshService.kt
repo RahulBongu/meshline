@@ -125,7 +125,9 @@ class BleMeshService : Service() {
         connectedPeers.map { it.joinToString("") { b -> "%02x".format(b) } }.toSet()
 
     val identity: Identity by lazy {
-        identityStore.load() ?: AndroidKeystoreIdentityStore.generateAndStore(applicationContext)
+        identityStore.load()
+            ?: AndroidKeystoreIdentityStore.generateAndStore(applicationContext)
+            ?: error("Unable to initialize secure identity")
     }
 
     val senderId: ByteArray get() = identity.senderId
