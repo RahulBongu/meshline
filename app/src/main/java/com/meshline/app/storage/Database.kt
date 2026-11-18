@@ -2,7 +2,6 @@ package com.meshline.app.storage
 
 import android.content.Context
 import androidx.room.Room
-import androidx.room.RoomDatabase
 import com.meshline.app.security.DbPassphrase
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
@@ -25,7 +24,6 @@ object DatabaseFactory {
         val factory = SupportOpenHelperFactory(passphrase)
         return Room.databaseBuilder(context, MeshlineDatabase::class.java, "meshline.db")
             .openHelperFactory(factory)
-            .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
             .addMigrations(
                 MeshlineDatabase.MIGRATION_1_2,
                 MeshlineDatabase.MIGRATION_2_3,
