@@ -53,12 +53,13 @@ object DbPassphrase {
             deleteDatabaseFiles(context)
         }
 
-        // No usable wrapped passphrase remains. Discard any stale wrap-key
-        // entry first, otherwise keystoreKey(true) could hand back an
-        // unusable/invalidated key and encryption would crash.
+        // No usable wrapped passphrase remains. Clean up any orphaned database
+        // files (e.g. from a prior install restored by backup or test wipe)
+        // so SQLCipher doesn't fail trying to decrypt old data with a new key.
+        deleteDatabaseFiles(context)
         deleteWrapKey()
         val passphrase = ByteArray(KEY_BYTES).also { SecureRandom().nextBytes(it) }
-        val key = keystoreKey(createIfMissing = true)!!
+        val key = keystoreKey(createIfMissing = true) ?: error("Failed to generate Keystore wrap key")
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key)
         val ciphertext = cipher.doFinal(passphrase)
@@ -94,8 +95,14 @@ object DbPassphrase {
 
     private fun keystoreKey(createIfMissing: Boolean): SecretKey? {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        val existing = runCatching {
+            if (ks.containsAlias(ALIAS)) {
+                (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+            } else null
+        }.getOrNull()
+        if (existing != null) return existing
         if (!createIfMissing) return null
+        runCatching { ks.deleteEntry(ALIAS) }
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
         gen.init(
             KeyGenParameterSpec.Builder(

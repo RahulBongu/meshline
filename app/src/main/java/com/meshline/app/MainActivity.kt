@@ -5,9 +5,11 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -234,6 +236,10 @@ private fun App(
     var openPeerId by remember { mutableStateOf<String?>(null) }
     var wipeArmed by remember { mutableStateOf(false) }
 
+    BackHandler(enabled = screen != Screen.HOME) {
+        screen = Screen.HOME
+    }
+
     val privateMessages by BleMeshService.privateMessages.collectAsState()
     val privatePeers by BleMeshService.privatePeers.collectAsState()
     val keyChange by BleMeshService.keyChange.collectAsState()
@@ -323,9 +329,17 @@ private fun App(
             },
         )
         id == null || prof == null -> Box(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MeshlineColors.Background),
             contentAlignment = Alignment.Center,
-        ) { Text("Preparing secure storage…") }
+        ) {
+            Text(
+                "Preparing secure storage…",
+                color = MeshlineColors.TextPrimary,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
         screen == Screen.MY_QR -> MyProfileScreen(
             profile = prof,
             fingerprintShort = id.fingerprintShort,
@@ -541,6 +555,9 @@ fun MeshlineTheme(content: @Composable () -> Unit) {
             primary = MeshlineColors.Accent,
             background = MeshlineColors.Background,
             surface = MeshlineColors.Surface,
+            onPrimary = Color.Black,
+            onBackground = MeshlineColors.TextPrimary,
+            onSurface = MeshlineColors.TextPrimary,
         ),
         content = content,
     )

@@ -68,7 +68,7 @@ class PanicWipeInstrumentedTest {
     }
 
     @Test
-    fun `the panic wipe removes everything`() = runBlocking {
+    fun thePanicWipeRemovesEverything() = runBlocking {
         val identityStore = AndroidKeystoreIdentityStore(context)
         val profileStore = ProfileStore(context)
         val retentionStore = RetentionStore(context)
@@ -183,24 +183,26 @@ class PanicWipeInstrumentedTest {
     }
 
     @Test
-    fun `the periodic purge removes the expired rows`() = runBlocking {
-        val db = DatabaseFactory.create(context)
-        try {
-            val now = 1_700_000_000_000L
-            val messages = db.messagesDao()
-            messages.upsert(
-                MessageEntity("old", "peer", true, "old".toByteArray(), now - 10_000L, OutboxState.DELIVERED.name)
-            )
-            messages.upsert(
-                MessageEntity("fresh", "peer", true, "fresh".toByteArray(), now, OutboxState.DELIVERED.name)
-            )
-            // The purge the service runs every tick (FR-15, 1 day).
-            val removed = messages.deleteOlderThan(now - 24L * 60 * 60 * 1_000)
-            assertEquals("the expired message must be purged", 1, removed)
-            assertEquals("the fresh message must stay", 1, messages.all().size)
-            assertNull(messages.all().firstOrNull { it.messageIdHex == "old" })
-        } finally {
-            db.close()
+    fun thePeriodicPurgeRemovesTheExpiredRows() {
+        runBlocking {
+            val db = DatabaseFactory.create(context)
+            try {
+                val now = 1_700_000_000_000L
+                val messages = db.messagesDao()
+                messages.upsert(
+                    MessageEntity("old", "peer", true, "old".toByteArray(), now - 25L * 60 * 60 * 1_000L, OutboxState.DELIVERED.name)
+                )
+                messages.upsert(
+                    MessageEntity("fresh", "peer", true, "fresh".toByteArray(), now, OutboxState.DELIVERED.name)
+                )
+                // The purge the service runs every tick (FR-15, 1 day).
+                val removed = messages.deleteOlderThan(now - 24L * 60 * 60 * 1_000)
+                assertEquals("the expired message must be purged", 1, removed)
+                assertEquals("the fresh message must stay", 1, messages.all().size)
+                assertNull(messages.all().firstOrNull { it.messageIdHex == "old" })
+            } finally {
+                db.close()
+            }
         }
     }
 }

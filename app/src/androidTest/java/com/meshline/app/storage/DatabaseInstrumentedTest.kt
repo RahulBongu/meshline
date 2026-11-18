@@ -53,21 +53,23 @@ class DatabaseInstrumentedTest {
     )
 
     @Test
-    fun `right passphrase reopens, wrong passphrase fails`() = runBlocking {
-        val db = DatabaseFactory.create(ctx, passphrase)
-        assertNull(db.contactsDao().find("aa"))
-        db.contactsDao().upsert(contact("aa"))
-        assertEquals("alice", db.contactsDao().find("aa")?.nickname)
-        db.close()
+    fun rightPassphraseReopensWrongPassphraseFails() {
+        runBlocking {
+            val db = DatabaseFactory.create(ctx, passphrase)
+            assertNull(db.contactsDao().find("aa"))
+            db.contactsDao().upsert(contact("aa"))
+            assertEquals("alice", db.contactsDao().find("aa")?.nickname)
+            db.close()
 
-        val reopened = DatabaseFactory.create(ctx, passphrase)
-        assertEquals("alice", reopened.contactsDao().find("aa")?.nickname)
-        reopened.close()
+            val reopened = DatabaseFactory.create(ctx, passphrase)
+            assertEquals("alice", reopened.contactsDao().find("aa")?.nickname)
+            reopened.close()
 
-        // A different 32-byte key must not open the same file.
-        val wrong = DatabaseFactory.create(ctx, ByteArray(32) { 0x7F })
-        val result = runCatching { runBlocking { wrong.contactsDao().find("aa") } }
-        assertTrue("wrong passphrase must fail, got $result", result.isFailure)
-        runCatching { wrong.close() }
+            // A different 32-byte key must not open the same file.
+            val wrong = DatabaseFactory.create(ctx, ByteArray(32) { 0x7F })
+            val result = runCatching { runBlocking { wrong.contactsDao().find("aa") } }
+            assertTrue("wrong passphrase must fail, got $result", result.isFailure)
+            runCatching { wrong.close() }
+        }
     }
 }

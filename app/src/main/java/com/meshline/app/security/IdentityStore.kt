@@ -107,8 +107,14 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
 
     private fun keystoreKey(createIfMissing: Boolean): SecretKey? {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        val existing = runCatching {
+            if (ks.containsAlias(ALIAS)) {
+                (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+            } else null
+        }.getOrNull()
+        if (existing != null) return existing
         if (!createIfMissing) return null
+        runCatching { ks.deleteEntry(ALIAS) }
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
         gen.init(
             KeyGenParameterSpec.Builder(

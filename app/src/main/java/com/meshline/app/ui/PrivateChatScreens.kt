@@ -2,6 +2,7 @@ package com.meshline.app.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -52,21 +53,25 @@ fun ChatsScreen(
 ) {
     var tab by remember { mutableIntStateOf(0) }
     Surface(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
             Row(Modifier.fillMaxWidth()) {
                 Tab(
                     selected = tab == 0,
                     onClick = { tab = 0 },
+                    modifier = Modifier.weight(1f),
                     text = { Text("Nearby (public)") },
                 )
                 Tab(
                     selected = tab == 1,
                     onClick = { tab = 1 },
+                    modifier = Modifier.weight(1f),
                     text = { Text("Private (encrypted)") },
                 )
             }
             Spacer(Modifier.height(8.dp))
-            if (tab == 0) nearby() else private()
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                if (tab == 0) nearby() else private()
+            }
         }
     }
 }
@@ -295,7 +300,7 @@ fun PanicWipeButton(onArmed: () -> Unit) {
                 }
             },
     ) {
-        Column(Modifier.padding(12.dp).verticalScroll(rememberScrollState())) {
+        Column(Modifier.padding(12.dp)) {
             Text("Danger zone", color = Color(0xFFFF8A80), style = MaterialTheme.typography.titleSmall)
             Text(
                 "Panic wipe — tap three times, then confirm.",

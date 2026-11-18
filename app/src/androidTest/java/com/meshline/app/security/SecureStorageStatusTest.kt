@@ -34,7 +34,7 @@ class SecureStorageStatusTest {
     }
 
     @Test
-    fun `reset notice is recorded and consumed exactly once`() {
+    fun resetNoticeIsRecordedAndConsumedExactlyOnce() {
         assertNull(SecureStorageStatus.consume(ctx))
 
         SecureStorageStatus.record(ctx, SecureStorageStatus.Reason.DB_UNREADABLE)
@@ -44,7 +44,7 @@ class SecureStorageStatusTest {
     }
 
     @Test
-    fun `identity reset reason is preserved`() {
+    fun identityResetReasonIsPreserved() {
         SecureStorageStatus.record(ctx, SecureStorageStatus.Reason.KEYSTORE_INVALIDATED)
         assertEquals(
             SecureStorageStatus.Reason.KEYSTORE_INVALIDATED,
