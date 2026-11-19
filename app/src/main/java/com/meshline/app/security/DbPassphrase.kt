@@ -48,7 +48,10 @@ object DbPassphrase {
             val unwrapped = runCatching {
                 decrypt(wrapped, iv, keystoreKey(createIfMissing = false) ?: error("missing key"))
             }.getOrNull()
-            if (unwrapped != null && unwrapped.size == KEY_BYTES) return unwrapped
+            if (unwrapped != null && unwrapped.size == KEY_BYTES) {
+                Log.i(TAG, "getOrCreate: reusing stored passphrase")
+                return unwrapped
+            }
             // The Keystore key was invalidated (OEM OS upgrade) or the blob is
             // corrupt. The DB is unreadable either way, so discard it and start
             // clean rather than crash or silently keep an undecryptable file.
@@ -56,6 +59,8 @@ object DbPassphrase {
             deleteDatabaseFiles(context)
         }
 
+        // Fresh install path.
+        Log.i(TAG, "getOrCreate: generating a fresh passphrase")
         // No usable wrapped passphrase remains. Clean up any orphaned database
         // files (e.g. from a prior install restored by backup or test wipe)
         // so SQLCipher doesn't fail trying to decrypt old data with a new key.
@@ -111,11 +116,16 @@ object DbPassphrase {
         var allDeleted = true
         for (name in listOf(DB_NAME, "$DB_NAME-journal", "$DB_NAME-wal", "$DB_NAME-shm")) {
             val file = context.getDatabasePath(name)
+            val before = file.exists()
             var attempts = 0
             while (attempts < 5 && file.exists()) {
                 attempts++
                 file.delete()
                 if (file.exists()) Thread.sleep(100)
+            }
+            val after = file.exists()
+            if (before != after) {
+                Log.i(TAG, "deleteDatabaseFiles: $name before=$before after=$after")
             }
             if (file.exists()) {
                 allDeleted = false

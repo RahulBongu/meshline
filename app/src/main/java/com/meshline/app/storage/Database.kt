@@ -2,6 +2,7 @@ package com.meshline.app.storage
 
 import android.content.Context
 import androidx.room.Room
+import android.util.Log
 import androidx.room.RoomDatabase
 import com.meshline.app.security.DbPassphrase
 import java.util.concurrent.ConcurrentHashMap
@@ -29,9 +30,11 @@ object DatabaseFactory {
         // net.zetetic:sqlcipher-android ships libsqlcipher.so; load it explicitly.
         System.loadLibrary("sqlcipher")
         // Room opens the database lazily on first access; the parent directory
-        // must exist at that moment (a fresh wipe may have deleted the DB but
-        // not recreated the folder).
-        context.getDatabasePath(DB_FILE_NAME).parentFile?.mkdirs()
+        // must exist at that moment, or SQLCipher's open() can fail.
+        val dbDir = context.getDatabasePath(DB_FILE_NAME).parentFile
+        if (dbDir != null && !dbDir.isDirectory && !dbDir.mkdirs()) {
+            Log.w(TAG, "database directory is not writable")
+        }
         val factory = SupportOpenHelperFactory(passphrase)
         val db = Room.databaseBuilder(context, MeshlineDatabase::class.java, "meshline.db")
             .openHelperFactory(factory)
@@ -51,11 +54,15 @@ object DatabaseFactory {
 
     private fun register(db: RoomDatabase) {
         open.add(db)
+        Log.i(TAG, "registering a new Room instance (open=${open.size})")
     }
+
+    private const val TAG = "DatabaseFactory"
 
     /** Close every registered Room/SQLCipher handle (e.g. before file deletion). */
     @JvmStatic
     fun closeAll() {
+        Log.i(TAG, "closeAll(${open.size} registered instances)")
         for (db in open.toList()) {
             open.remove(db)
             runCatching { db.close() }
