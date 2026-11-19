@@ -2,13 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!--
-      Optional Internet Transport for Nostr Relay fallback / geographic channels.
-      Core BLE mesh operation is strictly offline-first and requires no internet.
-      Internet Relay is disabled by default in settings and used only if explicitly enabled.
-    -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="true" />

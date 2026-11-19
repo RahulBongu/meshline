@@ -3,6 +3,7 @@ package com.meshline.app.storage
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.meshline.app.security.DbPassphrase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -30,15 +31,16 @@ class DatabaseInstrumentedTest {
     private val passphrase = ByteArray(32) { (it + 1).toByte() }
 
     @Before
-    fun clean() = deleteDb()
-
+    fun clean() {
+        assertTrue("the clean delete must succeed", DbPassphrase.deleteDatabaseFiles(ctx))
+    }
     @After
-    fun cleanup() = deleteDb()
+    fun cleanup() {
+        assertTrue("the cleanup delete must succeed", DbPassphrase.deleteDatabaseFiles(ctx))
+    }
 
     private fun deleteDb() {
-        listOf("meshline.db", "meshline.db-wal", "meshline.db-shm").forEach {
-            File(ctx.getDatabasePath(it).absolutePath).delete()
-        }
+        DbPassphrase.deleteDatabaseFiles(ctx)
     }
 
     private fun contact(hex: String) = ContactEntity(
@@ -53,21 +55,23 @@ class DatabaseInstrumentedTest {
     )
 
     @Test
-    fun `right passphrase reopens, wrong passphrase fails`() = runBlocking {
-        val db = DatabaseFactory.create(ctx, passphrase)
-        assertNull(db.contactsDao().find("aa"))
-        db.contactsDao().upsert(contact("aa"))
-        assertEquals("alice", db.contactsDao().find("aa")?.nickname)
-        db.close()
+    fun rightPassphraseReopensWrongPassphraseFails() {
+        runBlocking {
+            val db = DatabaseFactory.create(ctx, passphrase)
+            assertNull(db.contactsDao().find("aa"))
+            db.contactsDao().upsert(contact("aa"))
+            assertEquals("alice", db.contactsDao().find("aa")?.nickname)
+            db.close()
 
-        val reopened = DatabaseFactory.create(ctx, passphrase)
-        assertEquals("alice", reopened.contactsDao().find("aa")?.nickname)
-        reopened.close()
+            val reopened = DatabaseFactory.create(ctx, passphrase)
+            assertEquals("alice", reopened.contactsDao().find("aa")?.nickname)
+            reopened.close()
 
-        // A different 32-byte key must not open the same file.
-        val wrong = DatabaseFactory.create(ctx, ByteArray(32) { 0x7F })
-        val result = runCatching { runBlocking { wrong.contactsDao().find("aa") } }
-        assertTrue("wrong passphrase must fail, got $result", result.isFailure)
-        runCatching { wrong.close() }
+            // A different 32-byte key must not open the same file.
+            val wrong = DatabaseFactory.create(ctx, ByteArray(32) { 0x7F })
+            val result = runCatching { runBlocking { wrong.contactsDao().find("aa") } }
+            assertTrue("wrong passphrase must fail, got $result", result.isFailure)
+            runCatching { wrong.close() }
+        }
     }
 }

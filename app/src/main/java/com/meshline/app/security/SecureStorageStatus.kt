@@ -45,7 +45,8 @@ object SecureStorageStatus {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val raw = prefs.getString(KEY_REASON, null) ?: return null
         val at = prefs.getLong(KEY_AT, 0L)
-        prefs.edit().clear().apply()
+        // commit(): the one-shot reset notice must be persisted atomically.
+        prefs.edit().clear().commit()
         val reason = runCatching { Reason.valueOf(raw) }.getOrDefault(Reason.KEYSTORE_INVALIDATED)
         return Event(reason, at)
     }

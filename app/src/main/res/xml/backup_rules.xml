@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <!-- Nothing is backed up or restored: identity keys and messages must
-         never leave the device via cloud backup. -->
+    <!-- Exclude all files from full backup so orphaned databases or keys are never restored -->
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="root" path="." />
 </full-backup-content>

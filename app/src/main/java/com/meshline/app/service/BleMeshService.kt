@@ -125,7 +125,9 @@ class BleMeshService : Service() {
         connectedPeers.map { it.joinToString("") { b -> "%02x".format(b) } }.toSet()
 
     val identity: Identity by lazy {
-        identityStore.load() ?: AndroidKeystoreIdentityStore.generateAndStore(applicationContext)
+        identityStore.load()
+            ?: AndroidKeystoreIdentityStore.generateAndStore(applicationContext)
+            ?: error("Unable to initialize secure identity")
     }
 
     val senderId: ByteArray get() = identity.senderId
@@ -153,7 +155,17 @@ class BleMeshService : Service() {
             return
         }
 
-        val id = identity
+        val id = runCatching { identity }.getOrNull()
+        if (id == null) {
+            // Foregrounded already (startForegroundCompat ran first), so this
+            // stop is safe. Say why and stop cleanly instead of crashing.
+            setStartError(
+                "Secure identity could not be created or loaded. " +
+                    "See the secure-storage notice in the app, or wipe app data and try again."
+            )
+            stopSelf()
+            return
+        }
         val t = BleTransport(
             context = applicationContext,
             localId = id.senderId,

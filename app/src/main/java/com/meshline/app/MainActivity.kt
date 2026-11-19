@@ -380,8 +380,8 @@ private fun App(
 
     // Intercept hardware/gesture Back button when inside any sub-screen (Defect B-01 fix)
     BackHandler(enabled = screen != Screen.MAIN) {
-        if (screen == Screen.GROUP_CHAT && openGroupId != null) {
-            onClearGroupUnread(openGroupId!!)
+        openGroupId?.let { id ->
+            if (screen == Screen.GROUP_CHAT) onClearGroupUnread(id)
         }
         screen = Screen.MAIN
     }
@@ -420,14 +420,16 @@ private fun App(
     }
 
     LaunchedEffect(Unit) {
-        identity = identityStore.load() ?: AndroidKeystoreIdentityStore.generateAndStore(app)
-        profile = profileStore.load()
+        val loaded = runCatching { identityStore.load() }.getOrNull()
+        identity = loaded
+            ?: AndroidKeystoreIdentityStore.generateAndStore(app).also {
+                if (it == null) {
+                    SecureStorageStatus.record(app, SecureStorageStatus.Reason.KEYSTORE_INVALIDATED)
+                }
+            }
+        profile = runCatching { profileStore.load() }.getOrNull()
         resetEvent = SecureStorageStatus.consume(app)
         onStart() // Ensure mesh foreground service is active
-    }
-
-    LaunchedEffect(contacts) {
-        if (resetEvent == null) resetEvent = SecureStorageStatus.consume(app)
     }
 
     LaunchedEffect(systemNotification) {
@@ -461,6 +463,7 @@ private fun App(
 
     val id = identity
     val prof = profile
+    val pendingCardLocal = pendingCard
 
     if (id == null || prof == null) {
         Box(
@@ -473,8 +476,8 @@ private fun App(
     }
 
     when {
-        pendingCard != null -> {
-            val card = pendingCard!!
+        pendingCardLocal != null -> {
+            val card = pendingCardLocal
             ScanConfirmScreen(
                 card = card,
                 fingerprintShort = MessageIds
