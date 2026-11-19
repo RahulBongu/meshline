@@ -45,7 +45,9 @@ class PanicWipeInstrumentedTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        // Start from a clean device state — deletion must succeed every time.
+        // Start from a clean device state — all Room/SQLCipher handles closed
+        // before anything deletes files, every time.
+        DatabaseFactory.closeAll()
         runBlocking {
             val store = AndroidKeystoreIdentityStore(context)
             store.wipe()
@@ -155,6 +157,9 @@ class PanicWipeInstrumentedTest {
             assertTrue("the database file must exist", File(dbFile.absolutePath).exists() || dbFile.parentFile?.listFiles()?.any { it.name.startsWith("meshline.db") } == true)
             db.close()
             db = null
+
+            // Every Room handle closed before the wipe deletes anything.
+            DatabaseFactory.closeAll()
 
             // 3. The wipe.
             val wiped = PanicWiper(

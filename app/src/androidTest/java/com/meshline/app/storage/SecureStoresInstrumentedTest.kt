@@ -39,13 +39,10 @@ class SecureStoresInstrumentedTest {
         }
     }
 
-    private fun deleteDb() {
-        DbPassphrase.deleteDatabaseFiles(context)
-    }
-
     @Before
     fun setUp() {
         closeDbSafely()
+        DatabaseFactory.closeAll()
         assertTrue("the clean delete must succeed", DbPassphrase.deleteDatabaseFiles(context))
         db = DatabaseFactory.create(context, "test-passphrase-0123456789".toByteArray())
     }

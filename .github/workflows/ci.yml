@@ -72,7 +72,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            set +e; ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace; rc=$?; set -e; echo "unit+connected exit code: $rc"; echo "==== LOGCAT (last 500 lines) ===="; adb logcat -d -v threadtime | tail -500 | tee logcat.txt || true; echo "==== LOGCAT END ===="; exit $rc
+            set +e; ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace; rc=$?; set -e; echo "unit+connected exit code: $rc"; echo "==== LOGCAT (last 10000 lines) ===="; adb logcat -d -v threadtime | tail -10000 | tee logcat.txt || true; echo "==== LOGCAT END ===="; exit $rc
 
       - name: Upload instrumented test reports
         if: always()
