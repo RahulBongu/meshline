@@ -165,6 +165,7 @@ class PanicWipeInstrumentedTest {
                 retentionStore = retentionStore,
             ).wipe(channel = null)
             assertTrue("the panic wipe must report successful deletion", wiped)
+            android.util.Log.d("PanicWipeDiag", "diagnostic: panic wipe completed, files=" + meshlineFiles(context).joinToString())
 
             // 4. Nothing is left.
             assertNull("the identity must be gone", identityStore.load())
@@ -186,8 +187,10 @@ class PanicWipeInstrumentedTest {
             )
 
             // The database is empty as well (a fresh database opens empty).
+            android.util.Log.d("PanicWipeDiag", "diagnostic: before fresh create")
             fresh = DatabaseFactory.create(context)
-            assertTrue("the contacts must be gone", fresh.contactsDao().allOnce().isEmpty())
+            android.util.Log.d("PanicWipeDiag", "diagnostic: after fresh build")
+            assertTrue("the contacts must be gone", runCatching { fresh!!.contactsDao().allOnce() }.onFailure { android.util.Log.e("PanicWipeDiag", "fresh contactsDao failed: ${it.javaClass.simpleName}: ${it.message}") }.getOrThrow().isEmpty())
             assertTrue("the sessions must be gone", fresh.noiseSessionDao().find("peer") == null)
             assertTrue("the outbox must be gone", fresh.outboxDao().all().isEmpty())
             assertTrue("the messages must be gone", fresh.messagesDao().all().isEmpty())
