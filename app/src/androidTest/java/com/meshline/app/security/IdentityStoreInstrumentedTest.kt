@@ -37,8 +37,9 @@ class IdentityStoreInstrumentedTest {
 
         val loaded = AndroidKeystoreIdentityStore(ctx).load()
         assertNotNull(loaded)
-        assertArrayEquals(identity.ed25519PublicKey, loaded!!.ed25519PublicKey)
-        assertArrayEquals(identity.x25519PublicKey, loaded.x25519PublicKey)
+        val loadedIdentity = checkNotNull(loaded) { "identity must be loadable" }
+        assertArrayEquals(identity.ed25519PublicKey, loadedIdentity.ed25519PublicKey)
+        assertArrayEquals(identity.x25519PublicKey, loadedIdentity.x25519PublicKey)
 
         // Decrypted private keys must still sign/agree — not just round-trip bytes.
         val msg = "keystore round trip".encodeToByteArray()
@@ -60,8 +61,10 @@ class IdentityStoreInstrumentedTest {
         val second = AndroidKeystoreIdentityStore(ctx).load()
         assertNotNull(first)
         assertNotNull(second)
-        assertArrayEquals(first!!.ed25519PublicKey, second!!.ed25519PublicKey)
-        assertEquals(first.fingerprint, second.fingerprint)
+        val firstIdentity = checkNotNull(first) { "first load must return the identity" }
+        val secondIdentity = checkNotNull(second) { "second load must return the identity" }
+        assertArrayEquals(firstIdentity.ed25519PublicKey, secondIdentity.ed25519PublicKey)
+        assertEquals(firstIdentity.fingerprint, secondIdentity.fingerprint)
     }
 
     @Test
@@ -76,7 +79,8 @@ class IdentityStoreInstrumentedTest {
         val id2 = checkNotNull(AndroidKeystoreIdentityStore.generateAndStore(ctx))
         val reloaded = AndroidKeystoreIdentityStore(ctx).load()
         assertNotNull(reloaded)
-        assertArrayEquals(id2.ed25519PublicKey, reloaded!!.ed25519PublicKey)
+        val reloadedIdentity = checkNotNull(reloaded) { "reloaded identity must be loadable" }
+        assertArrayEquals(id2.ed25519PublicKey, reloadedIdentity.ed25519PublicKey)
         assertNotEquals(id1.fingerprint, id2.fingerprint)
     }
 
@@ -87,7 +91,8 @@ class IdentityStoreInstrumentedTest {
         AndroidKeystoreIdentityStore(ctx).save(identity, edPriv, xPriv)
 
         val prefs = ctx.getSharedPreferences("meshline_identity", Context.MODE_PRIVATE)
-        val blob = Base64.decode(prefs.getString("ed_wrapped", null)!!, Base64.NO_WRAP)
+        val wrappedBase64 = checkNotNull(prefs.getString("ed_wrapped", null)) { "ed_wrapped must be present" }
+        val blob = Base64.decode(wrappedBase64, Base64.NO_WRAP)
         blob[0] = (blob[0].toInt() xor 0xFF).toByte()
         prefs.edit()
             .putString("ed_wrapped", Base64.encodeToString(blob, Base64.NO_WRAP))

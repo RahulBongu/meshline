@@ -120,7 +120,9 @@ class ContactsRepository(private val context: Context) : ContactDirectory {
     }
 
     private fun resetStorage() {
-        runCatching { db?.close() }
+        // Coordinate every Room/SQLCipher handle, not just ours: a stale open
+        // file elsewhere becomes the *next* code 26.
+        DatabaseFactory.closeAll()
         db = null
         DbPassphrase.wipe(context)
         SecureStorageStatus.record(context, SecureStorageStatus.Reason.DB_UNREADABLE)

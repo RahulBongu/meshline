@@ -181,9 +181,10 @@ class MainActivityTest {
         val currentXPub = prefs.getString("x_pub", null)
         assertNotEquals("Recovered ed_pub must differ from fake corrupted key", fakeEdPub, currentEdPub)
         assertNotEquals("Recovered x_pub must differ from fake corrupted key", fakeXPub, currentXPub)
-        assertEquals(32, loaded!!.ed25519PublicKey.size)
-        assertEquals(32, loaded.x25519PublicKey.size)
-        assertEquals(32, loaded.x25519PrivateKey().size)
-        assertTrue(loaded.signEd25519("meshline".toByteArray()).isNotEmpty())
+        val recovered = checkNotNull(loaded) { "identity must be loadable after recovery" }
+        assertEquals(32, recovered.ed25519PublicKey.size)
+        assertEquals(32, recovered.x25519PublicKey.size)
+        assertEquals(32, recovered.x25519PrivateKey().size)
+        assertTrue(recovered.signEd25519("meshline".toByteArray()).isNotEmpty())
     }
 }

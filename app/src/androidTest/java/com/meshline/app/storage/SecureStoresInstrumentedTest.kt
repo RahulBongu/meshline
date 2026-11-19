@@ -145,7 +145,7 @@ class SecureStoresInstrumentedTest {
                 sessions.save(snapshot)
                 val stored = sessions.load("peer1")
                 assertTrue("the session was stored", stored != null)
-                assertNull("the transport key must never be written", stored!!.transportKey)
+                assertNull("the transport key must never be written", stored?.transportKey)
                 sessions.wipe()
                 assertNull(sessions.load("peer1"))
             }

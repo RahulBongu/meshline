@@ -81,15 +81,23 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
     }
 
     override fun save(identity: Identity, edPrivate: ByteArray, xPrivate: ByteArray): Boolean {
+        // Key material must be exact, the encryption must round-trip, and the
+        // prefs must be written atomically (one edit block). Failure is:
+        // nothing changes — the previous identity stays intact.
+        if (edPrivate.size != 32 || xPrivate.size != 32) return false
+        if (identity.ed25519PublicKey.size != 32 || identity.x25519PublicKey.size != 32) return false
         return runCatching {
-            val key = keystoreKey(createIfMissing = true) ?: return false
+            val key = keystoreKey(createIfMissing = true) ?: return@runCatching false
             val (edWrapped, edIv) = encrypt(edPrivate, key)
             val (xWrapped, xIv) = encrypt(xPrivate, key)
             if (edWrapped.isEmpty() || xWrapped.isEmpty() || edIv.isEmpty() || xIv.isEmpty()) {
-                return false
+                return@runCatching false
             }
-            // Stale/corrupt preferences are cleared ONLY after the fresh identity
-            // wrapping key and both private-key encryptions complete successfully.
+            // Verify decryption with the same key before writing anything.
+            if (!decrypt(edWrapped, edIv, key).contentEquals(edPrivate)) return@runCatching false
+            if (!decrypt(xWrapped, xIv, key).contentEquals(xPrivate)) return@runCatching false
+            // Stale/corrupt preferences are replaced atomically; nothing is
+            // half-written.
             prefs.edit()
                 .clear()
                 .putString("ed_pub", Base64.encodeToString(identity.ed25519PublicKey, Base64.NO_WRAP))
@@ -123,7 +131,9 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
             }.getOrNull()
             if (existing != null) return@runCatching existing
             if (!createIfMissing) return@runCatching null
-            runCatching { ks.deleteEntry(ALIAS) }
+            // Nothing to lose: the alias is absent, so a fresh key can be
+            // created without touching anything — and failure here can never
+            // destroy an existing identity.
             val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
             gen.init(
                 KeyGenParameterSpec.Builder(
@@ -162,7 +172,6 @@ class AndroidKeystoreIdentityStore(private val context: Context) : IdentityStore
         fun generateAndStore(context: Context): Identity? {
             return runCatching {
                 val store = AndroidKeystoreIdentityStore(context)
-                store.deleteWrapKey()
                 val (identity, edPriv, xPriv) = IdentityFactory.generate()
                 val ok = store.save(identity, edPriv, xPriv)
                 if (ok) identity else null
