@@ -16,6 +16,8 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
  * [DbPassphrase.wipe], which clears the wrap key and deletes the DB files.
  */
 object DatabaseFactory {
+    private const val DB_FILE_NAME = "meshline.db"
+
     /** Room instances created by this factory that are still registered. */
     private val open = ConcurrentHashMap.newKeySet<RoomDatabase>()
 
@@ -26,6 +28,10 @@ object DatabaseFactory {
     fun create(context: Context, passphrase: ByteArray): MeshlineDatabase {
         // net.zetetic:sqlcipher-android ships libsqlcipher.so; load it explicitly.
         System.loadLibrary("sqlcipher")
+        // Room opens the database lazily on first access; the parent directory
+        // must exist at that moment (a fresh wipe may have deleted the DB but
+        // not recreated the folder).
+        context.getDatabasePath(DB_FILE_NAME).parentFile?.mkdirs()
         val factory = SupportOpenHelperFactory(passphrase)
         val db = Room.databaseBuilder(context, MeshlineDatabase::class.java, "meshline.db")
             .openHelperFactory(factory)

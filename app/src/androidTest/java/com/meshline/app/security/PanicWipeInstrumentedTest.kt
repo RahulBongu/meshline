@@ -254,8 +254,10 @@ class PanicWipeInstrumentedTest {
             assertTrue("cycle $cycle: deletion succeeds before setup", DbPassphrase.deleteDatabaseFiles(context))
             val db = DatabaseFactory.create(context)
             try {
-                assertTrue("cycle $cycle: the file exists", meshlineFiles(context).isNotEmpty())
+                // Query first: Room opens the database (and creates the file)
+                // lazily on first access.
                 assertTrue("cycle $cycle: the fresh database is empty", db.contactsDao().allOnce().isEmpty())
+                assertTrue("cycle $cycle: the file exists after the first query", meshlineFiles(context).isNotEmpty())
             } finally {
                 db.close()
             }
