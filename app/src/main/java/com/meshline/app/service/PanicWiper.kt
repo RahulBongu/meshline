@@ -30,7 +30,8 @@ class PanicWiper(
     private val profileStore: ProfileStore,
     private val retentionStore: RetentionStore,
 ) {
-    suspend fun wipe(channel: SecureChannel?) {
+    /** Returns true iff the database files were deleted. */
+    suspend fun wipe(channel: SecureChannel?): Boolean {
         // The chat, the sessions, the delivery queue, the seen ids.
         channel?.wipe()
         // The identity (prefs + the Keystore wrap key).
@@ -40,8 +41,9 @@ class PanicWiper(
         runCatching { retentionStore.wipe() }
         // The database: the passphrase, its Keystore alias and the files.
         runCatching { contacts.close() }
-        runCatching { DbPassphrase.wipe(context) }
+        val deleted = runCatching { DbPassphrase.wipe(context) }.getOrDefault(false)
         // The UI shows why the next launch starts over.
         SecureStorageStatus.record(context, SecureStorageStatus.Reason.PANIC_WIPE)
+        return deleted
     }
 }

@@ -2,7 +2,9 @@ package com.meshline.app.storage
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.RoomDatabase
 import com.meshline.app.security.DbPassphrase
+import java.util.concurrent.ConcurrentHashMap
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 /**
@@ -14,6 +16,9 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
  * [DbPassphrase.wipe], which clears the wrap key and deletes the DB files.
  */
 object DatabaseFactory {
+    /** Room instances created by this factory that are still registered. */
+    private val open = ConcurrentHashMap.newKeySet<RoomDatabase>()
+
     /** Production entry point: Keystore-backed random passphrase. */
     fun create(context: Context): MeshlineDatabase = create(context, DbPassphrase.getOrCreate(context))
 
@@ -22,7 +27,7 @@ object DatabaseFactory {
         // net.zetetic:sqlcipher-android ships libsqlcipher.so; load it explicitly.
         System.loadLibrary("sqlcipher")
         val factory = SupportOpenHelperFactory(passphrase)
-        return Room.databaseBuilder(context, MeshlineDatabase::class.java, "meshline.db")
+        val db = Room.databaseBuilder(context, MeshlineDatabase::class.java, "meshline.db")
             .openHelperFactory(factory)
             .addMigrations(
                 MeshlineDatabase.MIGRATION_1_2,
@@ -34,5 +39,20 @@ object DatabaseFactory {
             )
             .fallbackToDestructiveMigration()
             .build()
+        register(db)
+        return db
+    }
+
+    private fun register(db: RoomDatabase) {
+        open.add(db)
+    }
+
+    /** Close every registered Room/SQLCipher handle (e.g. before file deletion). */
+    @JvmStatic
+    fun closeAll() {
+        for (db in open.toList()) {
+            open.remove(db)
+            runCatching { db.close() }
+        }
     }
 }

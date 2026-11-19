@@ -45,11 +45,11 @@ class PanicWipeInstrumentedTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        // Start from a clean device state.
+        // Start from a clean device state — deletion must succeed every time.
         runBlocking {
             val store = AndroidKeystoreIdentityStore(context)
             store.wipe()
-            DbPassphrase.wipe(context)
+            assertTrue("clean-up wipe in setUp must succeed", DbPassphrase.wipe(context))
             ProfileStore(context).wipe()
             RetentionStore(context).wipe()
         }
@@ -59,9 +59,16 @@ class PanicWipeInstrumentedTest {
     fun tearDown() {
         runBlocking {
             AndroidKeystoreIdentityStore(context).wipe()
-            DbPassphrase.wipe(context)
+            assertTrue("tearDown wipe must succeed", DbPassphrase.wipe(context))
         }
     }
+
+    /** Every file on disk that belongs to `meshline.db` (main file + sidecars). */
+    private fun meshlineFiles(context: Context): List<File> =
+        context.getDatabasePath("meshline.db").parentFile?.listFiles()
+            ?.filter { it.name.startsWith("meshline.db") }
+            ?.toList()
+            ?: emptyList()
 
     private fun keystoreHas(alias: String): Boolean {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -150,13 +157,14 @@ class PanicWipeInstrumentedTest {
             db = null
 
             // 3. The wipe.
-            PanicWiper(
+            val wiped = PanicWiper(
                 context = context,
                 identityStore = identityStore,
                 contacts = contacts,
                 profileStore = profileStore,
                 retentionStore = retentionStore,
             ).wipe(channel = null)
+            assertTrue("the panic wipe must report successful deletion", wiped)
 
             // 4. Nothing is left.
             assertNull("the identity must be gone", identityStore.load())
@@ -216,5 +224,43 @@ class PanicWipeInstrumentedTest {
                 runCatching { db?.close() }
             }
         }
+    }
+
+    /** The wipe must remove the main database file and every sidecar (-journal, -wal, -shm). */
+    @Test
+    fun theWipeDeletesMainDatabaseAndSidecarFiles() = runBlocking {
+        var db: MeshlineDatabase? = null
+        try {
+            // A database instance that is still open (Room connects lazily on
+            // first query) when the wipe happens.
+            db = DatabaseFactory.create(context, "wipe-sidecar-test-passphrase".toByteArray())
+            db.contactsDao().find("nobody")
+            assertTrue("the main database file must exist before the wipe", meshlineFiles(context).isNotEmpty())
+            assertTrue("deletion must succeed while a Room instance is open", DbPassphrase.deleteDatabaseFiles(context))
+            assertTrue(
+                "no meshline.db files survive the wipe (main, -journal, -wal, -shm): ${meshlineFiles(context).map { it.name }}",
+                meshlineFiles(context).isEmpty(),
+            )
+        } finally {
+            runCatching { db?.close() }
+        }
+    }
+
+    /** Repeated wipe/create cycles must stay deterministic. */
+    @Test
+    fun repeatedWipeCreateCyclesAreDeterministic() = runBlocking {
+        DatabaseFactory.closeAll()
+        for (cycle in 0 until 3) {
+            assertTrue("cycle $cycle: deletion succeeds before setup", DbPassphrase.deleteDatabaseFiles(context))
+            val db = DatabaseFactory.create(context)
+            try {
+                assertTrue("cycle $cycle: the file exists", meshlineFiles(context).isNotEmpty())
+                assertTrue("cycle $cycle: the fresh database is empty", db.contactsDao().allOnce().isEmpty())
+            } finally {
+                db.close()
+            }
+        }
+        assertTrue("final cleanup", DbPassphrase.deleteDatabaseFiles(context))
+        assertTrue("no meshline.db files survive", meshlineFiles(context).isEmpty())
     }
 }

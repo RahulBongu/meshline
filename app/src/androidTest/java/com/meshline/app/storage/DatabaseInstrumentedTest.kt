@@ -31,10 +31,13 @@ class DatabaseInstrumentedTest {
     private val passphrase = ByteArray(32) { (it + 1).toByte() }
 
     @Before
-    fun clean() = deleteDb()
-
+    fun clean() {
+        assertTrue("the clean delete must succeed", DbPassphrase.deleteDatabaseFiles(ctx))
+    }
     @After
-    fun cleanup() = deleteDb()
+    fun cleanup() {
+        assertTrue("the cleanup delete must succeed", DbPassphrase.deleteDatabaseFiles(ctx))
+    }
 
     private fun deleteDb() {
         DbPassphrase.deleteDatabaseFiles(ctx)

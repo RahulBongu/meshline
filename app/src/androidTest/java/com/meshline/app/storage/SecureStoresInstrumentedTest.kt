@@ -46,14 +46,14 @@ class SecureStoresInstrumentedTest {
     @Before
     fun setUp() {
         closeDbSafely()
-        deleteDb()
+        assertTrue("the clean delete must succeed", DbPassphrase.deleteDatabaseFiles(context))
         db = DatabaseFactory.create(context, "test-passphrase-0123456789".toByteArray())
     }
 
     @After
     fun tearDown() {
         closeDbSafely()
-        deleteDb()
+        assertTrue("the teardown delete must succeed", DbPassphrase.deleteDatabaseFiles(context))
     }
 
     @Test

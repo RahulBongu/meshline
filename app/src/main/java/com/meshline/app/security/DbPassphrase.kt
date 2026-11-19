@@ -6,6 +6,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
+import com.meshline.app.storage.DatabaseFactory
 import java.io.File
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -58,7 +59,15 @@ object DbPassphrase {
         // No usable wrapped passphrase remains. Clean up any orphaned database
         // files (e.g. from a prior install restored by backup or test wipe)
         // so SQLCipher doesn't fail trying to decrypt old data with a new key.
-        deleteDatabaseFiles(context)
+        // Fail loudly if the deletion didn't stick: opening a stale,
+        // still-encrypted meshline.db with a fresh passphrase only surfaces
+        // as code 26 (SQLiteNotADatabaseException) at first query — we want
+        // the true cause now, not that deep in the stack.
+        val deleted = deleteDatabaseFiles(context)
+        check(deleted) { "meshline.db files could not be deleted before creating a new passphrase" }
+        if (context.getDatabasePath(DB_NAME).exists()) {
+            throw IllegalStateException("meshline.db exists after deletion")
+        }
         deleteWrapKey()
         val passphrase = ByteArray(KEY_BYTES).also { SecureRandom().nextBytes(it) }
         val key = keystoreKey(createIfMissing = true) ?: error("Failed to generate Keystore wrap key")
@@ -73,12 +82,13 @@ object DbPassphrase {
         return passphrase
     }
 
-    /** Panic wipe: forget the passphrase and delete the encrypted DB. */
+    /** Panic wipe: forget the passphrase and delete the encrypted DB.
+     *  Returns true iff every database file (main + sidecars) is gone. */
     @Synchronized
-    fun wipe(context: Context) {
+    fun wipe(context: Context): Boolean {
         prefs(context).edit().clear().commit()
         deleteWrapKey()
-        deleteDatabaseFiles(context)
+        return deleteDatabaseFiles(context)
     }
 
     internal fun deleteWrapKey() {
@@ -87,27 +97,34 @@ object DbPassphrase {
         }
     }
 
-    internal fun deleteDatabaseFiles(context: Context) {
-        // The app promises the panic wipe leaves nothing behind: deletions are
-        // verified here, retried, and reported loudly instead of being
-        // swallowed by runCatching. Only file names are ever logged.
-        val names = listOf(DB_NAME, "$DB_NAME-journal", "$DB_NAME-wal", "$DB_NAME-shm")
-        for (name in names) {
-            runCatching { context.deleteDatabase(name) }
-            var file = context.getDatabasePath(name)
+    /**
+     * Delete `meshline.db` and every sidecar file deterministically: close all
+     * Room/SQLCipher handles first, then delete the main file and the
+     * `-journal`, `-wal` and `-shm` sidecars, verify each is absent and retry
+     * a few times. Returns true iff every expected file is gone.
+     *
+     * No `runCatching` around the deletion itself — the answer is real, so
+     * callers cannot continue with stale files while believing they are erased.
+     */
+    internal fun deleteDatabaseFiles(context: Context): Boolean {
+        DatabaseFactory.closeAll()
+        var allDeleted = true
+        for (name in listOf(DB_NAME, "$DB_NAME-journal", "$DB_NAME-wal", "$DB_NAME-shm")) {
+            val file = context.getDatabasePath(name)
             var attempts = 0
-            while (file.exists() && attempts < 3) {
-                if (file.delete()) break
+            while (attempts < 5 && file.exists()) {
                 attempts++
+                file.delete()
+                if (file.exists()) Thread.sleep(100)
             }
-            file = context.getDatabasePath(name)
             if (file.exists()) {
-                Log.w(TAG, "unable to delete " + name)
+                allDeleted = false
+                // File name only — never keys, passphrases or contents.
+                Log.w(TAG, "could not delete: " + name)
             }
         }
-        runCatching {
-            context.getDatabasePath(DB_NAME).parentFile?.mkdirs()
-        }
+        runCatching { context.getDatabasePath(DB_NAME).parentFile?.mkdirs() }
+        return allDeleted
     }
 
     private fun prefs(context: Context): SharedPreferences =
