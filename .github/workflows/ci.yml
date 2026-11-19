@@ -77,7 +77,9 @@ jobs:
             rc=$?
             set -e
             echo "unit+connected exit code: $rc"
-            adb logcat -d --size 16 > logcat.txt || true
+            echo "==== LOGCAT (last 400 lines) ===="
+            adb logcat -d -v threadtime | tail -400 | tee logcat.txt || true
+            echo "==== LOGCAT END ===="
             exit $rc
 
       - name: Upload instrumented test reports
