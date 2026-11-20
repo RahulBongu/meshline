@@ -113,9 +113,16 @@ object DbPassphrase {
      */
     internal fun deleteDatabaseFiles(context: Context): Boolean {
         DatabaseFactory.closeAll()
+        val dbFile = context.getDatabasePath(DB_NAME)
+        val parent = dbFile.parentFile
+        val hasFiles = dbFile.exists() || (parent != null && parent.exists() && parent.listFiles()?.any { it.name.startsWith(DB_NAME) } == true)
+        if (!hasFiles) {
+            runCatching { parent?.mkdirs() }
+            return true
+        }
+
         runCatching { context.deleteDatabase(DB_NAME) }
         var allDeleted = true
-        val parent = context.getDatabasePath(DB_NAME).parentFile
         if (parent != null && parent.exists()) {
             parent.listFiles()?.filter { it.name.startsWith(DB_NAME) }?.forEach { f ->
                 var attempts = 0
@@ -149,7 +156,10 @@ object DbPassphrase {
                 Log.w(TAG, "could not delete: " + name)
             }
         }
-        runCatching { context.getDatabasePath(DB_NAME).parentFile?.mkdirs() }
+        runCatching { parent?.mkdirs() }
+        if (allDeleted) {
+            Thread.sleep(50)
+        }
         return allDeleted
     }
 

@@ -177,7 +177,7 @@ class ContactsRepository(private val context: Context) : ContactDirectory {
         isResetting = true
         try {
             val currentDb = db
-            if (currentDb != null && !currentDb.isOpen) {
+            if (currentDb == null || !currentDb.isOpen) {
                 db = null
                 return
             }

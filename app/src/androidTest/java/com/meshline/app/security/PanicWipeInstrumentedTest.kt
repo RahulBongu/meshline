@@ -59,6 +59,10 @@ class PanicWipeInstrumentedTest {
             ProfileStore(context).wipe()
             RetentionStore(context).wipe()
         }
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
+        Thread.sleep(100)
     }
 
     @After
@@ -72,6 +76,10 @@ class PanicWipeInstrumentedTest {
             AndroidKeystoreIdentityStore(context).wipe()
             assertTrue("tearDown wipe must succeed", DbPassphrase.wipe(context))
         }
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
+        Thread.sleep(100)
     }
 
     /** Every file on disk that belongs to `meshline.db` (main file + sidecars). */
@@ -215,6 +223,7 @@ class PanicWipeInstrumentedTest {
             runCatching { db?.close() }
             runCatching { fresh?.close() }
             contacts.close()
+            DatabaseFactory.closeAll()
         }
     }
 

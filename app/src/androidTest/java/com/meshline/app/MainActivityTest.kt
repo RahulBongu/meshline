@@ -46,6 +46,9 @@ class MainActivityTest {
         }
         grantBlePermissions()
         wipeAllStorage()
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
     }
 
     private fun grantBlePermissions() {
@@ -68,7 +71,13 @@ class MainActivityTest {
     @After
     fun tearDown() {
         stopBleService()
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
         wipeAllStorage()
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
     }
 
     private fun stopBleService() {
@@ -109,6 +118,10 @@ class MainActivityTest {
             scenario.onActivity { activity ->
                 assertNotNull("Activity must be non-null and alive", activity)
             }
+            scenario.moveToState(Lifecycle.State.DESTROYED)
+        }
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
         val store = AndroidKeystoreIdentityStore(context)
         assertNotNull("Clean install must generate a loadable identity", store.load())
@@ -123,6 +136,10 @@ class MainActivityTest {
             scenario.onActivity { activity ->
                 assertNotNull("Activity must be non-null and alive", activity)
             }
+            scenario.moveToState(Lifecycle.State.DESTROYED)
+        }
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
         val store = AndroidKeystoreIdentityStore(context)
         val initialIdentity = store.load()
@@ -143,6 +160,10 @@ class MainActivityTest {
             scenario.onActivity { activity ->
                 assertNotNull("Activity must be non-null and alive", activity)
             }
+            scenario.moveToState(Lifecycle.State.DESTROYED)
+        }
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
 
         // Must create valid replacement identity
@@ -170,6 +191,10 @@ class MainActivityTest {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.moveToState(Lifecycle.State.RESUMED)
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
+            scenario.moveToState(Lifecycle.State.DESTROYED)
+        }
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
 
         // 3. Verify observable recovery:
