@@ -32,10 +32,16 @@ class DatabaseInstrumentedTest {
 
     @Before
     fun clean() {
+        runCatching {
+            ctx.stopService(android.content.Intent(ctx, com.meshline.app.service.BleMeshService::class.java))
+        }
         assertTrue("the clean delete must succeed", DbPassphrase.deleteDatabaseFiles(ctx))
     }
     @After
     fun cleanup() {
+        runCatching {
+            ctx.stopService(android.content.Intent(ctx, com.meshline.app.service.BleMeshService::class.java))
+        }
         assertTrue("the cleanup delete must succeed", DbPassphrase.deleteDatabaseFiles(ctx))
     }
 

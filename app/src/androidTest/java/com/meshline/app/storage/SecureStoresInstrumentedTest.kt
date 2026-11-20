@@ -41,6 +41,9 @@ class SecureStoresInstrumentedTest {
 
     @Before
     fun setUp() {
+        runCatching {
+            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+        }
         closeDbSafely()
         DatabaseFactory.closeAll()
         assertTrue("the clean delete must succeed", DbPassphrase.deleteDatabaseFiles(context))
@@ -49,6 +52,9 @@ class SecureStoresInstrumentedTest {
 
     @After
     fun tearDown() {
+        runCatching {
+            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+        }
         closeDbSafely()
         assertTrue("the teardown delete must succeed", DbPassphrase.deleteDatabaseFiles(context))
     }

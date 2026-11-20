@@ -42,14 +42,24 @@ class ContactsRepository(private val context: Context) : ContactDirectory {
         emitAll(open().contactsDao().observeAll())
     }.catch { t ->
         if (t is CancellationException) throw t
-        resetStorage()
+        if (t is IllegalStateException && t.message?.contains("closed", ignoreCase = true) == true) {
+            emit(emptyList())
+            return@catch
+        }
+        val currentDb = db
+        if (currentDb != null && currentDb.isOpen && isUnrecoverableDbError(t)) {
+            resetStorage()
+        }
         emit(emptyList())
     }
 
     override suspend fun all(): List<ContactEntity> = runCatching {
         open().contactsDao().allOnce()
-    }.getOrElse {
-        resetStorage()
+    }.getOrElse { t ->
+        val currentDb = db
+        if (currentDb != null && currentDb.isOpen && isUnrecoverableDbError(t)) {
+            resetStorage()
+        }
         emptyList()
     }
 
@@ -57,8 +67,11 @@ class ContactsRepository(private val context: Context) : ContactDirectory {
     suspend fun addVerified(card: QrPayload.ContactCard): Boolean = runCatching {
         open().contactsDao().upsert(card.toEntity())
         true
-    }.getOrElse {
-        resetStorage()
+    }.getOrElse { t ->
+        val currentDb = db
+        if (currentDb != null && currentDb.isOpen && isUnrecoverableDbError(t)) {
+            resetStorage()
+        }
         false
     }
 
@@ -115,17 +128,36 @@ class ContactsRepository(private val context: Context) : ContactDirectory {
     }
 
     fun close() {
-        runCatching { db?.close() }
+        val target = db
         db = null
+        runCatching { target?.close() }
     }
 
     private fun resetStorage() {
-        // Coordinate every Room/SQLCipher handle, not just ours: a stale open
-        // file elsewhere becomes the *next* code 26.
+        val currentDb = db
+        if (currentDb != null && !currentDb.isOpen) {
+            db = null
+            return
+        }
         DatabaseFactory.closeAll()
         db = null
         DbPassphrase.wipe(context)
         SecureStorageStatus.record(context, SecureStorageStatus.Reason.DB_UNREADABLE)
+    }
+
+    private fun isUnrecoverableDbError(t: Throwable): Boolean {
+        var current: Throwable? = t
+        while (current != null) {
+            val name = current.javaClass.name
+            if (name.contains("SQLiteNotADatabaseException") ||
+                name.contains("SQLiteDatabaseCorruptException") ||
+                name.contains("AEADBadTagException")
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
     }
 
     private fun QrPayload.ContactCard.toEntity() = ContactEntity(

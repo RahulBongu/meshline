@@ -45,6 +45,9 @@ class PanicWipeInstrumentedTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        runCatching {
+            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+        }
         // Start from a clean device state — all Room/SQLCipher handles closed
         // before anything deletes files, every time.
         DatabaseFactory.closeAll()
@@ -59,6 +62,10 @@ class PanicWipeInstrumentedTest {
 
     @After
     fun tearDown() {
+        runCatching {
+            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+        }
+        DatabaseFactory.closeAll()
         runBlocking {
             AndroidKeystoreIdentityStore(context).wipe()
             assertTrue("tearDown wipe must succeed", DbPassphrase.wipe(context))
@@ -239,9 +246,13 @@ class PanicWipeInstrumentedTest {
     fun theWipeDeletesMainDatabaseAndSidecarFiles() = runBlocking {
         var db: MeshlineDatabase? = null
         try {
+            DatabaseFactory.closeAll()
+            DbPassphrase.deleteDatabaseFiles(context)
+
             // A database instance that is still open (Room connects lazily on
             // first query) when the wipe happens.
-            db = DatabaseFactory.create(context, "wipe-sidecar-test-passphrase".toByteArray())
+            val testPassphrase = ByteArray(32) { (it + 7).toByte() }
+            db = DatabaseFactory.create(context, testPassphrase)
             db.contactsDao().find("nobody")
             assertTrue("the main database file must exist before the wipe", meshlineFiles(context).isNotEmpty())
             assertTrue("deletion must succeed while a Room instance is open", DbPassphrase.deleteDatabaseFiles(context))
@@ -251,6 +262,8 @@ class PanicWipeInstrumentedTest {
             )
         } finally {
             runCatching { db?.close() }
+            DatabaseFactory.closeAll()
+            DbPassphrase.deleteDatabaseFiles(context)
         }
     }
 

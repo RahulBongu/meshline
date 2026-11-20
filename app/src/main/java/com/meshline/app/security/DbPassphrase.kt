@@ -113,6 +113,7 @@ object DbPassphrase {
      */
     internal fun deleteDatabaseFiles(context: Context): Boolean {
         DatabaseFactory.closeAll()
+        runCatching { context.deleteDatabase(DB_NAME) }
         var allDeleted = true
         for (name in listOf(DB_NAME, "$DB_NAME-journal", "$DB_NAME-wal", "$DB_NAME-shm")) {
             val file = context.getDatabasePath(name)

@@ -38,6 +38,7 @@ class MainActivityTest {
 
     @Before
     fun cleanAll() {
+        stopBleService()
         runCatching {
             val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
             automation.executeShellCommand("input keyevent KEYCODE_WAKEUP")
@@ -66,7 +67,14 @@ class MainActivityTest {
 
     @After
     fun tearDown() {
+        stopBleService()
         wipeAllStorage()
+    }
+
+    private fun stopBleService() {
+        runCatching {
+            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+        }
     }
 
     private fun wipeAllStorage() {
