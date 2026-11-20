@@ -788,9 +788,6 @@ class BleMeshService : Service() {
     }
 
     private fun stopInternal() {
-        if (instance === this) {
-            instance = null
-        }
         announceJob?.cancel()
         jobs.forEach { it.cancel() }
         jobs.clear()
@@ -799,6 +796,9 @@ class BleMeshService : Service() {
         contactsStore = null
         relayTransport?.stop()
         scope.cancel()
+        if (instance === this) {
+            instance = null
+        }
     }
 
     companion object Bridge {
@@ -820,6 +820,7 @@ class BleMeshService : Service() {
             while (instance != null && System.currentTimeMillis() < deadline) {
                 Thread.sleep(50)
             }
+            Thread.sleep(100)
         }
 
         const val ACTION_SEND_PUBLIC = "com.meshline.app.action.SEND_PUBLIC"
