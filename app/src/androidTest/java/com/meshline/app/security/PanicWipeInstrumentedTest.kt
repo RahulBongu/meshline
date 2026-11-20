@@ -45,8 +45,9 @@ class PanicWipeInstrumentedTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        com.meshline.app.service.BleMeshService.stopAndAwait(context)
         runCatching {
-            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
         // Start from a clean device state — all Room/SQLCipher handles closed
         // before anything deletes files, every time.
@@ -62,8 +63,9 @@ class PanicWipeInstrumentedTest {
 
     @After
     fun tearDown() {
+        com.meshline.app.service.BleMeshService.stopAndAwait(context)
         runCatching {
-            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
         DatabaseFactory.closeAll()
         runBlocking {

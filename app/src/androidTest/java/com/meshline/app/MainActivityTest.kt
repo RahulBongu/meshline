@@ -72,12 +72,14 @@ class MainActivityTest {
     }
 
     private fun stopBleService() {
+        com.meshline.app.service.BleMeshService.stopAndAwait(context)
         runCatching {
-            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
     }
 
     private fun wipeAllStorage() {
+        com.meshline.app.storage.DatabaseFactory.closeAll()
         // Clear all SharedPreferences
         listOf(
             "meshline_identity",

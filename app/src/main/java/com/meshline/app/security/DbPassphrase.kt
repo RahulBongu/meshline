@@ -115,6 +115,21 @@ object DbPassphrase {
         DatabaseFactory.closeAll()
         runCatching { context.deleteDatabase(DB_NAME) }
         var allDeleted = true
+        val parent = context.getDatabasePath(DB_NAME).parentFile
+        if (parent != null && parent.exists()) {
+            parent.listFiles()?.filter { it.name.startsWith(DB_NAME) }?.forEach { f ->
+                var attempts = 0
+                while (attempts < 5 && f.exists()) {
+                    attempts++
+                    f.delete()
+                    if (f.exists()) Thread.sleep(50)
+                }
+                if (f.exists()) {
+                    allDeleted = false
+                    Log.w(TAG, "could not delete: ${f.name}")
+                }
+            }
+        }
         for (name in listOf(DB_NAME, "$DB_NAME-journal", "$DB_NAME-wal", "$DB_NAME-shm")) {
             val file = context.getDatabasePath(name)
             val before = file.exists()
@@ -122,7 +137,7 @@ object DbPassphrase {
             while (attempts < 5 && file.exists()) {
                 attempts++
                 file.delete()
-                if (file.exists()) Thread.sleep(100)
+                if (file.exists()) Thread.sleep(50)
             }
             val after = file.exists()
             if (before != after) {

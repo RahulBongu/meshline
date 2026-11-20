@@ -65,7 +65,14 @@ object DatabaseFactory {
         Log.i(TAG, "closeAll(${open.size} registered instances)")
         for (db in open.toList()) {
             open.remove(db)
-            runCatching { db.close() }
+            runCatching {
+                if (db.isOpen) {
+                    runCatching {
+                        db.openHelper.writableDatabase.execSQL("PRAGMA wal_checkpoint(TRUNCATE);")
+                    }
+                }
+                db.close()
+            }
         }
     }
 }

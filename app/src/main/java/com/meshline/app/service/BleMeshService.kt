@@ -4,6 +4,7 @@ import android.app.ForegroundServiceStartNotAllowedException
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -135,6 +136,7 @@ class BleMeshService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         setStartError(null)
         tryInitialize()
     }
@@ -781,16 +783,45 @@ class BleMeshService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        announceJob?.cancel()
-        jobs.forEach { it.cancel() }
-        transport?.stopInternal()
-        contactsStore?.close()
-        relayTransport?.stop()
-        scope.cancel()
+        stopInternal()
         super.onDestroy()
     }
 
+    private fun stopInternal() {
+        if (instance === this) {
+            instance = null
+        }
+        announceJob?.cancel()
+        jobs.forEach { it.cancel() }
+        jobs.clear()
+        transport?.stopInternal()
+        contactsStore?.close()
+        contactsStore = null
+        relayTransport?.stop()
+        scope.cancel()
+    }
+
     companion object Bridge {
+        @Volatile
+        private var instance: BleMeshService? = null
+
+        /** Synchronously stop and tear down the background service if running. */
+        @JvmStatic
+        fun stopAndAwait(context: Context, timeoutMs: Long = 3000) {
+            val s = instance
+            if (s != null) {
+                runCatching { s.stopInternal() }
+                runCatching { s.stopSelf() }
+            }
+            runCatching {
+                context.stopService(Intent(context, BleMeshService::class.java))
+            }
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (instance != null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50)
+            }
+        }
+
         const val ACTION_SEND_PUBLIC = "com.meshline.app.action.SEND_PUBLIC"
         const val ACTION_SEND_PRIVATE = "com.meshline.app.action.SEND_PRIVATE"
         const val ACTION_MARK_READ = "com.meshline.app.action.MARK_READ"

@@ -41,8 +41,9 @@ class SecureStoresInstrumentedTest {
 
     @Before
     fun setUp() {
+        com.meshline.app.service.BleMeshService.stopAndAwait(context)
         runCatching {
-            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
         closeDbSafely()
         DatabaseFactory.closeAll()
@@ -52,8 +53,9 @@ class SecureStoresInstrumentedTest {
 
     @After
     fun tearDown() {
+        com.meshline.app.service.BleMeshService.stopAndAwait(context)
         runCatching {
-            context.stopService(android.content.Intent(context, com.meshline.app.service.BleMeshService::class.java))
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
         closeDbSafely()
         assertTrue("the teardown delete must succeed", DbPassphrase.deleteDatabaseFiles(context))
