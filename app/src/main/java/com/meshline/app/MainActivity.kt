@@ -148,6 +148,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startMesh() {
+        BleMeshService.resumeService()
         startForegroundService(Intent(this, BleMeshService::class.java))
     }
 
@@ -435,6 +436,7 @@ private fun App(
             }
         profile = runCatching { profileStore.load() }.getOrNull()
         resetEvent = SecureStorageStatus.consume(app)
+        BleMeshService.resumeService()
         onStart() // Ensure mesh foreground service is active
     }
 

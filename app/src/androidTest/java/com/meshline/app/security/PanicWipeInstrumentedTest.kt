@@ -177,6 +177,7 @@ class PanicWipeInstrumentedTest {
 
             // Every Room handle closed before the wipe deletes anything.
             DatabaseFactory.closeAll()
+            Thread.sleep(50)
 
             // 3. The wipe.
             val wiped = PanicWiper(
@@ -209,6 +210,7 @@ class PanicWipeInstrumentedTest {
             )
 
             // The database is empty as well (a fresh database opens empty).
+            Thread.sleep(50)
             android.util.Log.d("PanicWipeDiag", "diagnostic: before fresh create")
             fresh = DatabaseFactory.create(context)
             android.util.Log.d("PanicWipeDiag", "diagnostic: after fresh build")

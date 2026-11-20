@@ -43,6 +43,7 @@ import com.meshline.app.transport.InternetRelayTransport
 import com.meshline.app.transport.PeerInfo
 import com.meshline.app.transport.ReceivedMessageInfo
 import com.meshline.app.transport.RelayStatus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -53,7 +54,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.random.Random
 
 /**
@@ -136,6 +140,10 @@ class BleMeshService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        if (stopRequested) {
+            stopSelf()
+            return
+        }
         instance = this
         setStartError(null)
         tryInitialize()
@@ -319,13 +327,19 @@ class BleMeshService : Service() {
 
         // Periodic maintenance
         jobs += scope.launch {
-            while (true) {
-                runCatching { channel.tick() }
-                runCatching { t.sweepUnannouncedLinks() }
-                if (t.unprovenLinkCount > 0 &&
-                    System.currentTimeMillis() - lastAnnounceAtMs > RE_ANNOUNCE_INTERVAL_MS
-                ) {
-                    runCatching { sendAnnounce() }
+            while (isActive) {
+                try {
+                    channel.tick()
+                    t.sweepUnannouncedLinks()
+                    if (t.unprovenLinkCount > 0 &&
+                        System.currentTimeMillis() - lastAnnounceAtMs > RE_ANNOUNCE_INTERVAL_MS
+                    ) {
+                        sendAnnounce()
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // ignore tick failure
                 }
                 delay(2_000)
             }
@@ -642,6 +656,10 @@ class BleMeshService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (stopRequested) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         tryInitialize()
         when (intent?.action) {
             ACTION_SEND_PUBLIC -> {
@@ -789,8 +807,16 @@ class BleMeshService : Service() {
 
     private fun stopInternal() {
         announceJob?.cancel()
-        jobs.forEach { it.cancel() }
+        val runningJobs = jobs.toList()
         jobs.clear()
+        runningJobs.forEach { it.cancel() }
+        runBlocking {
+            runCatching {
+                withTimeout(1500) {
+                    runningJobs.forEach { it.join() }
+                }
+            }
+        }
         transport?.stopInternal()
         contactsStore?.close()
         contactsStore = null
@@ -805,9 +831,19 @@ class BleMeshService : Service() {
         @Volatile
         private var instance: BleMeshService? = null
 
+        @Volatile
+        private var stopRequested: Boolean = false
+
+        /** Reset stopRequested when explicitly starting the mesh service. */
+        @JvmStatic
+        fun resumeService() {
+            stopRequested = false
+        }
+
         /** Synchronously stop and tear down the background service if running. */
         @JvmStatic
         fun stopAndAwait(context: Context, timeoutMs: Long = 3000) {
+            stopRequested = true
             val s = instance
             if (s != null) {
                 runCatching { s.stopInternal() }
