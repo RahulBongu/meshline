@@ -45,7 +45,13 @@ class PanicWipeInstrumentedTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        // Start from a clean device state — deletion must succeed every time.
+        com.meshline.app.service.BleMeshService.stopAndAwait(context)
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
+        // Start from a clean device state — all Room/SQLCipher handles closed
+        // before anything deletes files, every time.
+        DatabaseFactory.closeAll()
         runBlocking {
             val store = AndroidKeystoreIdentityStore(context)
             store.wipe()
@@ -53,14 +59,27 @@ class PanicWipeInstrumentedTest {
             ProfileStore(context).wipe()
             RetentionStore(context).wipe()
         }
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
+        Thread.sleep(100)
     }
 
     @After
     fun tearDown() {
+        com.meshline.app.service.BleMeshService.stopAndAwait(context)
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
+        DatabaseFactory.closeAll()
         runBlocking {
             AndroidKeystoreIdentityStore(context).wipe()
             assertTrue("tearDown wipe must succeed", DbPassphrase.wipe(context))
         }
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
+        Thread.sleep(100)
     }
 
     /** Every file on disk that belongs to `meshline.db` (main file + sidecars). */
@@ -156,6 +175,10 @@ class PanicWipeInstrumentedTest {
             db.close()
             db = null
 
+            // Every Room handle closed before the wipe deletes anything.
+            DatabaseFactory.closeAll()
+            Thread.sleep(50)
+
             // 3. The wipe.
             val wiped = PanicWiper(
                 context = context,
@@ -187,6 +210,7 @@ class PanicWipeInstrumentedTest {
             )
 
             // The database is empty as well (a fresh database opens empty).
+            Thread.sleep(50)
             android.util.Log.d("PanicWipeDiag", "diagnostic: before fresh create")
             fresh = DatabaseFactory.create(context)
             android.util.Log.d("PanicWipeDiag", "diagnostic: after fresh build")
@@ -201,6 +225,7 @@ class PanicWipeInstrumentedTest {
             runCatching { db?.close() }
             runCatching { fresh?.close() }
             contacts.close()
+            DatabaseFactory.closeAll()
         }
     }
 
@@ -234,9 +259,13 @@ class PanicWipeInstrumentedTest {
     fun theWipeDeletesMainDatabaseAndSidecarFiles() = runBlocking {
         var db: MeshlineDatabase? = null
         try {
+            DatabaseFactory.closeAll()
+            DbPassphrase.deleteDatabaseFiles(context)
+
             // A database instance that is still open (Room connects lazily on
             // first query) when the wipe happens.
-            db = DatabaseFactory.create(context, "wipe-sidecar-test-passphrase".toByteArray())
+            val testPassphrase = ByteArray(32) { (it + 7).toByte() }
+            db = DatabaseFactory.create(context, testPassphrase)
             db.contactsDao().find("nobody")
             assertTrue("the main database file must exist before the wipe", meshlineFiles(context).isNotEmpty())
             assertTrue("deletion must succeed while a Room instance is open", DbPassphrase.deleteDatabaseFiles(context))
@@ -246,6 +275,8 @@ class PanicWipeInstrumentedTest {
             )
         } finally {
             runCatching { db?.close() }
+            DatabaseFactory.closeAll()
+            DbPassphrase.deleteDatabaseFiles(context)
         }
     }
 

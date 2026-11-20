@@ -39,19 +39,24 @@ class SecureStoresInstrumentedTest {
         }
     }
 
-    private fun deleteDb() {
-        DbPassphrase.deleteDatabaseFiles(context)
-    }
-
     @Before
     fun setUp() {
+        com.meshline.app.service.BleMeshService.stopAndAwait(context)
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
         closeDbSafely()
+        DatabaseFactory.closeAll()
         assertTrue("the clean delete must succeed", DbPassphrase.deleteDatabaseFiles(context))
         db = DatabaseFactory.create(context, "test-passphrase-0123456789".toByteArray())
     }
 
     @After
     fun tearDown() {
+        com.meshline.app.service.BleMeshService.stopAndAwait(context)
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
         closeDbSafely()
         assertTrue("the teardown delete must succeed", DbPassphrase.deleteDatabaseFiles(context))
     }

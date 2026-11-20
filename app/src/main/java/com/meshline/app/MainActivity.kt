@@ -34,6 +34,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -108,9 +109,11 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             var themeMode by remember { mutableStateOf(themeStore.load()) }
+            val autoStartMesh = intent.getBooleanExtra(EXTRA_AUTO_START_MESH, true)
 
             MeshlineTheme(mode = themeMode) {
                 App(
+                    autoStartMesh = autoStartMesh,
                     themeMode = themeMode,
                     onSetThemeMode = { newMode ->
                         themeMode = newMode
@@ -147,6 +150,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startMesh() {
+        BleMeshService.resumeService()
         startForegroundService(Intent(this, BleMeshService::class.java))
     }
 
@@ -327,6 +331,10 @@ class MainActivity : ComponentActivity() {
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), 0)
         }
     }
+
+    companion object {
+        const val EXTRA_AUTO_START_MESH = "com.meshline.app.extra.AUTO_START_MESH"
+    }
 }
 
 private enum class MainTab { CHATS, NEARBY, CHANNELS, SETTINGS }
@@ -358,12 +366,18 @@ private fun App(
     onSetActiveChannel: (channel: String) -> Unit,
     onSetInternetRelay: (enabled: Boolean) -> Unit,
     onExecuteCommand: (commandText: String, activeChannel: String) -> Unit,
+    autoStartMesh: Boolean = true,
 ) {
     val colors = MeshlineDesign.colors
     val app = LocalContext.current.applicationContext
     val identityStore = remember { AndroidKeystoreIdentityStore(app) }
     val profileStore = remember { ProfileStore(app) }
     val contactsRepo = remember { ContactsRepository(app) }
+    DisposableEffect(contactsRepo) {
+        onDispose {
+            contactsRepo.close()
+        }
+    }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -429,7 +443,10 @@ private fun App(
             }
         profile = runCatching { profileStore.load() }.getOrNull()
         resetEvent = SecureStorageStatus.consume(app)
-        onStart() // Ensure mesh foreground service is active
+        if (autoStartMesh) {
+            BleMeshService.resumeService()
+            onStart() // Ensure mesh foreground service is active
+        }
     }
 
     LaunchedEffect(systemNotification) {

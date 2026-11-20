@@ -32,10 +32,18 @@ class DatabaseInstrumentedTest {
 
     @Before
     fun clean() {
+        com.meshline.app.service.BleMeshService.stopAndAwait(ctx)
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
         assertTrue("the clean delete must succeed", DbPassphrase.deleteDatabaseFiles(ctx))
     }
     @After
     fun cleanup() {
+        com.meshline.app.service.BleMeshService.stopAndAwait(ctx)
+        runCatching {
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
         assertTrue("the cleanup delete must succeed", DbPassphrase.deleteDatabaseFiles(ctx))
     }
 

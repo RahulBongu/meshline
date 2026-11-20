@@ -65,7 +65,9 @@ object DatabaseFactory {
         Log.i(TAG, "closeAll(${open.size} registered instances)")
         for (db in open.toList()) {
             open.remove(db)
-            runCatching { db.close() }
+            runCatching {
+                db.close()
+            }
         }
     }
 }
