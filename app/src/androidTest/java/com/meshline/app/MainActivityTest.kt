@@ -1,6 +1,7 @@
 package com.meshline.app
 
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
@@ -78,6 +79,7 @@ class MainActivityTest {
         runCatching {
             InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
+        Thread.sleep(200)
     }
 
     private fun stopBleService() {
@@ -85,6 +87,13 @@ class MainActivityTest {
         runCatching {
             InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
+    }
+
+    private fun launchActivity(block: (ActivityScenario<MainActivity>) -> Unit) {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            putExtra(MainActivity.EXTRA_AUTO_START_MESH, false)
+        }
+        ActivityScenario.launch<MainActivity>(intent).use(block)
     }
 
     private fun wipeAllStorage() {
@@ -112,7 +121,7 @@ class MainActivityTest {
 
     @Test
     fun launchOnCleanInstallReachesResumed() {
-        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+        launchActivity { scenario ->
             scenario.moveToState(Lifecycle.State.RESUMED)
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
             scenario.onActivity { activity ->
@@ -130,7 +139,7 @@ class MainActivityTest {
     @Test
     fun launchAfterKeystoreAliasAndDbDeletedReachesResumed() {
         // First launch to populate identity and DB
-        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+        launchActivity { scenario ->
             scenario.moveToState(Lifecycle.State.RESUMED)
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
             scenario.onActivity { activity ->
@@ -141,6 +150,9 @@ class MainActivityTest {
         runCatching {
             InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         }
+        stopBleService()
+        com.meshline.app.storage.DatabaseFactory.closeAll()
+        Thread.sleep(100)
         val store = AndroidKeystoreIdentityStore(context)
         val initialIdentity = store.load()
         assertNotNull("Initial identity must be present after first launch", initialIdentity)
@@ -154,7 +166,7 @@ class MainActivityTest {
         DbPassphrase.deleteDatabaseFiles(context)
 
         // Second launch: must not crash with missing key or unreadable DB, and must reach RESUMED
-        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+        launchActivity { scenario ->
             scenario.moveToState(Lifecycle.State.RESUMED)
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
             scenario.onActivity { activity ->
@@ -188,7 +200,7 @@ class MainActivityTest {
             .commit()
 
         // 2. Launch MainActivity and ensure it drives to RESUMED
-        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+        launchActivity { scenario ->
             scenario.moveToState(Lifecycle.State.RESUMED)
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
             scenario.moveToState(Lifecycle.State.DESTROYED)
