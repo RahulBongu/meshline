@@ -42,6 +42,10 @@ Private 1-on-1 messages are end-to-end encrypted using the **Noise XX** protocol
 - **Material 3 Design System**:
   - Modern Charcoal & Mint Emerald visual theme (`#121417`, `#00E599`).
   - 4 primary navigation tabs: `Chats` (Unified Direct & Groups), `Nearby` (Live mesh & diagnostics), `Channels`, and `Settings`.
+- **Message Reactions, Typing Indicators & Geo Pings**:
+  - Emoji reactions on public broadcasts (`REACTION` — signed, broadcast, TTL 7; stored in the encrypted DB).
+  - "Typing…" indicators in private chats (`TYPING` — signed, directed to the peer, TTL 1).
+  - Opt-in coarse-area geo pings with privacy-safe geohashes (`GEO_PING` — signed, broadcast, TTL 2).
 
 ---
 
@@ -128,6 +132,9 @@ Offset  Size  Field          Description
 - `0x08`: `CHANNEL_MESSAGE` — Topic channel message (`#general`, `#mesh`, etc.).
 - `0x09`: `GROUP_MESSAGE` — ChaCha20-Poly1305 AEAD encrypted group chat payload.
 - `0x0A`: `GROUP_CONTROL` — Group control payload (epoch rotation, member updates).
+- `0x0B`: `REACTION` — Broadcast emoji reaction on a public broadcast message (signed, broadcast, TTL 7).
+- `0x0C`: `TYPING` — Directed "typing…" indicator (signed, directed to the peer, TTL 1).
+- `0x0D`: `GEO_PING` — Broadcast privacy-safe geo beacon with a geohash (signed, broadcast, TTL 2).
 
 ---
 

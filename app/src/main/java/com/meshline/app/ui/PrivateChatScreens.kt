@@ -34,6 +34,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +58,7 @@ import com.meshline.app.service.PrivateChatMessage
 import com.meshline.app.service.PrivatePeer
 import com.meshline.app.storage.ContactEntity
 import com.meshline.app.ui.theme.MeshlineDesign
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -640,10 +642,21 @@ fun PrivateChatScreen(
     onResend: (String) -> Unit,
     onClearChat: () -> Unit,
     onBack: () -> Unit,
+    isTyping: Boolean = false,
+    onTyping: () -> Unit = {},
 ) {
     val colors = MeshlineDesign.colors
     var draft by remember { mutableStateOf("") }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+
+    // Feature 2: while the composer holds text, notify the peer we are typing
+    // (debounced so we send once per typing burst).
+    LaunchedEffect(draft) {
+        if (draft.isNotBlank()) {
+            delay(1_200)
+            if (draft.isNotBlank()) onTyping()
+        }
+    }
 
     Surface(color = colors.background, modifier = Modifier.fillMaxSize()) {
         Column(
@@ -712,6 +725,23 @@ fun PrivateChatScreen(
 
                 TextButton(onClick = onClearChat) {
                     Text("Clear", color = colors.textSecondary, fontSize = 12.sp)
+                }
+            }
+
+            // Feature 2: "X is typing…" line while the peer's composer is active.
+            if (isTyping) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = "👤 ${peer.nickname} is typing…",
+                        color = colors.primary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
                 }
             }
 

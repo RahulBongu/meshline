@@ -87,8 +87,11 @@ offset  size  field          notes
 | `0x08` | `HANDSHAKE`     | Noise handshake message carried over the mesh. Payload: one Noise handshake message (§6.5). |
 | `0x09` | `GROUP_MESSAGE` | *(draft E)* Signed + encrypted group ciphertext. Payload: §6.7. `recipientId` = 8-byte group tag. `HAS_SIGNATURE` set; signature must be a current roster member. |
 | `0x0A` | `GROUP_CONTROL` | *(draft E)* Signed group control (leave/rename/roster). Payload: §6.7. `recipientId` = group tag. |
+| `0x0B` | `REACTION`      | Broadcast emoji reaction on a public broadcast message. Signed, broadcast, TTL 7. Payload: §6.8. |
+| `0x0C` | `TYPING`        | Directed "peer is typing…" indicator. Signed, directed to the peer, TTL 1. Payload: §6.9 (empty). |
+| `0x0D` | `GEO_PING`      | Broadcast privacy-safe geo beacon. Signed, broadcast, TTL 2. Payload: §6.10. |
 | `0x00` | *(unknown)*     | Reserved / invalid on decode. |
-| `0x0B..0xFF` | *(unknown)* | Invalid on decode → drop silently (forward-compatible: unknown types MUST NOT crash the app, only be ignored). Old nodes drop `GROUP_MESSAGE`/`GROUP_CONTROL` as unknown (§6.7). |
+| `0x0E..0xFF` | *(unknown)* | Invalid on decode → drop silently (forward-compatible: unknown types MUST NOT crash the app, only be ignored). Old nodes drop `GROUP_MESSAGE`/`GROUP_CONTROL` as unknown (§6.7). |
 
 Unknown type codes are a **soft error**: the packet is dropped, never relayed,
 never delivered, and the receiver stays alive. Version != 1 is a **hard error**:
@@ -106,7 +109,9 @@ clients relaying new packets they could misinterpret).
 | bit 4..7 | *(reserved)*       | MUST be zero on encode; MUST NOT be set on decode — a packet with a reserved bit set is invalid. Fail-closed. |
 
 **Who sets the signature bit?** Every `ANNOUNCE`, `PUBLIC_MESSAGE`, `RECEIPT` and
-`LEAVE` MUST be signed (`HAS_SIGNATURE = 1`). `PRIVATE_MESSAGE` outer packets are
+`LEAVE` MUST be signed (`HAS_SIGNATURE = 1`). `REACTION`, `GEO_PING` MUST be signed too
+(§6.8/§6.10) — they are signed broadcast traffic. `TYPING` MUST be signed and is
+directed to the peer it is for (§6.9). `PRIVATE_MESSAGE` outer packets are
 **unsigned** — the inner Noise ciphertext is already authenticated, and signing the
 outer packet would leak a stable long-term identity to every relay that handles it
 (metadata minimisation). `FRAGMENT` and `HANDSHAKE` packets are unsigned — fragments
@@ -485,6 +490,55 @@ ciphertext. There is no inner MeshPacket; the plaintext is the group text
 plus the sender reference. Decryption happens exactly once per delivery
 (after tag + epoch-key lookup), and replays are caught by the per-sender
 nonce window (see `GROUPS_DESIGN.md` §5).
+
+### 6.8 REACTION
+
+Broadcast emoji reaction on a public broadcast message (the Nearby feed).
+
+```
+kind(1)      1 = ADD, 2 = REMOVE
+emojiLen(1)  1..8, UTF-8 bytes of the emoji
+emoji        the emoji string (non-empty, no ISO control characters)
+targetId(32) the 32-byte messageId of the targeted PUBLIC_MESSAGE
+```
+
+- Signed (§3), broadcast, TTL 7.
+- Storage: the sender upserts its own row in the encrypted `message_reactions`
+  table (keyed by `targetIdHex ‖ senderIdHex ‖ emoji`); receivers do the same
+  (ADD inserts, REMOVE deletes). The UI renders, per target message, one chip
+  per emoji with a count = number of distinct reacting senders.
+- Routing: relayed like any other broadcast (§8). Its rate limits default to
+  the "other" bucket (§8 rule 7).
+- Targets a message the sender has seen; reactions for unknown targets are
+  harmless and simply stored without rendering.
+
+### 6.9 TYPING
+
+Directed "peer is typing…" indicator for private chats.
+
+- Signed (§3), directed (`recipientId` = the peer being typed to), TTL 1
+  (delivered, never relayed). Payload: empty.
+- The receiver marks the peer "typing" for a short local window (≈5 s; the
+  service prunes stale marks on its periodic sweep).
+- Sent by the DM composer while text is present (debounced).
+
+### 6.10 GEO_PING
+
+Broadcast privacy-safe geo beacon: "I'm near <geohash>".
+
+```
+geoLen(1)    1..12
+geohash      geohash characters (base32; ≈1 km cell at 6 chars)
+nameLen(1)   0..32
+name         UTF-8 nickname of the sender (may be empty)
+```
+
+- Signed (§3), broadcast, TTL 2. No latitude/longitude ever goes on the wire —
+  the geohash cell is the disclosure boundary (a coarse area of a few km at 6
+  characters).
+- Sent on-demand from the Nearby screen ("📍" button); receivers show the
+  recent pings (last 5 minutes) on the Nearby screen, and the sender adds its
+  own ping locally after sending.
 
 ## 7. Identity & keys (summary — details in Phase D)
 

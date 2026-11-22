@@ -144,6 +144,33 @@ class RoomMigrationTest {
         }
     }
 
+    @Test
+    fun migrateFromV7ToV8CreatesTheReactionTable() {
+        // A v7 database (the pre-Feature-1 schema).
+        val v7 = helper.createDatabase(TEST_DB, 7)
+        v7.close()
+
+        // Walk it up: 7 -> 8.
+        val migrated = helper.runMigrationsAndValidate(TEST_DB, 8, false, MeshlineDatabase.MIGRATION_7_8)
+        try {
+            // The new table exists and is empty.
+            migrated.query("SELECT name FROM sqlite_master WHERE type='table' AND name='message_reactions'").use { c ->
+                assertTrue("message_reactions must exist after v7->v8", c.moveToFirst())
+            }
+            // The pre-existing tables survive the migration.
+            migrated.query("SELECT COUNT(*) FROM `contacts`").use { c ->
+                c.moveToFirst()
+                assertEquals(0, c.getInt(0))
+            }
+            migrated.query("SELECT COUNT(*) FROM `groups`").use { c ->
+                c.moveToFirst()
+                assertEquals(0, c.getInt(0))
+            }
+        } finally {
+            migrated.close()
+        }
+    }
+
     private companion object {
         const val TEST_DB = "migration-test.db"
     }

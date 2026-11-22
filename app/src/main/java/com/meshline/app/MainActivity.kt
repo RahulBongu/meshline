@@ -144,6 +144,9 @@ class MainActivity : ComponentActivity() {
                     onSetActiveChannel = { channel -> setActiveChannel(channel) },
                     onSetInternetRelay = { enabled -> setInternetRelay(enabled) },
                     onExecuteCommand = { cmdText, ch -> executeCommand(cmdText, ch) },
+                    onSendTyping = { peerIdHex -> sendTyping(peerIdHex) },
+                    onSendReaction = { targetIdHex, emoji -> sendReaction(targetIdHex, emoji) },
+                    onSendGeoPing = { sendGeoPing() },
                 )
             }
         }
@@ -160,6 +163,33 @@ class MainActivity : ComponentActivity() {
             Intent(this, BleMeshService::class.java)
                 .setAction(BleMeshService.ACTION_SEND_PUBLIC)
                 .putExtra(BleMeshService.EXTRA_TEXT, text)
+        )
+    }
+
+    /** Feature 2: sends a typing indicator packet to [peerIdHex]. */
+    private fun sendTyping(peerIdHex: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SEND_TYPING)
+                .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+        )
+    }
+
+    /** Feature 1: toggles the local identity's reaction on a public broadcast message. */
+    private fun sendReaction(targetIdHex: String, emoji: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_TOGGLE_REACTION)
+                .putExtra(BleMeshService.EXTRA_TARGET_ID, targetIdHex)
+                .putExtra(BleMeshService.EXTRA_EMOJI, emoji)
+        )
+    }
+
+    /** Feature 3: broadcasts this device's location as a geo ping. */
+    private fun sendGeoPing() {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SEND_GEO_PING)
         )
     }
 
@@ -366,6 +396,9 @@ private fun App(
     onSetActiveChannel: (channel: String) -> Unit,
     onSetInternetRelay: (enabled: Boolean) -> Unit,
     onExecuteCommand: (commandText: String, activeChannel: String) -> Unit,
+    onSendTyping: (peerIdHex: String) -> Unit,
+    onSendReaction: (targetIdHex: String, emoji: String) -> Unit,
+    onSendGeoPing: () -> Unit,
     autoStartMesh: Boolean = true,
 ) {
     val colors = MeshlineDesign.colors
@@ -405,6 +438,9 @@ private fun App(
     val privatePeers by BleMeshService.privatePeers.collectAsState()
     val keyChange by BleMeshService.keyChange.collectAsState()
     val publicChatMessages by BleMeshService.publicChatMessages.collectAsState()
+    val reactions by BleMeshService.reactions.collectAsState()
+    val typingPeers by BleMeshService.typingPeers.collectAsState()
+    val geoPings by BleMeshService.geoPings.collectAsState()
     val groups by BleMeshService.groups.collectAsState()
     val groupMessages by BleMeshService.groupMessages.collectAsState()
     val pendingGroupInvites by BleMeshService.pendingGroupInvites.collectAsState()
@@ -566,6 +602,8 @@ private fun App(
                     onSend = { text -> onSendPrivate(peer.peerIdHex, text) },
                     onResend = { messageId -> onResend(messageId) },
                     onClearChat = { onClearChat(peer.peerIdHex) },
+                    isTyping = typingPeers.contains(peer.peerIdHex),
+                    onTyping = { onSendTyping(peer.peerIdHex) },
                     onBack = { screen = Screen.MAIN },
                 )
             }
@@ -742,6 +780,10 @@ private fun App(
                                 onGrantPermissions = onGrantPermissions,
                                 onSendPublic = onSendPublic,
                                 onExecuteCommand = { cmd -> onExecuteCommand(cmd, "#general") },
+                                reactions = reactions,
+                                geoPings = geoPings,
+                                onToggleReaction = onSendReaction,
+                                onSendGeoPing = onSendGeoPing,
                             )
                         }
                         MainTab.CHANNELS -> {

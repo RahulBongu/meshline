@@ -150,6 +150,132 @@ object Payloads {
         return Receipt(kind, payload.copyOfRange(1, 33))
     }
 
+    // ---- REACTION (§6.8) ----
+    // kind(1) | emojiLen(1) | emoji(emojiLen, UTF-8) | targetId(32)
+    // Both directed-to-message broadcast; signed, never relayed into the target.
+    data class ReactionPayload(val kind: Byte, val emoji: String, val targetId: ByteArray) {
+        companion object {
+            const val KIND_ADD: Byte = 1
+            const val KIND_REMOVE: Byte = 2
+            const val MAX_EMOJI_BYTES: Int = 8
+        }
+
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is ReactionPayload) return false
+            return kind == other.kind && emoji == other.emoji && targetId.contentEquals(other.targetId)
+        }
+
+        override fun hashCode(): Int =
+            31 * (31 * kind.toInt() + emoji.hashCode()) + targetId.contentHashCode()
+    }
+
+    fun encodeReaction(reaction: ReactionPayload): ByteArray {
+        if (reaction.kind != ReactionPayload.KIND_ADD && reaction.kind != ReactionPayload.KIND_REMOVE) {
+            throw PacketException.InvalidPacket("reaction kind must be ADD(1) or REMOVE(2), got ${reaction.kind}")
+        }
+        require(reaction.targetId.size == 32) { "reaction targetId must be 32 bytes" }
+        val emojiBytes = reaction.emoji.toByteArray(Charsets.UTF_8)
+        if (emojiBytes.isEmpty() || emojiBytes.size > ReactionPayload.MAX_EMOJI_BYTES) {
+            throw PacketException.InvalidPacket(
+                "reaction emoji must be 1..${ReactionPayload.MAX_EMOJI_BYTES} UTF-8 bytes, got ${emojiBytes.size}"
+            )
+        }
+        val buf = ByteBuffer.allocate(2 + emojiBytes.size + 32).order(ByteOrder.BIG_ENDIAN)
+        buf.put(reaction.kind)
+        buf.put(emojiBytes.size.toByte())
+        buf.put(emojiBytes)
+        buf.put(reaction.targetId)
+        return buf.array()
+    }
+
+    fun decodeReaction(payload: ByteArray): ReactionPayload {
+        if (payload.size < 2 + 1 + 32) {
+            throw PacketException.InvalidPacket("reaction payload too short: ${payload.size} bytes")
+        }
+        val kind = payload[0]
+        if (kind != ReactionPayload.KIND_ADD && kind != ReactionPayload.KIND_REMOVE) {
+            throw PacketException.InvalidPacket("reaction kind must be ADD(1) or REMOVE(2), got $kind")
+        }
+        val emojiLen = payload[1].toInt() and 0xFF
+        if (emojiLen < 1) throw PacketException.InvalidPacket("reaction emoji must not be empty")
+        if (emojiLen > ReactionPayload.MAX_EMOJI_BYTES) {
+            throw PacketException.InvalidPacket("reaction emoji exceeds ${ReactionPayload.MAX_EMOJI_BYTES} bytes")
+        }
+        if (payload.size != 2 + emojiLen + 32) {
+            throw PacketException.InvalidPacket(
+                "reaction payload length mismatch: expected ${2 + emojiLen + 32}, got ${payload.size}"
+            )
+        }
+        val emoji = payload.copyOfRange(2, 2 + emojiLen).toString(Charsets.UTF_8)
+        if (emoji.isEmpty() || emoji.any { it.isISOControl() }) {
+            throw PacketException.InvalidPacket("reaction emoji is empty or contains control characters")
+        }
+        val targetId = payload.copyOfRange(2 + emojiLen, 2 + emojiLen + 32)
+        return ReactionPayload(kind, emoji, targetId)
+    }
+
+    // ---- TYPING (§6.9) ----
+    // Signed, directed to the peer we are typing to. Empty payload; the
+    // recipient is in the header (HAS_RECIPIENT).
+
+    fun encodeTyping(): ByteArray = ByteArray(0)
+
+    fun decodeTyping(payload: ByteArray) {
+        if (payload.isNotEmpty()) {
+            throw PacketException.InvalidPacket("typing payload must be empty, got ${payload.size} bytes")
+        }
+    }
+
+    // ---- GEO_PING (§6.10) ----
+    // geoLen(1) | geohash(geoLen) | nameLen(1) | name(nameLen)
+    // Signed, broadcast, TTL 2. Carries only a privacy-safe geohash (no lat/lon).
+    data class GeoPingPayload(val geohash: String, val name: String) {
+        companion object {
+            const val MAX_GEOHASH_CHARS: Int = 12
+            const val MAX_NAME_CHARS: Int = 32
+        }
+    }
+
+    fun encodeGeoPing(ping: GeoPingPayload): ByteArray {
+        val geoBytes = ping.geohash.toByteArray(Charsets.UTF_8)
+        if (geoBytes.isEmpty() || geoBytes.size > GeoPingPayload.MAX_GEOHASH_CHARS) {
+            throw PacketException.InvalidPacket(
+                "geo ping geohash must be 1..${GeoPingPayload.MAX_GEOHASH_CHARS} bytes"
+            )
+        }
+        val nameBytes = ping.name.toByteArray(Charsets.UTF_8)
+        if (nameBytes.size > GeoPingPayload.MAX_NAME_CHARS) {
+            throw PacketException.InvalidPacket("geo ping name must be <= ${GeoPingPayload.MAX_NAME_CHARS} bytes")
+        }
+        val buf = ByteBuffer.allocate(2 + geoBytes.size + nameBytes.size).order(ByteOrder.BIG_ENDIAN)
+        buf.put(geoBytes.size.toByte())
+        buf.put(geoBytes)
+        buf.put(nameBytes.size.toByte())
+        buf.put(nameBytes)
+        return buf.array()
+    }
+
+    fun decodeGeoPing(payload: ByteArray): GeoPingPayload {
+        if (payload.size < 2) throw PacketException.InvalidPacket("geo ping payload too short")
+        val geoLen = payload[0].toInt() and 0xFF
+        val nameLen = payload[1 + geoLen].toInt() and 0xFF
+        if (geoLen < 1 || geoLen > GeoPingPayload.MAX_GEOHASH_CHARS) {
+            throw PacketException.InvalidPacket("geo ping geohash length invalid")
+        }
+        if (payload.size != 2 + geoLen + nameLen) {
+            throw PacketException.InvalidPacket(
+                "geo ping payload length mismatch: expected ${2 + geoLen + nameLen}, got ${payload.size}"
+            )
+        }
+        val geohash = payload.copyOfRange(1, 1 + geoLen).toString(Charsets.UTF_8)
+        if (geohash.any { it.isISOControl() }) {
+            throw PacketException.InvalidPacket("geo ping geohash contains control characters")
+        }
+        val name = payload.copyOfRange(2 + geoLen, 2 + geoLen + nameLen).toString(Charsets.UTF_8)
+        return GeoPingPayload(geohash, name)
+    }
+
     // ---- LEAVE (§6.5) ----
 
     fun encodeLeave(senderId: ByteArray): ByteArray {

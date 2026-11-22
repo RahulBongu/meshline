@@ -45,8 +45,10 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.meshline.app.service.GeoPingUi
 import com.meshline.app.service.MeshStatsSnapshot
 import com.meshline.app.service.PublicChatMessage
+import com.meshline.app.service.ReactionUi
 import com.meshline.app.transport.PeerInfo
 import com.meshline.app.transport.RelayStatus
 import com.meshline.app.transport.TransportMode
@@ -72,11 +74,16 @@ fun NearbyScreen(
     onGrantPermissions: () -> Unit,
     onSendPublic: (String) -> Unit,
     onExecuteCommand: (String) -> Unit,
+    reactions: Map<String, List<ReactionUi>> = emptyMap(),
+    geoPings: List<GeoPingUi> = emptyList(),
+    onToggleReaction: (String, String) -> Unit = { _, _ -> },
+    onSendGeoPing: () -> Unit = {},
 ) {
     val colors = MeshlineDesign.colors
     var draft by remember { mutableStateOf("") }
     var showDiagnostics by remember { mutableStateOf(false) }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val geoPingsVisible = geoPings.filter { System.currentTimeMillis() - it.timestampMs < GEO_PING_VISIBLE_MS }
 
     Surface(color = colors.background, modifier = Modifier.fillMaxSize()) {
         Column(
@@ -214,6 +221,61 @@ fun NearbyScreen(
                 }
             }
 
+            // Feature 3: Geo pings section (recent pings received/sent on this node).
+            if (geoPingsVisible.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .background(colors.surface, RoundedCornerShape(12.dp))
+                        .border(1.dp, colors.border, RoundedCornerShape(12.dp))
+                        .padding(12.dp),
+                ) {
+                    Text(
+                        text = "GEO PINGS",
+                        color = colors.textSecondary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    geoPingsVisible.forEach { ping ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = ping.nickname,
+                                color = colors.textPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = ping.geohash,
+                                color = colors.primary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = geoPingAge(ping.timestampMs),
+                                color = colors.textMuted,
+                                fontSize = 10.sp,
+                            )
+                            Spacer(Modifier.weight(1f))
+                            if (ping.hops > 0) {
+                                Text(
+                                    text = "${ping.hops} Hop${if (ping.hops != 1) "s" else ""}",
+                                    color = colors.primary,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                        if (ping != geoPingsVisible.last()) {
+                            Spacer(Modifier.height(2.dp))
+                        }
+                    }
+                }
+            }
+
             // Public Broadcast Feed Header
             Row(
                 modifier = Modifier
@@ -325,6 +387,11 @@ fun NearbyScreen(
                                     fontSize = 14.sp,
                                     lineHeight = 20.sp,
                                 )
+                                // Feature 1: emoji reaction strip under the message.
+                                ReactionBar(
+                                    reactions = reactions[m.messageIdHex] ?: emptyList(),
+                                    onTap = { emoji -> onToggleReaction(m.messageIdHex, emoji) },
+                                )
                             }
                         }
                     }
@@ -384,6 +451,23 @@ fun NearbyScreen(
 
                 Spacer(Modifier.width(8.dp))
 
+                // Feature 3: geo ping button — broadcasts this node's location
+                // as a coarse geohash so people nearby can find each other.
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(9999.dp))
+                        .background(colors.surfaceElevated)
+                        .border(1.dp, colors.border, RoundedCornerShape(9999.dp))
+                        .clickable { onSendGeoPing() }
+                        .padding(4.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "📍", color = colors.textSecondary, fontSize = 16.sp)
+                }
+
+                Spacer(Modifier.width(4.dp))
+
                 Box(
                     modifier = Modifier
                         .size(46.dp)
@@ -406,6 +490,68 @@ fun NearbyScreen(
                         fontSize = 16.sp,
                     )
                 }
+            }
+        }
+    }
+}
+
+/** Emojis offered as quick-tap reaction targets (Feature 1). */
+private val COMMON_EMOJIS = listOf("👍", "❤️", "😂", "🥳", "👏", "🙌", "🔥", "😮")
+
+/** How long a geo ping stays visible in the Nearby section (Feature 3). */
+private const val GEO_PING_VISIBLE_MS = 5L * 60 * 1000
+
+private fun geoPingAge(tsMs: Long): String {
+    val d = System.currentTimeMillis() - tsMs
+    return when {
+        d < 60_000 -> "${d / 1000}s ago"
+        d < 3_600_000 -> "${d / 60_000}m ago"
+        else -> "${d / 3_600_000}h ago"
+    }
+}
+
+/**
+ * Feature 1: reaction strip under a public broadcast message. Shows the
+ * common emojis (plus any extra emojis other nodes use) with counts;
+ * tapping toggles the local identity's reaction on the message.
+ */
+@Composable
+private fun ReactionBar(
+    reactions: List<ReactionUi>,
+    onTap: (String) -> Unit,
+) {
+    val colors = MeshlineDesign.colors
+    val rows = if (reactions.isEmpty()) {
+        COMMON_EMOJIS
+    } else {
+        (COMMON_EMOJIS + reactions.map { it.emoji }.filterNot { it in COMMON_EMOJIS }).distinct()
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 3.dp),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        rows.forEach { emoji ->
+            val ui = reactions.firstOrNull { it.emoji == emoji }
+            Box(
+                modifier = Modifier
+                    .padding(end = 4.dp)
+                    .clip(RoundedCornerShape(9999.dp))
+                    .background(if (ui?.own == true) colors.primarySoft else colors.surfaceContainerLow)
+                    .border(
+                        1.dp,
+                        if (ui?.own == true) colors.primary else colors.border,
+                        RoundedCornerShape(9999.dp),
+                    )
+                    .clickable { onTap(emoji) }
+                    .padding(horizontal = 7.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    text = if (ui != null && ui.count > 0) "$emoji ${ui.count}" else emoji,
+                    color = colors.textPrimary,
+                    fontSize = 10.sp,
+                )
             }
         }
     }

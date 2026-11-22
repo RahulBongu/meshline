@@ -164,6 +164,9 @@ class ContactsRepository(private val context: Context) : ContactDirectory {
         runCatching { open()?.contactsDao()?.deleteAll() }
     }
 
+    /** The message-reactions store (Feature 1). Null when closed. */
+    fun reactionsDao(): ReactionsDao? = open()?.reactionsDao()
+
     fun close() {
         isClosed = true
         val target = db
