@@ -46,6 +46,10 @@ Private 1-on-1 messages are end-to-end encrypted using the **Noise XX** protocol
   - Emoji reactions on public broadcasts (`REACTION` — signed, broadcast, TTL 7; stored in the encrypted DB).
   - "Typing…" indicators in private chats (`TYPING` — signed, directed to the peer, TTL 1).
   - Opt-in coarse-area geo pings with privacy-safe geohashes (`GEO_PING` — signed, broadcast, TTL 2).
+- **Group Member Management (Feature 6)**: Admins remove members and transfer admin rights (`GROUP_CONTROL` kinds 4/5); the epoch rotates on every roster change, and the removed/transferred-away member is told via the broadcast control.
+- **Group Roster Display (Feature 7)**: The group chat header has a MEMBERS panel — nicknames, a "You" marker, the 👑 admin badge, and Transfer/Remove actions for admins.
+- **Nearby Peer Roster (Feature 8)**: The Nearby screen has a tapable "NEARBY PEERS" roster — nickname, signal strength, hops, and a 💬 chat button.
+- **Background Notifications (Feature 9)**: New private and group messages post a "New message from …" notification (channel "New Messages").
 - **Voice notes & small images (Feature 4)**: Send compressed voice notes (up to 30 s) and small images (compressed to JPEG) from the DM composer. Media travels inside the Noise XX session like text — same outbox, same receipts, stored in the encrypted `messages` table.
 - **Reply-to quoting (Feature 5)**: Tap the "↩" on any private message; the next message quotes it (or carries a caption with media).
 - **Local message search (Feature 6)**: Type in the Chats search bar to find messages — matches open the conversation.

@@ -14,7 +14,9 @@ import java.nio.ByteOrder
  *    Payload: epoch(2 BE) | nonce(8) | ciphertext(N).
  *    Associated data: groupTag(8) | epoch(2 BE) | senderId(8) (18 bytes).
  *  - GROUP_CONTROL (0x0A): recipientId = 8-byte group tag, HAS_SIGNATURE set (signed by admin).
- *    Payload: epoch(2 BE) | kind(1) | nameLen(1) | name | rosterLen(1) | roster.
+ *    Payload: epoch(2 BE) | kind(1) | groupId(16) | nameLen(1) | name | rosterLen(1) | roster
+ *    [ | newAdmin(32) for kind=TRANSFER_ADMIN]. Kinds: 1 leave, 2 rename, 3 roster-update,
+ *    4 remove-member, 5 transfer-admin (PROTOCOL.md §6.7, GROUPS_DESIGN.md §6).
  */
 object GroupPayloads {
 
@@ -72,7 +74,11 @@ object GroupPayloads {
     enum class ControlKind(val code: Byte) {
         LEAVE(1),
         RENAME(2),
-        ROSTER_UPDATE(3);
+        ROSTER_UPDATE(3),
+        /** Admin-only: removes one roster member (new epoch + new key, Feature 6). */
+        REMOVE_MEMBER(4),
+        /** Admin-only: transfers admin rights to another roster member (new epoch, Feature 6). */
+        TRANSFER_ADMIN(5);
 
         companion object {
             fun fromCode(code: Byte): ControlKind? = entries.firstOrNull { it.code == code }
@@ -82,9 +88,40 @@ object GroupPayloads {
     data class GroupControl(
         val epoch: Int,
         val kind: ControlKind,
+        /** Identifies the group the control belongs to (v1+; the group tag rotates per epoch). */
+        val groupId: ByteArray,
         val name: String,
         val roster: List<RosterMember>,
-    )
+        /** For [ControlKind.TRANSFER_ADMIN]: the new admin's Ed25519 public key. */
+        val newAdmin: ByteArray? = null,
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is GroupControl) return false
+            return epoch == other.epoch &&
+                kind == other.kind &&
+                groupId.contentEquals(other.groupId) &&
+                name == other.name &&
+                roster == other.roster &&
+                newAdmin.contentEqualsOrNull(other.newAdmin)
+        }
+
+        override fun hashCode(): Int {
+            var h = epoch
+            h = 31 * h + kind.hashCode()
+            h = 31 * h + groupId.contentHashCode()
+            h = 31 * h + name.hashCode()
+            h = 31 * h + roster.hashCode()
+            h = 31 * h + (newAdmin?.contentHashCode() ?: 0)
+            return h
+        }
+
+        private fun ByteArray?.contentEqualsOrNull(other: ByteArray?): Boolean {
+            if (this == null && other == null) return true
+            if (this == null || other == null) return false
+            return contentEquals(other)
+        }
+    }
 
     data class GroupInvite(
         val groupId: ByteArray,
@@ -179,9 +216,17 @@ object GroupPayloads {
     // ---- GROUP_CONTROL Encoding / Decoding ----
 
     fun encodeGroupControl(ctrl: GroupControl): ByteArray {
+        require(ctrl.groupId.size == GROUP_ID_BYTES) { "groupId must be $GROUP_ID_BYTES bytes" }
         val nameBytes = ctrl.name.trim().toByteArray(Charsets.UTF_8)
         require(nameBytes.size <= 255) { "name exceeds 255 bytes" }
         require(ctrl.roster.size <= MAX_MEMBERS) { "roster exceeds max members ($MAX_MEMBERS)" }
+        if (ctrl.kind == ControlKind.TRANSFER_ADMIN) {
+            require(ctrl.newAdmin != null && ctrl.newAdmin!!.size == 32) {
+                "TRANSFER_ADMIN requires the new admin's 32-byte Ed25519 pk"
+            }
+        } else {
+            require(ctrl.newAdmin == null) { "newAdmin only valid for TRANSFER_ADMIN" }
+        }
 
         var rosterBytesLen = 0
         val encodedRoster = mutableListOf<ByteArray>()
@@ -197,25 +242,29 @@ object GroupPayloads {
             rosterBytesLen += b.size
         }
 
-        val total = 2 + 1 + 1 + nameBytes.size + 1 + rosterBytesLen
+        val total = 2 + 1 + GROUP_ID_BYTES + 1 + nameBytes.size + 1 + rosterBytesLen +
+            (if (ctrl.newAdmin != null) 32 else 0)
         val buf = ByteBuffer.allocate(total).order(ByteOrder.BIG_ENDIAN)
         buf.putShort((ctrl.epoch and 0xFFFF).toShort())
         buf.put(ctrl.kind.code)
+        buf.put(ctrl.groupId)
         buf.put(nameBytes.size.toByte())
         buf.put(nameBytes)
         buf.put(ctrl.roster.size.toByte())
         for (b in encodedRoster) buf.put(b)
+        ctrl.newAdmin?.let { buf.put(it) }
         return buf.array()
     }
 
     fun decodeGroupControl(payload: ByteArray): GroupControl {
-        if (payload.size < 5) throw PacketException.InvalidPacket("group control too short (${payload.size})")
+        if (payload.size < 2 + 1 + GROUP_ID_BYTES + 1) throw PacketException.InvalidPacket("group control too short (${payload.size})")
         val buf = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
         val epoch = buf.short.toInt() and 0xFFFF
-        val kindCode = buf.get()
-        val kind = ControlKind.fromCode(kindCode) ?: throw PacketException.InvalidPacket("unknown control kind $kindCode")
+        val kind = ControlKind.fromCode(buf.get()) ?: throw PacketException.InvalidPacket("unknown control kind")
+        val groupId = ByteArray(GROUP_ID_BYTES)
+        buf.get(groupId)
         val nameLen = buf.get().toInt() and 0xFF
-        if (buf.remaining() < nameLen + 1) throw PacketException.InvalidPacket("control name truncated")
+        if (buf.remaining() < nameLen + 2) throw PacketException.InvalidPacket("control name truncated")
         val nameBytes = ByteArray(nameLen)
         buf.get(nameBytes)
         val name = nameBytes.toString(Charsets.UTF_8)
@@ -233,7 +282,13 @@ object GroupPayloads {
             val avatar = buf.get()
             roster.add(RosterMember(edPk, nick, avatar))
         }
-        return GroupControl(epoch, kind, name, roster)
+        val newAdmin: ByteArray? = if (kind == ControlKind.TRANSFER_ADMIN) {
+            if (buf.remaining() < 32) throw PacketException.InvalidPacket("transfer admin pk truncated")
+            ByteArray(32).also { buf.get(it) }
+        } else {
+            null
+        }
+        return GroupControl(epoch, kind, groupId, name, roster, newAdmin)
     }
 
     // ---- Group Invite Encoding / Decoding ----

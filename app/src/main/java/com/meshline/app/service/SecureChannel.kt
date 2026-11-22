@@ -101,6 +101,8 @@ class SecureChannel(
     private val retentionDays: () -> Int = { 0 },
     private val nowProvider: () -> Long = { System.currentTimeMillis() },
     private val onGroupInvite: ((ByteArray) -> Unit)? = null,
+    /** Invoked once for every received, deduplicated private message (Feature 9: notifications). */
+    private val onMessageReceived: ((peerIdHex: String, text: String, mediaType: String?) -> Unit)? = null,
 ) {
     /** The Noise session engine. */
     val sessions = SessionManager(
@@ -192,6 +194,7 @@ class SecureChannel(
             if (com.meshline.app.protocol.GroupPayloads.isGroupInvite(result.envelope.text)) {
                 onGroupInvite?.invoke(result.envelope.text)
             } else {
+                onMessageReceived?.invoke(peerHex, result.envelope.text.toString(Charsets.UTF_8), result.envelope.mediaType)
                 messageStore.upsert(
                     MessageEntity(
                         messageIdHex = hex(result.envelope.messageId),

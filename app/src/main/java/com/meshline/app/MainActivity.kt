@@ -142,6 +142,8 @@ class MainActivity : ComponentActivity() {
                     onAcceptGroupInvite = { groupId -> acceptGroupInvite(groupId) },
                     onDeclineGroupInvite = { groupId -> declineGroupInvite(groupId) },
                     onLeaveGroup = { groupId -> leaveGroup(groupId) },
+                    onRemoveMember = { groupId, memberId -> removeGroupMember(groupId, memberId) },
+                    onTransferAdmin = { groupId, memberId -> transferAdmin(groupId, memberId) },
                     onClearGroupUnread = { groupId -> clearGroupUnread(groupId) },
                     onSendChannelMessage = { channel, text -> sendChannelMessage(channel, text) },
                     onSetActiveChannel = { channel -> setActiveChannel(channel) },
@@ -326,6 +328,24 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun removeGroupMember(groupIdHex: String, memberIdHex: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_REMOVE_GROUP_MEMBER)
+                .putExtra(BleMeshService.EXTRA_GROUP_ID, groupIdHex)
+                .putExtra(BleMeshService.EXTRA_MEMBER_ID, memberIdHex)
+        )
+    }
+
+    private fun transferAdmin(groupIdHex: String, newAdminIdHex: String) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_TRANSFER_ADMIN)
+                .putExtra(BleMeshService.EXTRA_GROUP_ID, groupIdHex)
+                .putExtra(BleMeshService.EXTRA_MEMBER_ID, newAdminIdHex)
+        )
+    }
+
     private fun clearGroupUnread(groupIdHex: String) {
         startForegroundService(
             Intent(this, BleMeshService::class.java)
@@ -416,6 +436,8 @@ private fun App(
     onAcceptGroupInvite: (groupId: String) -> Unit,
     onDeclineGroupInvite: (groupId: String) -> Unit,
     onLeaveGroup: (groupId: String) -> Unit,
+    onRemoveMember: (groupIdHex: String, memberIdHex: String) -> Unit,
+    onTransferAdmin: (groupIdHex: String, memberIdHex: String) -> Unit,
     onClearGroupUnread: (groupId: String) -> Unit,
     onSendChannelMessage: (channel: String, text: String) -> Unit,
     onSetActiveChannel: (channel: String) -> Unit,
@@ -646,7 +668,10 @@ private fun App(
                 GroupChatScreen(
                     group = group,
                     messages = groupMsgList,
+                    selfIdHex = id.senderId.joinToString("") { "%02x".format(it) },
                     onSend = { text -> onSendGroupMessage(group.groupIdHex, text) },
+                    onRemoveMember = { memberIdHex -> onRemoveMember(group.groupIdHex, memberIdHex) },
+                    onTransferAdmin = { memberIdHex -> onTransferAdmin(group.groupIdHex, memberIdHex) },
                     onLeaveGroup = {
                         onLeaveGroup(group.groupIdHex)
                         screen = Screen.MAIN
@@ -813,6 +838,10 @@ private fun App(
                                 geoPings = geoPings,
                                 onToggleReaction = onSendReaction,
                                 onSendGeoPing = onSendGeoPing,
+                                onOpenChat = { peerIdHex ->
+                                    onOpenChat(peerIdHex)
+                                    screen = Screen.PRIVATE_CHAT
+                                },
                             )
                         }
                         MainTab.CHANNELS -> {

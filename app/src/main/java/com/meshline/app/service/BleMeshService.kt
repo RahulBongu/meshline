@@ -22,6 +22,7 @@ import com.meshline.app.groups.GroupItem
 import com.meshline.app.groups.GroupManager
 import com.meshline.app.groups.GroupMessageUi
 import com.meshline.app.groups.PendingGroupInvite
+import com.meshline.app.groups.RosterChange
 import com.meshline.app.profile.ProfileStore
 import com.meshline.app.protocol.Geohash
 import com.meshline.app.protocol.GroupPayloads
@@ -145,6 +146,8 @@ class BleMeshService : Service() {
     @Volatile private var channelManager: ChannelManager? = null
     @Volatile private var relayTransport: InternetRelayTransport? = null
     private val peerProfiles = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Int>>()
+    /** Feature 8: last observed content-packet hop count per peer hex (from the router telemetry). */
+    private val lastHopsByPeer = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     /** Typing indicator expiries: peerIdHex -> absolute time after which it lapses. */
     private val typingExpiryAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
@@ -221,6 +224,7 @@ class BleMeshService : Service() {
             localIdentity = id,
             localNickname = { profileStore.load().nickname },
             localAvatarIndex = { profileStore.load().avatarIndex.toByte() },
+            onNewMessage = { msg -> notifyGroupMessage(msg.groupIdHex, msg) },
         )
         groupManager = gm
 
@@ -252,6 +256,9 @@ class BleMeshService : Service() {
             retentionDays = { retentionStore.load().days },
             onGroupInvite = { inviteBytes ->
                 gm.offerInvite(inviteBytes)
+            },
+            onMessageReceived = { peerIdHex, text, mediaType ->
+                notifyPrivateMessage(peerIdHex, text, mediaType)
             },
         )
         secureChannel = channel
@@ -305,6 +312,9 @@ class BleMeshService : Service() {
                     when (pkt.type) {
                         PacketType.GROUP_MESSAGE -> {
                             gm.onIncomingGroupPacket(pkt)
+                        }
+                        PacketType.GROUP_CONTROL -> {
+                            gm.onIncomingGroupControl(pkt)
                         }
                         PacketType.CHANNEL_MESSAGE -> {
                             val channelMsg = GroupPayloads.decodeChannelMessage(pkt.payload)
@@ -406,7 +416,16 @@ class BleMeshService : Service() {
             }
         }
 
-        jobs += scope.launch { t.debugPeers.collect { setPeers(it) } }
+        jobs += scope.launch {
+            t.debugPeers.collect { v ->
+                // Feature 8: enrich the transport snapshots with the ANNOUNCE
+                // nicknames (peerProfiles) and the last observed hop count.
+                setPeers(v.map { it.copy(
+                    nickname = peerProfiles[it.peerIdHex]?.first ?: it.nickname,
+                    lastHops = lastHopsByPeer[it.peerIdHex] ?: it.lastHops,
+                ) })
+            }
+        }
         jobs += scope.launch { t.lastGattError.collect { if (it != null) setGattError(it) } }
         jobs += scope.launch { t.advertiseSupported.collect { setAdvertiseSupported(it) } }
 
@@ -428,6 +447,11 @@ class BleMeshService : Service() {
                     }
                 }
                 val hops = (PacketCodec.MAX_TTL - pkt.ttl).coerceAtLeast(0)
+                // Feature 8: remember the hop count of the last packet seen
+                // from this peer for the Nearby roster.
+                if (hops > 0) {
+                    lastHopsByPeer[pkt.senderId.joinToString("") { "%02x".format(it) }] = hops
+                }
                 pushMessage(
                     ReceivedMessageInfo(
                         senderIdHex = pkt.senderId.joinToString("") { "%02x".format(it) },
@@ -707,6 +731,32 @@ class BleMeshService : Service() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Feature 6: group member management (admin removal, admin transfer)
+    // ------------------------------------------------------------------
+
+    /** Broadcasts an admin roster change: the control to members, the invites to the new epoch. */
+    private suspend fun sendGroupRosterChange(change: RosterChange) {
+        val sc = secureChannel ?: return
+        val ctrlBytes = GroupPayloads.encodeGroupControl(change.control)
+        for (peerIdHex in change.controlPeerIds) sc.sendRaw(peerIdHex, ctrlBytes)
+        for ((peerIdHex, inviteBytes) in change.invites) sc.sendRaw(peerIdHex, inviteBytes)
+    }
+
+    /** Feature 6: the admin removes [memberIdHex] from the group (broadcast + epoch rotation). */
+    suspend fun removeGroupMember(groupIdHex: String, memberIdHex: String) {
+        val gm = groupManager ?: return
+        val change = gm.removeMember(groupIdHex, memberIdHex) ?: return
+        sendGroupRosterChange(change)
+    }
+
+    /** Feature 6: the admin transfers admin rights to [newAdminIdHex] (broadcast + epoch rotation). */
+    suspend fun transferAdmin(groupIdHex: String, newAdminIdHex: String) {
+        val gm = groupManager ?: return
+        val change = gm.transferAdmin(groupIdHex, newAdminIdHex) ?: return
+        sendGroupRosterChange(change)
+    }
+
     /** Executes IRC-style slash command. */
     suspend fun executeCommand(commandText: String, activeChannel: String = "#general") {
         val result = CommandParser.parse(commandText)
@@ -953,6 +1003,16 @@ class BleMeshService : Service() {
                     groupManager?.leaveGroup(gid)
                 }
             }
+            ACTION_REMOVE_GROUP_MEMBER -> {
+                val gid = intent.getStringExtra(EXTRA_GROUP_ID)
+                val mid = intent.getStringExtra(EXTRA_MEMBER_ID)
+                if (gid != null && mid != null) scope.launch { removeGroupMember(gid, mid) }
+            }
+            ACTION_TRANSFER_ADMIN -> {
+                val gid = intent.getStringExtra(EXTRA_GROUP_ID)
+                val mid = intent.getStringExtra(EXTRA_MEMBER_ID)
+                if (gid != null && mid != null) scope.launch { transferAdmin(gid, mid) }
+            }
             ACTION_CLEAR_GROUP_UNREAD -> {
                 intent.getStringExtra(EXTRA_GROUP_ID)?.let { gid ->
                     groupManager?.clearUnread(gid)
@@ -1012,6 +1072,49 @@ class BleMeshService : Service() {
         setPendingGroupInvites(emptyList())
         setPublicMessages(emptyList())
         setReactions(emptyMap())
+    }
+
+    // ------------------------------------------------------------------
+    // Feature 9: background notifications for received messages
+    // ------------------------------------------------------------------
+
+    private val messageNotifySeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Single-line preview of a message body, truncated to 100 chars. */
+    private fun previewText(text: String): String {
+        val singleLine = text.trim().lineSequence().firstOrNull()?.trim() ?: ""
+        return singleLine.take(100)
+    }
+
+    private fun notifyPrivateMessage(peerIdHex: String, text: String, mediaType: String?) {
+        val nickname = peerProfiles[peerIdHex]?.first ?: peerIdHex.take(8)
+        val preview = when {
+            mediaType != null && text.isBlank() ->
+                if (mediaType.contains("audio")) "🎙 Voice note" else "🖼 Photo"
+            else -> previewText(text)
+        }
+        postMessageNotification("New message from $nickname", preview)
+    }
+
+    private fun notifyGroupMessage(groupIdHex: String, msg: GroupMessageUi) {
+        val groupName = groupManager?.getGroup(groupIdHex)?.name ?: "Mesh Group"
+        postMessageNotification("New message in $groupName", "${msg.senderNickname}: ${previewText(msg.text)}")
+    }
+
+    private fun postMessageNotification(title: String, text: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        nm.createNotificationChannel(
+            NotificationChannel(MESSAGE_CHANNEL_ID, "New Messages", NotificationManager.IMPORTANCE_DEFAULT)
+        )
+        val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSmallIcon(R.drawable.ic_mesh)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setTimeoutAfter(10_000)
+            .build()
+        nm.notify("meshline:$title", messageNotifySeq.incrementAndGet(), notification)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -1099,6 +1202,9 @@ class BleMeshService : Service() {
         const val ACTION_SEND_TYPING = "com.meshline.app.action.SEND_TYPING"
         const val ACTION_TOGGLE_REACTION = "com.meshline.app.action.TOGGLE_REACTION"
         const val ACTION_SEND_GEO_PING = "com.meshline.app.action.SEND_GEO_PING"
+        // Feature 6: group member management (admin removal / admin transfer).
+        const val ACTION_REMOVE_GROUP_MEMBER = "com.meshline.app.action.REMOVE_GROUP_MEMBER"
+        const val ACTION_TRANSFER_ADMIN = "com.meshline.app.action.TRANSFER_ADMIN"
 
         const val EXTRA_TEXT = "text"
         const val EXTRA_PEER_ID = "peerIdHex"
@@ -1117,8 +1223,10 @@ class BleMeshService : Service() {
         const val EXTRA_MEDIA_DATA = "mediaData"
         const val EXTRA_CAPTION = "caption"
         const val EXTRA_PARENT_ID = "parentIdHex"
+        const val EXTRA_MEMBER_ID = "memberIdHex"
 
         private const val CHANNEL_ID = "meshline_mesh"
+        private const val MESSAGE_CHANNEL_ID = "meshline_messages"
         private const val NOTIFICATION_ID = 1
         private const val INTERVAL_UNITS: Byte = 3
 

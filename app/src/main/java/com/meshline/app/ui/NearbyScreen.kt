@@ -78,6 +78,7 @@ fun NearbyScreen(
     geoPings: List<GeoPingUi> = emptyList(),
     onToggleReaction: (String, String) -> Unit = { _, _ -> },
     onSendGeoPing: () -> Unit = {},
+    onOpenChat: (String) -> Unit = {},
 ) {
     val colors = MeshlineDesign.colors
     var draft by remember { mutableStateOf("") }
@@ -217,6 +218,83 @@ fun NearbyScreen(
                                 Text("Last GATT Status: $lastGattError", color = colors.danger, fontSize = 12.sp)
                             }
                         }
+                    }
+                }
+            }
+
+            // Feature 8: tapable roster of nearby peers (nickname, signal, hops, chat).
+            if (peers.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .background(colors.surface, RoundedCornerShape(12.dp))
+                        .border(1.dp, colors.border, RoundedCornerShape(12.dp))
+                        .padding(12.dp),
+                ) {
+                    Text(
+                        text = "NEARBY PEERS",
+                        color = colors.textSecondary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    peers.forEach { peer ->
+                        val rssi = peer.rssiDbm
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                        ) {
+                            // Signal strength: colored dot + dBm reading.
+                            Box(
+                                Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(when {
+                                        rssi == null -> colors.border
+                                        rssi > -60 -> colors.statusConnected
+                                        else -> colors.danger
+                                    }),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = peer.nickname ?: peer.peerIdHex.take(6).uppercase(),
+                                    color = colors.textPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Row {
+                                    rssi?.let { value ->
+                                        Text(
+                                            text = "$value dBm",
+                                            color = colors.textMuted,
+                                            fontSize = 9.sp,
+                                        )
+                                    }
+                                    peer.lastHops?.takeIf { it > 0 }?.let { hops ->
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = "$hops hop${if (hops != 1) "s" else ""}",
+                                            color = colors.textMuted,
+                                            fontSize = 9.sp,
+                                        )
+                                    }
+                                }
+                            }
+                            Box(
+                                Modifier
+                                    .size(34.dp)
+                                    .clickable { onOpenChat(peer.peerIdHex) }
+                                    .clip(RoundedCornerShape(6.dp)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("💬", fontSize = 14.sp)
+                            }
+                        }
+                        if (peer != peers.last()) Spacer(Modifier.height(2.dp))
                     }
                 }
             }

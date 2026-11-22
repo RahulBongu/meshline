@@ -50,6 +50,7 @@ import com.meshline.app.groups.GroupItem
 import com.meshline.app.groups.GroupMessageUi
 import com.meshline.app.groups.PendingGroupInvite
 import com.meshline.app.protocol.GroupPayloads
+import com.meshline.app.protocol.MessageIds
 import com.meshline.app.storage.ContactEntity
 import com.meshline.app.ui.theme.MeshlineDesign
 import java.text.SimpleDateFormat
@@ -253,13 +254,23 @@ fun CreateGroupDialog(
 fun GroupChatScreen(
     group: GroupItem,
     messages: List<GroupMessageUi>,
+    selfIdHex: String,
     onSend: (String) -> Unit,
+    onRemoveMember: (memberIdHex: String) -> Unit,
+    onTransferAdmin: (memberIdHex: String) -> Unit,
     onLeaveGroup: () -> Unit,
     onBack: () -> Unit,
 ) {
     val colors = MeshlineDesign.colors
     var draft by remember { mutableStateOf("") }
+    var membersOpen by remember { mutableStateOf(false) }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+
+    // Feature 7: roster identities (admin badge + "You" markers).
+    val adminIdHex = MessageIds.idFromPublicKey(group.adminEd25519Pk)
+        .joinToString("") { "%02x".format(it) }
+    fun memberIdHex(member: GroupPayloads.RosterMember): String =
+        MessageIds.idFromPublicKey(member.ed25519PublicKey).joinToString("") { "%02x".format(it) }
 
     Surface(color = colors.background, modifier = Modifier.fillMaxSize()) {
         Column(
@@ -308,8 +319,77 @@ fun GroupChatScreen(
                     )
                 }
 
+                TextButton(onClick = { membersOpen = !membersOpen }) {
+                    Text(
+                        text = "MEMBERS (${group.roster.size})",
+                        color = if (membersOpen) colors.primary else colors.textSecondary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+
                 TextButton(onClick = onLeaveGroup) {
                     Text("Leave", color = colors.danger, fontSize = 12.sp)
+                }
+            }
+
+            // Feature 7: member roster — with Feature 6 admin actions for the admin.
+            if (membersOpen) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                ) {
+                    Text("MEMBERS", color = colors.textSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(4.dp))
+                    group.roster.forEachIndexed { idx, member ->
+                        val idHex = memberIdHex(member)
+                        val isMemberAdmin = idHex == adminIdHex
+                        val isSelf = idHex == selfIdHex
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(colors.surface)
+                                    .border(1.dp, colors.border, CircleShape),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(fruitEmoji(member.avatarIndex.toInt() and 0xFF), fontSize = 16.sp)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = member.nickname,
+                                        color = colors.textPrimary,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    if (isMemberAdmin) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("👑", fontSize = 11.sp)
+                                    }
+                                    if (isSelf) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("(You)", color = colors.textMuted, fontSize = 10.sp)
+                                    }
+                                }
+                            }
+                            if (group.isAdmin && !isSelf && !isMemberAdmin) {
+                                TextButton(onClick = { onTransferAdmin(idHex) }, colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = colors.primary)) {
+                                    Text("Transfer", fontSize = 11.sp)
+                                }
+                                TextButton(onClick = { onRemoveMember(idHex) }, colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = colors.danger)) {
+                                    Text("Remove", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                        if (idx != group.roster.lastIndex) Spacer(Modifier.height(2.dp))
+                    }
                 }
             }
 
