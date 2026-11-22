@@ -204,6 +204,41 @@ class RoomMigrationTest {
         }
     }
 
+    @Test
+    fun migrateFromV9ToV10RecreatesGroupTables() {
+        val v9 = helper.createDatabase(TEST_DB, 9)
+        // Before v10 the group/channel tables existed but were never written, so
+        // the migration is allowed to recreate them from scratch. Seed one row
+        // into `messages` to prove unrelated data survives the table rebuilds.
+        v9.execSQL(
+            """
+            INSERT INTO `messages`
+                (`messageIdHex`, `peerIdHex`, `outgoing`, `text`, `createdAtMs`, `state`)
+            VALUES ('m1', 'peer1', 0, X'68656c6c6f', 1700000000, 'DELIVERED')
+            """.trimIndent()
+        )
+        v9.close()
+
+        val migrated = helper.runMigrationsAndValidate(TEST_DB, 10, false, MeshlineDatabase.MIGRATION_9_10)
+        try {
+            migrated.query("SELECT COUNT(*) FROM `messages`").use { c ->
+                c.moveToFirst()
+                assertEquals(1, c.getInt(0))
+            }
+            // The group tables exist again, now with their v10 columns.
+            for (table in listOf("groups", "group_messages", "channel_messages")) {
+                migrated.query("SELECT name FROM sqlite_master WHERE type='table' AND name='$table'").use { c ->
+                    assertTrue("$table must exist after v9->v10", c.moveToFirst())
+                }
+            }
+            migrated.query("SELECT `roster`, `unreadCount` FROM `groups`").use { /* schema exists */ }
+            migrated.query("SELECT `senderAvatarIndex` FROM `group_messages`").use { /* schema exists */ }
+            migrated.query("SELECT `senderAvatarIndex` FROM `channel_messages`").use { /* schema exists */ }
+        } finally {
+            migrated.close()
+        }
+    }
+
     private companion object {
         const val TEST_DB = "migration-test.db"
     }

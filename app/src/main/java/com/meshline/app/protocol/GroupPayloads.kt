@@ -392,4 +392,53 @@ object GroupPayloads {
         buf.get(textBytes)
         return ChannelMessage(chBytes.toString(Charsets.UTF_8), textBytes.toString(Charsets.UTF_8))
     }
+
+    // ---- Roster storage encoding ----
+    //
+    // The roster has to survive a restart (the epoch key alone is not enough:
+    // membership is what authorises a sender, and the admin badge comes from
+    // the roster's admin key). This is the **local** encoding used by the
+    // encrypted `groups` table, not a wire format: it keeps the same per-member
+    // entry layout as GROUP_CONTROL (`pk(32) | nickLen(1) | nick | avatar(1)`)
+    // so the two cannot drift, but prefixes the list with a one-byte count
+    // instead of embedding it in a control frame.
+
+    fun encodeRoster(roster: List<RosterMember>): ByteArray {
+        require(roster.size <= MAX_MEMBERS) { "roster exceeds max members ($MAX_MEMBERS)" }
+        val entries = roster.map { m ->
+            require(m.ed25519PublicKey.size == 32) { "roster member key must be 32 bytes" }
+            val nickBytes = Payloads.sanitizeNickname(m.nickname).toByteArray(Charsets.UTF_8)
+            val buf = ByteBuffer.allocate(32 + 1 + nickBytes.size + 1).order(ByteOrder.BIG_ENDIAN)
+            buf.put(m.ed25519PublicKey)
+            buf.put(nickBytes.size.toByte())
+            buf.put(nickBytes)
+            buf.put(m.avatarIndex)
+            buf.array()
+        }
+        val total = 1 + entries.sumOf { it.size }
+        val buf = ByteBuffer.allocate(total).order(ByteOrder.BIG_ENDIAN)
+        buf.put(roster.size.toByte())
+        for (entry in entries) buf.put(entry)
+        return buf.array()
+    }
+
+    fun decodeRoster(bytes: ByteArray): List<RosterMember> {
+        if (bytes.isEmpty()) return emptyList()
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+        val count = buf.get().toInt() and 0xFF
+        if (count > MAX_MEMBERS) throw PacketException.InvalidPacket("stored roster exceeds max members ($count)")
+        val roster = ArrayList<RosterMember>(count)
+        for (i in 0 until count) {
+            if (buf.remaining() < 34) throw PacketException.InvalidPacket("stored roster entry truncated")
+            val edPk = ByteArray(32)
+            buf.get(edPk)
+            val nickLen = buf.get().toInt() and 0xFF
+            if (buf.remaining() < nickLen + 1) throw PacketException.InvalidPacket("stored roster nick truncated")
+            val nickBytes = ByteArray(nickLen)
+            buf.get(nickBytes)
+            val avatar = buf.get()
+            roster.add(RosterMember(edPk, nickBytes.toString(Charsets.UTF_8), avatar))
+        }
+        return roster
+    }
 }

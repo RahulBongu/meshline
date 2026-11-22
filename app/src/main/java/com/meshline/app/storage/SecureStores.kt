@@ -1,5 +1,8 @@
 package com.meshline.app.storage
 
+import com.meshline.app.channels.ChannelPersistence
+import com.meshline.app.groups.GroupPersistence
+
 /**
  * The D2 stores, all on the same SQLCipher-encrypted Room handle
  * (the database key is wrapped by the Android Keystore).
@@ -21,4 +24,10 @@ class SecureStores(private val db: MeshlineDatabase) {
     val groups = db.groupsDao()
     val groupMessages = db.groupMessagesDao()
     val channelMessages = db.channelMessagesDao()
+
+    /** Groups + history, restored on service start (DB v10). */
+    val groupPersistence: GroupPersistence = RoomGroupPersistence(groups, groupMessages)
+
+    /** Topic-channel history, restored on service start (DB v10). */
+    val channelPersistence: ChannelPersistence = RoomChannelPersistence(channelMessages)
 }
