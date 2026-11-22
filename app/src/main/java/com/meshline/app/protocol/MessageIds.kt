@@ -30,14 +30,21 @@ object MessageIds {
         return digest.digest()
     }
 
-    /**
-     * 8-byte truncated SHA-256 of a 32-byte public key: `SHA-256(pubkey)[0..8)`.
+    /** 8-byte truncated SHA-256 of a 32-byte public key: `SHA-256(pubkey)[0..8)`.
      * This is how senderId / recipientId are derived (PROTOCOL.md §4).
      */
     fun idFromPublicKey(publicKey: ByteArray): ByteArray {
         require(publicKey.size == 32) { "public key must be 32 bytes, got ${publicKey.size}" }
         return MessageDigest.getInstance("SHA-256").digest(publicKey).copyOfRange(0, MeshPacket.ID_BYTES)
     }
+
+    /**
+     * True when [hex] is a canonical 32-byte message id (64 hex digits).
+     * Used to gate reactions: relay-only messages carry synthetic ids and
+     * cannot be addressed by the 32-byte REACTION wire payload (§6.8).
+     */
+    fun isValidMessageIdHex(hex: String): Boolean =
+        hex.length == 64 && hex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
 
     /**
      * Display fingerprint: `SHA-256(ed25519Pk ‖ x25519Pk)` as 64 lowercase hex chars.

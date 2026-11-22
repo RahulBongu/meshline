@@ -27,6 +27,7 @@ import com.meshline.app.profile.ProfileStore
 import com.meshline.app.protocol.Geohash
 import com.meshline.app.protocol.GroupPayloads
 import com.meshline.app.protocol.MeshPacket
+import com.meshline.app.protocol.MessageIds
 import com.meshline.app.protocol.PacketCodec
 import com.meshline.app.protocol.PacketType
 import com.meshline.app.protocol.Payloads
@@ -557,6 +558,9 @@ class BleMeshService : Service() {
      */
     suspend fun toggleReaction(targetIdHex: String, emoji: String) {
         val dao = contacts.reactionsDao() ?: return
+        // Relay-only channel messages have synthetic ids — only canonical
+        // 32-byte message ids fit the REACTION wire payload (PROTOCOL §6.8).
+        if (!MessageIds.isValidMessageIdHex(targetIdHex)) return
         val senderHex = identity.senderId.joinToString("") { "%02x".format(it) }
         val targetBytes = targetIdHex.hexToBytes()
         val reaction = Payloads.ReactionPayload(

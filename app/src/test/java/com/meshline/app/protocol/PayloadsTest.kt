@@ -32,6 +32,25 @@ class PayloadsTest {
     }
 
     @Test
+    fun `reaction can target a channel message id`() {
+        val channelMessageId = ByteArray(32) { (it * 13).toByte() }
+        val hex = channelMessageId.joinToString("") { "%02x".format(it) }
+        assertTrue("channel message id must be a valid reaction target", MessageIds.isValidMessageIdHex(hex))
+        val target = hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val reaction = Payloads.ReactionPayload(Payloads.ReactionPayload.KIND_ADD, "🔥", target)
+        val decoded = Payloads.decodeReaction(Payloads.encodeReaction(reaction))
+        assertArrayEquals(channelMessageId, decoded.targetId)
+        assertEquals("🔥", decoded.emoji)
+    }
+
+    @Test
+    fun `synthetic relay ids are rejected as reaction targets`() {
+        assertTrue(!MessageIds.isValidMessageIdHex("nostr-1730000000000-4821"))
+        assertTrue(!MessageIds.isValidMessageIdHex("zz".repeat(32)))
+        assertTrue(!MessageIds.isValidMessageIdHex("abc"))
+    }
+
+    @Test
     fun `reaction encode is strict`() {
         assertThrows(PacketException.InvalidPacket::class.java) {
             Payloads.encodeReaction(Payloads.ReactionPayload(Payloads.ReactionPayload.KIND_ADD, "", targetId))

@@ -46,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.meshline.app.channels.ChannelItem
 import com.meshline.app.channels.ChannelMessageUi
+import com.meshline.app.protocol.MessageIds
+import com.meshline.app.service.ReactionUi
 import com.meshline.app.ui.theme.MeshlineDesign
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -63,6 +65,8 @@ fun ChannelsScreen(
     onJoinChannel: (String) -> Unit,
     onSendMessage: (channel: String, text: String) -> Unit,
     onExecuteCommand: (commandText: String, activeChannel: String) -> Unit,
+    reactions: Map<String, List<ReactionUi>> = emptyMap(),
+    onToggleReaction: (targetIdHex: String, emoji: String) -> Unit = { _, _ -> },
 ) {
     val colors = MeshlineDesign.colors
     var showJoinDialog by remember { mutableStateOf(false) }
@@ -278,6 +282,16 @@ fun ChannelsScreen(
                                     fontSize = 14.sp,
                                     lineHeight = 20.sp,
                                 )
+
+                                // Feature 12: reactions on channel broadcasts.
+                                // Relay-only messages carry synthetic ids (not a
+                                // 32-byte message id), so they cannot be targetted.
+                                if (MessageIds.isValidMessageIdHex(m.messageIdHex)) {
+                                    ReactionBar(
+                                        reactions = reactions[m.messageIdHex] ?: emptyList(),
+                                        onTap = { emoji -> onToggleReaction(m.messageIdHex, emoji) },
+                                    )
+                                }
                             }
                         }
                     }
