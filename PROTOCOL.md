@@ -530,13 +530,17 @@ nonce window (see `GROUPS_DESIGN.md` §5).
 
 ### 6.8 REACTION
 
-Broadcast emoji reaction on a public broadcast message (the Nearby feed).
+Broadcast emoji reaction on a public broadcast message (the Nearby feed) or
+a topic-channel message (`CHANNEL_MESSAGE`). The wire format is identical: the
+target is the 32-byte `messageId` of the message being reacted to, regardless
+of which public surface carried it.
 
 ```
 kind(1)      1 = ADD, 2 = REMOVE
 emojiLen(1)  1..8, UTF-8 bytes of the emoji
 emoji        the emoji string (non-empty, no ISO control characters)
-targetId(32) the 32-byte messageId of the targeted PUBLIC_MESSAGE
+targetId(32) the 32-byte messageId of the targeted PUBLIC_MESSAGE or
+             CHANNEL_MESSAGE
 ```
 
 - Signed (§3), broadcast, TTL 7.
@@ -547,7 +551,9 @@ targetId(32) the 32-byte messageId of the targeted PUBLIC_MESSAGE
 - Routing: relayed like any other broadcast (§8). Its rate limits default to
   the "other" bucket (§8 rule 7).
 - Targets a message the sender has seen; reactions for unknown targets are
-  harmless and simply stored without rendering.
+  harmless and simply stored without rendering. Internet-relayed channel
+  messages carry synthetic ids and are not reactable over the mesh (only
+  canonical 32-byte message ids can be encoded as `targetId`).
 
 ### 6.9 TYPING
 

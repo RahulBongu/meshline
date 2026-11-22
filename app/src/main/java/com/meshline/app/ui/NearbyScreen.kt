@@ -594,7 +594,7 @@ private fun geoPingAge(tsMs: Long): String {
  * tapping toggles the local identity's reaction on the message.
  */
 @Composable
-private fun ReactionBar(
+internal fun ReactionBar(
     reactions: List<ReactionUi>,
     onTap: (String) -> Unit,
 ) {

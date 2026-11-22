@@ -43,7 +43,7 @@ Private 1-on-1 messages are end-to-end encrypted using the **Noise XX** protocol
   - Modern Charcoal & Mint Emerald visual theme (`#121417`, `#00E599`).
   - 4 primary navigation tabs: `Chats` (Unified Direct & Groups), `Nearby` (Live mesh & diagnostics), `Channels`, and `Settings`.
 - **Message Reactions, Typing Indicators & Geo Pings**:
-  - Emoji reactions on public broadcasts (`REACTION` — signed, broadcast, TTL 7; stored in the encrypted DB).
+  - Emoji reactions on public broadcasts and topic channel messages (`REACTION` — signed, broadcast, TTL 7; stored in the encrypted DB).
   - "Typing…" indicators in private chats (`TYPING` — signed, directed to the peer, TTL 1).
   - Opt-in coarse-area geo pings with privacy-safe geohashes (`GEO_PING` — signed, broadcast, TTL 2).
 - **Group Member Management (Feature 6)**: Admins remove members and transfer admin rights (`GROUP_CONTROL` kinds 4/5); the epoch rotates on every roster change, and the removed/transferred-away member is told via the broadcast control.

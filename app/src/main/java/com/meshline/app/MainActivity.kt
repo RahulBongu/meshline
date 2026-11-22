@@ -854,6 +854,8 @@ private fun App(
                                 onJoinChannel = { ch -> onSetActiveChannel(ch) },
                                 onSendMessage = { ch, text -> onSendChannelMessage(ch, text) },
                                 onExecuteCommand = { cmd, ch -> onExecuteCommand(cmd, ch) },
+                                reactions = reactions,
+                                onToggleReaction = onSendReaction,
                             )
                         }
                         MainTab.SETTINGS -> {
