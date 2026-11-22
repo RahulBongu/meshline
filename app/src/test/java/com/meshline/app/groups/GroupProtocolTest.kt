@@ -1,6 +1,7 @@
 package com.meshline.app.groups
 
 import com.meshline.app.protocol.GroupPayloads
+import com.meshline.app.protocol.PacketException
 import com.meshline.app.protocol.MessageIds
 import com.meshline.app.security.Identity
 import org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator
@@ -186,6 +187,33 @@ class GroupProtocolTest {
         assertEquals(invite.roster.size, decoded.roster.size)
         assertEquals("Admin", decoded.roster[0].nickname)
         assertEquals("Alice", decoded.roster[1].nickname)
+    }
+
+    @Test
+    fun rosterStorageCodecRoundtrips() {
+        val adminPk = ByteArray(32).also { random.nextBytes(it) }
+        val memberPk = ByteArray(32).also { random.nextBytes(it) }
+        val roster = listOf(
+            GroupPayloads.RosterMember(adminPk, "Admin", 3),
+            GroupPayloads.RosterMember(memberPk, "Alice", 7),
+        )
+        val encoded = GroupPayloads.encodeRoster(roster)
+        val decoded = GroupPayloads.decodeRoster(encoded)
+        assertEquals(roster.size, decoded.size)
+        assertArrayEquals(roster[0].ed25519PublicKey, decoded[0].ed25519PublicKey)
+        assertEquals("Admin", decoded[0].nickname)
+        assertEquals(3.toByte(), decoded[0].avatarIndex)
+        assertEquals("Alice", decoded[1].nickname)
+    }
+
+    @Test
+    fun rosterStorageCodecHandlesEmptyAndMalformed() {
+        assertEquals(0, GroupPayloads.decodeRoster(ByteArray(0)).size)
+        // Truncated entry must throw rather than crash.
+        val truncated = byteArrayOf(1, 1, 2, 3) // count=1, then too few bytes
+        org.junit.Assert.assertThrows(PacketException.InvalidPacket::class.java) {
+            GroupPayloads.decodeRoster(truncated)
+        }
     }
 
     @Test

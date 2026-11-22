@@ -377,6 +377,10 @@ captionLen(2 BE) + caption       the message body: the text of a text message,
   are scaled/compressed to JPEG before sending. Received voice notes play via
   `MediaPlayer`; received images render in a bubble. Media rows are stored in
   the encrypted `messages` table (`media` + `mediaType` columns, DB v9).
+- **DB v10 (persistence):** `groups`, `group_messages` and `channel_messages`
+  are now live storage. `groups` gained `roster` + `unreadCount`;
+  `group_messages` and `channel_messages` gained `senderAvatarIndex`. Before
+  v10 these tables were never written, so the migration recreates them.
 - **Feature 5 — reply-to:** `flags` bit0 carries `parentHex` = the replied-to
   message's `messageIdHex`. Receivers store it on the row (`parentIdHex`
   column) and the chat shows a quoted line.

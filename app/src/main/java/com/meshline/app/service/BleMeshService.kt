@@ -226,12 +226,16 @@ class BleMeshService : Service() {
             localNickname = { profileStore.load().nickname },
             localAvatarIndex = { profileStore.load().avatarIndex.toByte() },
             onNewMessage = { msg -> notifyGroupMessage(msg.groupIdHex, msg) },
+            persistence = contacts.secure.groupPersistence,
+            scope = scope,
         )
         groupManager = gm
 
         // 2. Channel Manager
         val cm = ChannelManager(
-            ownIdHex = id.senderId.joinToString("") { "%02x".format(it) }
+            ownIdHex = id.senderId.joinToString("") { "%02x".format(it) },
+            persistence = contacts.secure.channelPersistence,
+            scope = scope,
         )
         channelManager = cm
 
@@ -397,6 +401,7 @@ class BleMeshService : Service() {
         }
 
         // Periodic maintenance
+        var maintenanceTicks = 0
         jobs += scope.launch {
             while (isActive) {
                 try {
@@ -407,6 +412,10 @@ class BleMeshService : Service() {
                         System.currentTimeMillis() - lastAnnounceAtMs > RE_ANNOUNCE_INTERVAL_MS
                     ) {
                         sendAnnounce()
+                    }
+                    // Retention sweep for group/channel history (throttled).
+                    if (++maintenanceTicks % 60 == 0) {
+                        runCatching { pruneGroupAndChannelHistory() }
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -641,6 +650,14 @@ class BleMeshService : Service() {
 
     private fun setTypingPeers(v: Set<String>) {
         _typingPeers.value = v
+    }
+
+    private suspend fun pruneGroupAndChannelHistory() {
+        val days = retentionStore.load().days
+        if (days <= 0) return
+        val threshold = System.currentTimeMillis() - days * 24L * 60 * 60 * 1_000
+        runCatching { contacts.secure.groupPersistence.deleteMessagesOlderThan(threshold) }
+        runCatching { contacts.secure.channelPersistence.deleteMessagesOlderThan(threshold) }
     }
 
     // ------------------------------------------------------------------

@@ -62,7 +62,7 @@ interface ContactsDao {
         ChannelMessageRecordEntity::class,
         ReactionEntity::class,
     ],
-    version = 9,
+    version = 10,
     // The schema of every version is exported to app/schemas/ (see the KSP
     // arguments in build.gradle.kts) so the instrumented migration test can
     // build a v1 database and walk it up to the current version.
@@ -295,6 +295,77 @@ abstract class MeshlineDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `messages` ADD COLUMN `media` BLOB")
                 db.execSQL("ALTER TABLE `messages` ADD COLUMN `mediaType` TEXT")
                 db.execSQL("ALTER TABLE `messages` ADD COLUMN `parentIdHex` TEXT")
+            }
+        }
+
+        /**
+         * v9 → v10 turns the group/channel tables into live storage.
+         *
+         * Before v10 nothing ever wrote to `groups`, `group_messages` or
+         * `channel_messages` — the entities existed but the managers were
+         * purely in-memory, so a restart lost every group (including its
+         * epoch key) and all group/channel history. The tables are therefore
+         * guaranteed empty, and recreating them is both safe and exact:
+         *
+         *  - `groups` gains `roster` (the membership list is what authorises a
+         *    sender and identifies the admin) and `unreadCount`;
+         *  - `group_messages` and `channel_messages` gain `senderAvatarIndex`
+         *    so restored history renders with the right avatar.
+         */
+        val MIGRATION_9_10 = object : androidx.room.migration.Migration(9, 10) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS `groups`")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `groups` (
+                        `groupIdHex` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `avatarIndex` INTEGER NOT NULL,
+                        `epoch` INTEGER NOT NULL,
+                        `epochKey` BLOB NOT NULL,
+                        `adminEd25519Pk` BLOB NOT NULL,
+                        `groupTagHex` TEXT NOT NULL,
+                        `roster` BLOB NOT NULL,
+                        `unreadCount` INTEGER NOT NULL,
+                        `joinedAtMs` INTEGER NOT NULL,
+                        `lastActivityMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`groupIdHex`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("DROP TABLE IF EXISTS `group_messages`")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `group_messages` (
+                        `messageIdHex` TEXT NOT NULL,
+                        `groupIdHex` TEXT NOT NULL,
+                        `senderIdHex` TEXT NOT NULL,
+                        `senderNickname` TEXT NOT NULL,
+                        `senderAvatarIndex` INTEGER NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `epoch` INTEGER NOT NULL,
+                        `timestampMs` INTEGER NOT NULL,
+                        `isSelf` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageIdHex`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("DROP TABLE IF EXISTS `channel_messages`")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `channel_messages` (
+                        `messageIdHex` TEXT NOT NULL,
+                        `channel` TEXT NOT NULL,
+                        `senderIdHex` TEXT NOT NULL,
+                        `senderNickname` TEXT NOT NULL,
+                        `senderAvatarIndex` INTEGER NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `timestampMs` INTEGER NOT NULL,
+                        `isSelf` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageIdHex`)
+                    )
+                    """.trimIndent()
+                )
             }
         }
     }

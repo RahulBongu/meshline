@@ -224,6 +224,49 @@ in v1.
    harness forces the collision) do not cross-deliver; the member of one
    group never decrypts the other's traffic even if it tries.
 
+## 11. Persistence (DB v10)
+
+Before v10 the group and channel managers were purely in-memory: the
+`groups`, `group_messages` and `channel_messages` tables existed in the schema
+but nothing ever wrote to them, so a restart erased every group — including its
+epoch key, which made the group unrecoverable without a fresh invite — and all
+group/channel history.
+
+Since v10:
+
+- **`groups`** stores one row per joined group: `groupIdHex`, `name`,
+  `avatarIndex`, `epoch`, `epochKey`, `adminEd25519Pk`, `groupTagHex`,
+  `roster` (encoded with `GroupPayloads.encodeRoster`, same per-member entry
+  layout as `GROUP_CONTROL`), `unreadCount`, `joinedAtMs`, `lastActivityMs`.
+  `GroupManager.isAdmin` is recomputed on hydration from `adminEd25519Pk`
+  against the local identity, so it is never trusted from disk.
+- **`group_messages`** stores every decrypted and sent group message.
+- **`channel_messages`** stores every topic-channel message.
+
+`GroupManager` and `ChannelManager` keep their in-memory state as the source of
+truth and write through to the encrypted store through a small port
+(`GroupPersistence` / `ChannelPersistence`), serialised on a single consumer
+coroutine so the database sees the mutations in exactly the order they were
+applied in memory (create -> epoch rotation -> removal -> leave). Hydration
+runs once at service start; anything created while the load is in flight wins
+over the stored copy.
+
+- `leaveGroup`, a member removal that drops the local user, and panic wipe delete
+  the group row and its history.
+- Retention (the same 0/1/7/30-day setting as private messages) sweeps
+  `group_messages` and `channel_messages` every two minutes.
+- Panic wipe clears all three tables in addition to the private-message ones.
+
+### Honest limits
+
+- A crash between an in-memory state change and its queued write (a window of
+  milliseconds) can lose the last mutation. Epoch keys are never rotated
+  in-place, so the worst case is re-applying the last invite, never a silently
+  corrupted group.
+- Channel membership (custom joined channels) is derived from persisted
+  messages on restart: a channel with no history reverts to the default set.
+- Unread badges for channels are not persisted.
+
 ---
 
 **Review gate:** approve, amend, or reject before Phase E implementation

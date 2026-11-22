@@ -34,6 +34,9 @@ class PanicWiper(
     suspend fun wipe(channel: SecureChannel?): Boolean {
         // The chat, the sessions, the delivery queue, the seen ids.
         channel?.wipe()
+        // Groups and topic channels (DB v10).
+        runCatching { contacts.secure.groupPersistence.deleteAll() }
+        runCatching { contacts.secure.channelPersistence.deleteAll() }
         // The identity (prefs + the Keystore wrap key).
         runCatching { identityStore.wipe() }
         // The profile and the settings.

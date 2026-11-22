@@ -1,8 +1,11 @@
 package com.meshline.app.channels
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * Manages topic-based channels (e.g. #general, #emergency, #geo-local).
@@ -31,6 +34,8 @@ data class ChannelMessageUi(
 
 class ChannelManager(
     val ownIdHex: String,
+    private val persistence: ChannelPersistence? = null,
+    scope: CoroutineScope? = null,
 ) {
     companion object {
         val DEFAULT_CHANNELS = listOf(
@@ -41,6 +46,8 @@ class ChannelManager(
         )
     }
 
+    private val writeQueue = Channel<suspend (ChannelPersistence) -> Unit>(Channel.UNLIMITED)
+
     private val _channels = MutableStateFlow<List<ChannelItem>>(DEFAULT_CHANNELS)
     val channels: Flow<List<ChannelItem>> = _channels.asStateFlow()
 
@@ -49,6 +56,16 @@ class ChannelManager(
 
     private val _messages = MutableStateFlow<Map<String, List<ChannelMessageUi>>>(emptyMap())
     val messages: Flow<Map<String, List<ChannelMessageUi>>> = _messages.asStateFlow()
+
+    init {
+        val store = persistence
+        if (store != null && scope != null) {
+            scope.launch {
+                hydrate(store)
+                for (op in writeQueue) runCatching { op(store) }
+            }
+        }
+    }
 
     fun currentActiveChannel(): String = _activeChannel.value
 
@@ -78,6 +95,7 @@ class ChannelManager(
 
         val updatedList = (currentList + msg).takeLast(200)
         _messages.value = _messages.value + (normChannel to updatedList)
+        persist { it.insertMessage(msg.copy(channel = normChannel)) }
 
         // Increment unread if not currently viewing this channel and not self
         if (_activeChannel.value != normChannel && !msg.isSelf) {
@@ -90,6 +108,26 @@ class ChannelManager(
     fun clearChannelMessages(channel: String) {
         val norm = normalizeChannel(channel)
         _messages.value = _messages.value + (norm to emptyList())
+        persist { it.deleteChannel(norm) }
+    }
+
+    private suspend fun hydrate(store: ChannelPersistence) {
+        val stored = runCatching { store.loadMessages() }.getOrDefault(emptyList())
+        if (stored.isEmpty()) return
+        val byChannel = _messages.value.toMutableMap()
+        for (msg in stored) {
+            val norm = normalizeChannel(msg.channel)
+            val current = byChannel[norm] ?: emptyList()
+            if (current.any { it.messageIdHex == msg.messageIdHex }) continue
+            byChannel[norm] = (current + msg.copy(channel = norm)).takeLast(200)
+            joinChannel(norm)
+        }
+        _messages.value = byChannel
+    }
+
+    private fun persist(op: suspend (ChannelPersistence) -> Unit) {
+        if (persistence == null) return
+        writeQueue.trySend(op)
     }
 
     private fun normalizeChannel(raw: String): String {

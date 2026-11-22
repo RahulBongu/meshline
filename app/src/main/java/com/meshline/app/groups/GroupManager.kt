@@ -6,9 +6,12 @@ import com.meshline.app.protocol.MessageIds
 import com.meshline.app.protocol.PacketCodec
 import com.meshline.app.protocol.PacketType
 import com.meshline.app.security.Identity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import java.security.SecureRandom
 
 /**
@@ -25,6 +28,10 @@ data class GroupItem(
     val roster: List<GroupPayloads.RosterMember>,
     val isAdmin: Boolean,
     val unreadCount: Int = 0,
+    /** When the local user joined (persisted; 0 for groups built before v10). */
+    val joinedAtMs: Long = 0L,
+    /** Timestamp of the newest message, used to order the chat list (persisted). */
+    val lastActivityMs: Long = 0L,
 ) {
     val groupTagBytes: ByteArray get() = groupTagHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
@@ -44,7 +51,9 @@ data class GroupItem(
             groupTagHex == other.groupTagHex &&
             roster == other.roster &&
             isAdmin == other.isAdmin &&
-            unreadCount == other.unreadCount
+            unreadCount == other.unreadCount &&
+            joinedAtMs == other.joinedAtMs &&
+            lastActivityMs == other.lastActivityMs
     }
 
     override fun hashCode(): Int {
@@ -58,6 +67,8 @@ data class GroupItem(
         h = 31 * h + roster.hashCode()
         h = 31 * h + isAdmin.hashCode()
         h = 31 * h + unreadCount
+        h = 31 * h + joinedAtMs.hashCode()
+        h = 31 * h + lastActivityMs.hashCode()
         return h
     }
 }
@@ -103,8 +114,25 @@ class GroupManager(
     val localAvatarIndex: () -> Byte,
     /** Invoked once per received group message from another member (Feature 9: notifications). */
     private val onNewMessage: ((GroupMessageUi) -> Unit)? = null,
+    /** Durable storage. Null keeps the manager purely in-memory (unit tests). */
+    private val persistence: GroupPersistence? = null,
+    /**
+     * Hosts the ordered write queue. Required when [persistence] is set: a
+     * single consumer applies the queued writes, so the database sees the
+     * mutations in exactly the order they were applied in memory (create,
+     * epoch rotation, removal, leave).
+     */
+    scope: CoroutineScope? = null,
 ) {
+    companion object {
+        /** Newest messages kept per group, in memory and on restore. */
+        const val MAX_HISTORY = 300
+    }
+
     private val secureRandom = SecureRandom()
+
+    /** Unbounded so a burst of mutations is never dropped; consumed in order. */
+    private val writeQueue = Channel<suspend (GroupPersistence) -> Unit>(Channel.UNLIMITED)
 
     private val _groups = MutableStateFlow<Map<String, GroupItem>>(emptyMap())
     val groups: Flow<Map<String, GroupItem>> = _groups.asStateFlow()
@@ -115,12 +143,51 @@ class GroupManager(
     private val _pendingInvites = MutableStateFlow<List<PendingGroupInvite>>(emptyList())
     val pendingInvites: Flow<List<PendingGroupInvite>> = _pendingInvites.asStateFlow()
 
+    init {
+        val store = persistence
+        if (store != null && scope != null) {
+            scope.launch {
+                hydrate(store)
+                for (op in writeQueue) runCatching { op(store) }
+            }
+        }
+    }
+
     fun allGroups(): List<GroupItem> = _groups.value.values.toList()
 
     fun getGroup(groupIdHex: String): GroupItem? = _groups.value[groupIdHex]
 
     fun findGroupByTag(tagHex: String): GroupItem? =
         _groups.value.values.firstOrNull { it.groupTagHex.equals(tagHex, ignoreCase = true) }
+
+    private suspend fun hydrate(store: GroupPersistence) {
+        val storedGroups = runCatching { store.loadGroups() }.getOrDefault(emptyList())
+        val storedMessages = runCatching { store.loadMessages() }.getOrDefault(emptyList())
+
+        if (storedGroups.isNotEmpty()) {
+            val merged = storedGroups.associateBy { it.groupIdHex }.toMutableMap()
+            // Anything created while the load was in flight wins over the stored copy.
+            merged.putAll(_groups.value)
+            _groups.value = merged.mapValues { (_, group) ->
+                group.copy(isAdmin = group.adminEd25519Pk.contentEquals(localIdentity.ed25519PublicKey))
+            }
+        }
+
+        if (storedMessages.isNotEmpty()) {
+            val byGroup = _messages.value.toMutableMap()
+            for (msg in storedMessages) {
+                val current = byGroup[msg.groupIdHex] ?: emptyList()
+                if (current.any { it.messageIdHex == msg.messageIdHex }) continue
+                byGroup[msg.groupIdHex] = (current + msg).sortedBy { it.timestampMs }.takeLast(MAX_HISTORY)
+            }
+            _messages.value = byGroup
+        }
+    }
+
+    private fun persist(op: suspend (GroupPersistence) -> Unit) {
+        if (persistence == null) return
+        writeQueue.trySend(op)
+    }
 
     /**
      * Creates a new group with the local user as admin.
@@ -149,6 +216,8 @@ class GroupManager(
             it.ed25519PublicKey.contentEquals(localIdentity.ed25519PublicKey)
         }.take(GroupPayloads.MAX_MEMBERS - 1)
 
+        val now = System.currentTimeMillis()
+
         val group = GroupItem(
             groupIdHex = groupIdHex,
             name = name.take(GroupPayloads.MAX_GROUP_NAME_CHARS),
@@ -159,11 +228,12 @@ class GroupManager(
             groupTagHex = groupTagHex,
             roster = fullRoster,
             isAdmin = true,
+            joinedAtMs = now,
+            lastActivityMs = now,
         )
 
         _groups.value = _groups.value + (groupIdHex to group)
-
-        // Prepare invites for other members
+        persist { it.upsertGroup(group) }
         val invitePayload = GroupPayloads.GroupInvite(
             groupId = groupId,
             name = group.name,
@@ -213,14 +283,17 @@ class GroupManager(
                 leaveGroup(groupIdHex)
                 return
             }
-            _groups.value = _groups.value + (groupIdHex to existing.copy(
+            val updated = existing.copy(
                 epoch = invite.epoch,
                 epochKey = invite.epochKey,
                 groupTagHex = hex(GroupPayloads.deriveGroupTag(invite.epochKey)),
                 roster = invite.roster,
                 adminEd25519Pk = invite.adminPubkey,
                 isAdmin = invite.adminPubkey.contentEquals(localIdentity.ed25519PublicKey),
-            ))
+                lastActivityMs = System.currentTimeMillis(),
+            )
+            _groups.value = _groups.value + (groupIdHex to updated)
+            persist { it.upsertGroup(updated) }
             return
         }
         // New-group path: the local identity must be in the roster to be accepted.
@@ -238,6 +311,8 @@ class GroupManager(
         val invite = pending.invite
         val tag = GroupPayloads.deriveGroupTag(invite.epochKey)
 
+        val now = System.currentTimeMillis()
+
         val group = GroupItem(
             groupIdHex = groupIdHex,
             name = invite.name,
@@ -248,9 +323,12 @@ class GroupManager(
             groupTagHex = hex(tag),
             roster = invite.roster,
             isAdmin = invite.adminPubkey.contentEquals(localIdentity.ed25519PublicKey),
+            joinedAtMs = now,
+            lastActivityMs = now,
         )
 
         _groups.value = _groups.value + (groupIdHex to group)
+        persist { it.upsertGroup(group) }
         _pendingInvites.value = _pendingInvites.value.filterNot { hex(it.invite.groupId) == groupIdHex }
         return group
     }
@@ -289,8 +367,10 @@ class GroupManager(
             roster = newRoster,
             adminEd25519Pk = newAdmin,
             isAdmin = newAdmin.contentEquals(localIdentity.ed25519PublicKey),
+            lastActivityMs = System.currentTimeMillis(),
         )
         _groups.value = _groups.value + (groupIdHex to updatedGroup)
+        persist { it.upsertGroup(updatedGroup) }
 
         val control = GroupPayloads.GroupControl(
             epoch = newEpoch,
@@ -387,8 +467,9 @@ class GroupManager(
 
         when (ctrl.kind) {
             GroupPayloads.ControlKind.REMOVE_MEMBER -> {
-                val updated = group.copy(epoch = ctrl.epoch, roster = ctrl.roster)
+                val updated = group.copy(epoch = ctrl.epoch, roster = ctrl.roster, lastActivityMs = System.currentTimeMillis())
                 _groups.value = _groups.value + (group.groupIdHex to updated)
+                persist { it.upsertGroup(updated) }
                 // If this member was removed, drop the group locally.
                 if (!updated.isMember(localIdentity.senderId)) {
                     leaveGroup(group.groupIdHex)
@@ -397,12 +478,15 @@ class GroupManager(
             GroupPayloads.ControlKind.TRANSFER_ADMIN -> {
                 val newAdmin = ctrl.newAdmin ?: return
                 if (!ctrl.roster.any { it.ed25519PublicKey.contentEquals(newAdmin) }) return
-                _groups.value = _groups.value + (group.groupIdHex to group.copy(
+                val updated = group.copy(
                     epoch = ctrl.epoch,
                     roster = ctrl.roster,
                     adminEd25519Pk = newAdmin,
                     isAdmin = newAdmin.contentEquals(localIdentity.ed25519PublicKey),
-                ))
+                    lastActivityMs = System.currentTimeMillis(),
+                )
+                _groups.value = _groups.value + (group.groupIdHex to updated)
+                persist { it.upsertGroup(updated) }
             }
             else -> Unit // LEAVE / RENAME / ROSTER_UPDATE: nothing to do on receive.
         }
@@ -414,6 +498,7 @@ class GroupManager(
     fun leaveGroup(groupIdHex: String) {
         _groups.value = _groups.value - groupIdHex
         _messages.value = _messages.value - groupIdHex
+        persist { it.deleteGroup(groupIdHex); it.deleteMessages(groupIdHex) }
     }
 
     /**
@@ -541,21 +626,27 @@ class GroupManager(
     private fun recordMessage(msg: GroupMessageUi) {
         val current = _messages.value[msg.groupIdHex] ?: emptyList()
         if (current.any { it.messageIdHex == msg.messageIdHex }) return
-        val updated = (current + msg).takeLast(300)
+        val updated = (current + msg).takeLast(MAX_HISTORY)
         _messages.value = _messages.value + (msg.groupIdHex to updated)
+        persist { it.insertMessage(msg) }
 
-        if (!msg.isSelf) {
-            onNewMessage?.invoke(msg)
-            val group = _groups.value[msg.groupIdHex]
-            if (group != null) {
-                _groups.value = _groups.value + (msg.groupIdHex to group.copy(unreadCount = group.unreadCount + 1))
-            }
+        if (!msg.isSelf) onNewMessage?.invoke(msg)
+        val group = _groups.value[msg.groupIdHex]
+        if (group != null) {
+            val bumped = group.copy(
+                unreadCount = if (msg.isSelf) group.unreadCount else group.unreadCount + 1,
+                lastActivityMs = msg.timestampMs,
+            )
+            _groups.value = _groups.value + (msg.groupIdHex to bumped)
+            persist { it.upsertGroup(bumped) }
         }
     }
 
     fun clearUnread(groupIdHex: String) {
         val group = _groups.value[groupIdHex] ?: return
-        _groups.value = _groups.value + (groupIdHex to group.copy(unreadCount = 0))
+        val updated = group.copy(unreadCount = 0)
+        _groups.value = _groups.value + (groupIdHex to updated)
+        persist { it.upsertGroup(updated) }
     }
 
     private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }

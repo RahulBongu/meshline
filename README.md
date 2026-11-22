@@ -53,6 +53,7 @@ Private 1-on-1 messages are end-to-end encrypted using the **Noise XX** protocol
 - **Voice notes & small images (Feature 4)**: Send compressed voice notes (up to 30 s) and small images (compressed to JPEG) from the DM composer. Media travels inside the Noise XX session like text — same outbox, same receipts, stored in the encrypted `messages` table.
 - **Reply-to quoting (Feature 5)**: Tap the "↩" on any private message; the next message quotes it (or carries a caption with media).
 - **Local message search (Feature 6)**: Type in the Chats search bar to find messages — matches open the conversation.
+- **Persistent groups & channels (DB v10)**: Groups (including their epoch key), group messages and topic-channel history now survive a restart. Before v10 they were in-memory only.
 
 ---
 
