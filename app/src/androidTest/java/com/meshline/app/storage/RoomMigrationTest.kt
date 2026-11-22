@@ -171,6 +171,39 @@ class RoomMigrationTest {
         }
     }
 
+    @Test
+    fun migrateFromV8ToV9AddsMediaColumns() {
+        val v8 = helper.createDatabase(TEST_DB, 8)
+        v8.execSQL(
+            """
+            INSERT INTO `messages`
+                (`messageIdHex`, `peerIdHex`, `outgoing`, `text`, `createdAtMs`, `state`)
+            VALUES ('m1', 'peer1', 0, X'68656c6c6f', 1700000000, 'DELIVERED')
+            """.trimIndent()
+        )
+        v8.close()
+
+        val migrated = helper.runMigrationsAndValidate(TEST_DB, 9, false, MeshlineDatabase.MIGRATION_8_9)
+        try {
+            // The migrated history survives.
+            migrated.query("SELECT COUNT(*) FROM `messages`").use { c ->
+                c.moveToFirst()
+                assertEquals(1, c.getInt(0))
+            }
+            // The new columns exist, are nullable, and are usable on old rows.
+            migrated.query(
+                "SELECT `media`, `mediaType`, `parentIdHex` FROM `messages` WHERE `messageIdHex` = 'm1'"
+            ).use { c ->
+                assertTrue("the row must be found", c.moveToFirst())
+                assertTrue(c.isNull(c.getColumnIndexOrThrow("media")))
+                assertTrue(c.isNull(c.getColumnIndexOrThrow("mediaType")))
+                assertTrue(c.isNull(c.getColumnIndexOrThrow("parentIdHex")))
+            }
+        } finally {
+            migrated.close()
+        }
+    }
+
     private companion object {
         const val TEST_DB = "migration-test.db"
     }

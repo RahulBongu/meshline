@@ -862,8 +862,19 @@ class BleMeshService : Service() {
             ACTION_SEND_PRIVATE -> {
                 val peer = intent.getStringExtra(EXTRA_PEER_ID)
                 val text = intent.getStringExtra(EXTRA_TEXT)
+                val parentId = intent.getStringExtra(EXTRA_PARENT_ID)
                 if (peer != null && text != null) {
-                    scope.launch { secureChannel?.send(peer, text) }
+                    scope.launch { secureChannel?.send(peer, text, parentId) }
+                }
+            }
+            ACTION_SEND_MEDIA -> {
+                val peer = intent.getStringExtra(EXTRA_PEER_ID)
+                val mime = intent.getStringExtra(EXTRA_MEDIA_MIME)
+                val data = intent.getByteArrayExtra(EXTRA_MEDIA_DATA)
+                val caption = intent.getStringExtra(EXTRA_CAPTION) ?: ""
+                val parentId = intent.getStringExtra(EXTRA_PARENT_ID)
+                if (peer != null && mime != null && data != null) {
+                    scope.launch { secureChannel?.sendMedia(peer, mime, data, caption, parentId) }
                 }
             }
             ACTION_MARK_READ -> {
@@ -1084,8 +1095,9 @@ class BleMeshService : Service() {
         const val ACTION_SET_ACTIVE_CHANNEL = "com.meshline.app.action.SET_ACTIVE_CHANNEL"
         const val ACTION_SET_INTERNET_RELAY = "com.meshline.app.action.SET_INTERNET_RELAY"
         const val ACTION_EXECUTE_COMMAND = "com.meshline.app.action.EXECUTE_COMMAND"
-        const val ACTION_TOGGLE_REACTION = "com.meshline.app.action.TOGGLE_REACTION"
+        const val ACTION_SEND_MEDIA = "com.meshline.app.action.SEND_MEDIA"
         const val ACTION_SEND_TYPING = "com.meshline.app.action.SEND_TYPING"
+        const val ACTION_TOGGLE_REACTION = "com.meshline.app.action.TOGGLE_REACTION"
         const val ACTION_SEND_GEO_PING = "com.meshline.app.action.SEND_GEO_PING"
 
         const val EXTRA_TEXT = "text"
@@ -1101,6 +1113,10 @@ class BleMeshService : Service() {
         const val EXTRA_COMMAND_TEXT = "commandText"
         const val EXTRA_TARGET_ID = "targetIdHex"
         const val EXTRA_EMOJI = "emoji"
+        const val EXTRA_MEDIA_MIME = "mediaMime"
+        const val EXTRA_MEDIA_DATA = "mediaData"
+        const val EXTRA_CAPTION = "caption"
+        const val EXTRA_PARENT_ID = "parentIdHex"
 
         private const val CHANNEL_ID = "meshline_mesh"
         private const val NOTIFICATION_ID = 1

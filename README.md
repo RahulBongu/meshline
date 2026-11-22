@@ -46,6 +46,9 @@ Private 1-on-1 messages are end-to-end encrypted using the **Noise XX** protocol
   - Emoji reactions on public broadcasts (`REACTION` — signed, broadcast, TTL 7; stored in the encrypted DB).
   - "Typing…" indicators in private chats (`TYPING` — signed, directed to the peer, TTL 1).
   - Opt-in coarse-area geo pings with privacy-safe geohashes (`GEO_PING` — signed, broadcast, TTL 2).
+- **Voice notes & small images (Feature 4)**: Send compressed voice notes (up to 30 s) and small images (compressed to JPEG) from the DM composer. Media travels inside the Noise XX session like text — same outbox, same receipts, stored in the encrypted `messages` table.
+- **Reply-to quoting (Feature 5)**: Tap the "↩" on any private message; the next message quotes it (or carries a caption with media).
+- **Local message search (Feature 6)**: Type in the Chats search bar to find messages — matches open the conversation.
 
 ---
 

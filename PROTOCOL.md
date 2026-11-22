@@ -353,6 +353,38 @@ ciphertext   ChaCha20-Poly1305 ciphertext (plaintext + 16-byte tag)
   24 h of session age and 7 days since the first transport message.
 - Message states: Queued → Sent → Delivered → Read (PRD §13).
 
+### 6.3.1 Private message envelope (v2 — Features 4–5)
+
+The decrypted payload of every `PRIVATE_MESSAGE` is the authenticated envelope
+(`PrivateEnvelope` in `noise/PrivateEnvelope.kt`):
+
+```
+messageId(32)   the application-level message id
+sentAtMs(8)     when the sender composed it, big-endian
+version(1)      = 2
+flags(1)        bit0 = hasParent, bit1 = hasMedia (other bits must be 0)
+[parentLen(1) + parent]          if hasParent: parentHexLen 1..64 (the replied-to
+                                 message's messageIdHex)
+[mediaTypeLen(1) + mediaType]    if hasMedia: 1..16 bytes (e.g. `audio/aac`)
+captionLen(2 BE) + caption       the message body: the text of a text message,
+                                 the caption (often empty) of a media message
+[mediaLen(2 BE) + media]         if hasMedia: 0..MAX_MEDIA_BYTES (55_000)
+```
+
+- **Feature 4 — voice notes & small images:** a media message (`flags` bit1)
+  carries `mediaType` + `media` (≤ 55 KB, compressed before sending). Voice
+  notes are recorded with `MediaRecorder` (MPEG_4/AAC, max 30 s); picked images
+  are scaled/compressed to JPEG before sending. Received voice notes play via
+  `MediaPlayer`; received images render in a bubble. Media rows are stored in
+  the encrypted `messages` table (`media` + `mediaType` columns, DB v9).
+- **Feature 5 — reply-to:** `flags` bit0 carries `parentHex` = the replied-to
+  message's `messageIdHex`. Receivers store it on the row (`parentIdHex`
+  column) and the chat shows a quoted line.
+- Legacy v1 envelopes still decode: `version != 2` means the payload is text
+  only (the remainder is the message body).
+- Media and caption sizes are capped so the encrypted packet stays well under
+  the 64 KB packet limit (`MAX_PACKET_BYTES`).
+
 ### 6.4 RECEIPT
 ```
 receiptKind(1)   1 = DELIVERED, 2 = READ

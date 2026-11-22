@@ -1,6 +1,13 @@
 package com.meshline.app.ui
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaPlayer
+import android.media.MediaRecorder
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,6 +24,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -34,17 +42,21 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -52,16 +64,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.meshline.app.groups.GroupItem
 import com.meshline.app.groups.PendingGroupInvite
+import com.meshline.app.noise.PrivateEnvelope
 import com.meshline.app.protocol.AvatarTable
 import com.meshline.app.service.KeyChangeEvent
 import com.meshline.app.service.PrivateChatMessage
 import com.meshline.app.service.PrivatePeer
 import com.meshline.app.storage.ContactEntity
 import com.meshline.app.ui.theme.MeshlineDesign
-import kotlinx.coroutines.delay
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Filter chip categories for the unified inbox.
@@ -83,6 +99,7 @@ fun ChatsUnifiedScreen(
     groups: List<GroupItem>,
     pendingInvites: List<PendingGroupInvite>,
     contacts: List<ContactEntity>,
+    privateMessages: List<PrivateChatMessage>,
     onOpenPeer: (PrivatePeer) -> Unit,
     onOpenGroup: (GroupItem) -> Unit,
     onAcceptInvite: (String) -> Unit,
@@ -94,6 +111,11 @@ fun ChatsUnifiedScreen(
     var activeFilter by remember { mutableStateOf(ChatFilter.ALL) }
     var showCreateGroupDialog by remember { mutableStateOf(false) }
     var showSearchField by remember { mutableStateOf(false) }
+
+    // Feature 6: message search results (in-memory over the private chat history).
+    val messageResults = remember(searchQuery, privateMessages) {
+        searchPrivateMessages(privateMessages, searchQuery)
+    }
 
     // Filter peers and groups according to query
     val filteredPeers = remember(peers, searchQuery) {
@@ -256,6 +278,51 @@ fun ChatsUnifiedScreen(
                         .fillMaxWidth()
                         .weight(1f),
                 ) {
+                    // Feature 6: message search results, top of the list.
+                    if (messageResults.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = "MESSAGE RESULTS (${messageResults.size})",
+                                color = colors.textSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                            )
+                        }
+                        messageResults.forEach { (m, snippet) ->
+                            val peer = peers.firstOrNull { it.peerIdHex == m.peerIdHex }
+                            if (peer != null) {
+                                item(key = "search_${m.messageIdHex}") {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { onOpenPeer(peer) }
+                                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                                    ) {
+                                        Column {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(fruitEmoji(peer.avatarIndex.toInt()), fontSize = 18.sp)
+                                                Spacer(Modifier.width(6.dp))
+                                                Text(
+                                                    text = peer.nickname,
+                                                    color = colors.textPrimary,
+                                                    fontSize = 15.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                )
+                                            }
+                                            Spacer(Modifier.height(2.dp))
+                                            Text(
+                                                text = snippet,
+                                                color = colors.textSecondary,
+                                                fontSize = 13.sp,
+                                                maxLines = 2,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     val showDirect = activeFilter == ChatFilter.ALL || activeFilter == ChatFilter.DIRECT
                     val showGroups = activeFilter == ChatFilter.ALL || activeFilter == ChatFilter.GROUPS
 
@@ -638,7 +705,8 @@ private fun EmptyInboxState(message: String) {
 fun PrivateChatScreen(
     peer: PrivatePeer,
     messages: List<PrivateChatMessage>,
-    onSend: (String) -> Unit,
+    onSend: (text: String, parentMessageIdHex: String?) -> Unit,
+    onSendMedia: (mediaType: String, media: ByteArray, caption: String, parentMessageIdHex: String?) -> Unit,
     onResend: (String) -> Unit,
     onClearChat: () -> Unit,
     onBack: () -> Unit,
@@ -646,6 +714,8 @@ fun PrivateChatScreen(
     onTyping: () -> Unit = {},
 ) {
     val colors = MeshlineDesign.colors
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var draft by remember { mutableStateOf("") }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
 
@@ -655,6 +725,142 @@ fun PrivateChatScreen(
         if (draft.isNotBlank()) {
             delay(1_200)
             if (draft.isNotBlank()) onTyping()
+        }
+    }
+
+    // Feature 5: the message being replied to (the parent of the next send).
+    var replyTarget by remember { mutableStateOf<PrivateChatMessage?>(null) }
+
+    // Feature 4: voice note recording (MediaRecorder over MPEG_4/AAC).
+    var recording by remember { mutableStateOf(false) }
+    var mediaRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
+    var recFile by remember { mutableStateOf<File?>(null) }
+    var recStartMs by remember { mutableStateOf(0L) }
+    var elapsedMs by remember { mutableStateOf(0L) }
+    LaunchedEffect(recording) {
+        if (!recording) {
+            recStartMs = 0L
+            elapsedMs = 0L
+            return@LaunchedEffect
+        }
+        val start = recStartMs
+        while (recording) {
+            elapsedMs = System.currentTimeMillis() - start
+            delay(200)
+        }
+    }
+
+    fun stopVoiceRecording(send: Boolean) {
+        val mr = mediaRecorder
+        mediaRecorder = null
+        recording = false
+        if (mr != null) {
+            try { mr.stop() } catch (_: Exception) { /* already stopped */ }
+            runCatching { mr.release() }
+        }
+        val file = recFile
+        recFile = null
+        if (file == null) return
+        if (!send) {
+            runCatching { file.delete() }
+            return
+        }
+        val data = runCatching { file.readBytes() }.getOrNull()
+        runCatching { file.delete() }
+        if (data != null) {
+            val parent = replyTarget
+            replyTarget = null
+            if (data.isNotEmpty()) {
+                scope.launch { onSendMedia("audio/aac", data, "", parent?.messageIdHex) }
+            }
+        }
+    }
+
+    fun startVoiceRecording() {
+        val file = File(context.filesDir, "voice_${System.currentTimeMillis()}.aac")
+        val recorder = MediaRecorder()
+        try {
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            recorder.setAudioEncodingBitRate(12_000)
+            recorder.setAudioChannels(1)
+            recorder.setAudioSamplingRate(16_000)
+            recorder.setOutputFile(file.absolutePath)
+            recorder.setMaxDuration(MAX_VOICE_SECONDS * 1_000)
+            recorder.setMaxFileSize(PrivateEnvelope.MAX_MEDIA_BYTES.toLong())
+            recorder.setOnInfoListener { _, what, _ ->
+                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED ||
+                    what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED
+                ) stopVoiceRecording(send = true)
+            }
+            recorder.prepare()
+            recorder.start()
+            mediaRecorder = recorder
+            recFile = file
+            recStartMs = System.currentTimeMillis()
+            elapsedMs = 0
+            recording = true
+        } catch (_: Exception) {
+            runCatching { recorder.release() }
+            runCatching { file.delete() }
+        }
+    }
+
+    // Feature 4: received voice notes play from a temp file copy.
+    var voicePlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    fun releaseVoicePlayer() {
+        runCatching { voicePlayer?.stop() }
+        runCatching { voicePlayer?.release() }
+        voicePlayer = null
+    }
+    fun playVoice(data: ByteArray) {
+        val file = File(context.filesDir, "voice_play_${System.currentTimeMillis()}.aac")
+        runCatching { file.writeBytes(data) }
+        val mp = MediaPlayer()
+        val started = runCatching {
+            mp.setOnCompletionListener {
+                if (voicePlayer === mp) releaseVoicePlayer()
+                runCatching { file.delete() }
+            }
+            mp.setOnErrorListener { _, _, _ ->
+                if (voicePlayer === mp) releaseVoicePlayer()
+                runCatching { file.delete() }
+                true
+            }
+            mp.setDataSource(file.absolutePath)
+            mp.prepare()
+            mp.start()
+            true
+        }.getOrDefault(false)
+        if (!started) {
+            runCatching { mp.release() }
+            runCatching { file.delete() }
+        } else {
+            voicePlayer = mp
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            stopVoiceRecording(send = false)
+            releaseVoicePlayer()
+        }
+    }
+    val pickImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val data = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                if (data != null) {
+                    val bmp = BitmapFactory.decodeByteArray(data, 0, data.size)
+                    if (bmp != null) {
+                        val jpeg = compressToJpeg(bmp)
+                        val parent = replyTarget
+                        replyTarget = null
+                        onSendMedia("image/jpeg", jpeg, parent?.text ?: "", parent?.messageIdHex)
+                    }
+                }
+            }
         }
     }
 
@@ -793,12 +999,26 @@ fun PrivateChatScreen(
             ) {
                 items(messages, key = { it.messageIdHex + it.outgoing }) { m ->
                     val isOutgoing = m.outgoing
+                    val bubbleAlign = if (isOutgoing) Alignment.End else Alignment.Start
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 4.dp),
-                        horizontalAlignment = if (isOutgoing) Alignment.End else Alignment.Start,
+                        horizontalAlignment = bubbleAlign,
                     ) {
+                        // Feature 5: quote of the replied-to message.
+                        m.parentIdHex?.let { parentIdHex ->
+                            val parent = messages.firstOrNull { it.messageIdHex == parentIdHex }
+                            Text(
+                                text = "⤷ " + replyQuoteText(parent),
+                                color = colors.textMuted,
+                                fontSize = 11.sp,
+                                modifier = Modifier
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .align(bubbleAlign),
+                            )
+                        }
+
                         // Asymmetric Message Bubble
                         Box(
                             modifier = Modifier
@@ -832,12 +1052,66 @@ fun PrivateChatScreen(
                                 .padding(horizontal = 14.dp, vertical = 10.dp),
                         ) {
                             Column {
-                                Text(
-                                    text = m.text,
-                                    color = if (isOutgoing) colors.bubbleOutgoingText else colors.bubbleIncomingText,
-                                    fontSize = 14.sp,
-                                    lineHeight = 20.sp,
-                                )
+                                // Feature 4: media bubbles (voice notes / small images).
+                                val mediaType = m.mediaType
+                                val mediaBytes = m.media
+                                if (mediaType != null && mediaBytes != null) {
+                                    if (mediaType.startsWith("image")) {
+                                        val bmp = remember(mediaBytes) {
+                                            BitmapFactory.decodeByteArray(mediaBytes, 0, mediaBytes.size)
+                                        }
+                                        bmp?.let { bitmap ->
+                                            Image(
+                                                bitmap = bitmap.asImageBitmap(),
+                                                contentDescription = "attached image",
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .sizeIn(maxWidth = 260.dp, maxHeight = 200.dp),
+                                            )
+                                        }
+                                    } else {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = "🎙️ Voice message",
+                                                color = if (isOutgoing) colors.bubbleOutgoingText else colors.bubbleIncomingText,
+                                                fontSize = 14.sp,
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(9999.dp))
+                                                    .background(colors.primary)
+                                                    .clickable {
+                                                        if (voicePlayer != null) releaseVoicePlayer() else playVoice(mediaBytes)
+                                                    },
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Text(
+                                                    text = "▶",
+                                                    color = colors.onPrimary,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                )
+                                            }
+                                        }
+                                    }
+                                    if (m.text.isNotBlank()) {
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            text = m.text,
+                                            color = if (isOutgoing) colors.bubbleOutgoingText else colors.bubbleIncomingText,
+                                            fontSize = 14.sp,
+                                            lineHeight = 20.sp,
+                                        )
+                                    }
+                                } else {
+                                    Text(
+                                        text = m.text,
+                                        color = if (isOutgoing) colors.bubbleOutgoingText else colors.bubbleIncomingText,
+                                        fontSize = 14.sp,
+                                        lineHeight = 20.sp,
+                                    )
+                                }
                                 Spacer(Modifier.height(4.dp))
                                 Row(
                                     modifier = Modifier.align(Alignment.End),
@@ -872,6 +1146,17 @@ fun PrivateChatScreen(
                             }
                         }
 
+                        // Feature 5: reply affordance.
+                        Box(
+                            modifier = Modifier
+                                .padding(top = 1.dp)
+                                .align(bubbleAlign)
+                                .clickable { replyTarget = m },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("↩", color = colors.textMuted, fontSize = 10.sp)
+                        }
+
                         if (m.resendable) {
                             TextButton(
                                 onClick = { onResend(m.messageIdHex) },
@@ -879,6 +1164,32 @@ fun PrivateChatScreen(
                             ) {
                                 Text("Resend message", color = colors.danger, fontSize = 11.sp)
                             }
+                        }
+                    }
+                }
+            }
+
+            // Feature 5: reply banner above the composer.
+            replyTarget?.let { target ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .background(colors.surfaceContainerLow, RoundedCornerShape(10.dp))
+                        .border(1.dp, colors.border, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "↩ Replying to ${replyQuoteText(target)}",
+                            color = colors.textSecondary,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { replyTarget = null }) {
+                            Text("✕", color = colors.textMuted, fontSize = 12.sp)
                         }
                     }
                 }
@@ -917,6 +1228,52 @@ fun PrivateChatScreen(
                     )
                 }
 
+                Spacer(Modifier.width(4.dp))
+
+                // Feature 4: attach a small image (gallery picker).
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(9999.dp))
+                        .background(colors.surfaceElevated)
+                        .border(1.dp, colors.border, RoundedCornerShape(9999.dp))
+                        .clickable { pickImageLauncher.launch("image/*") },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("🖼", color = colors.textSecondary, fontSize = 15.sp)
+                }
+                Spacer(Modifier.width(4.dp))
+
+                // Feature 4: mic — record a voice note; tap again to send it.
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(9999.dp))
+                        .background(if (recording) colors.danger.copy(alpha = 0.15f) else colors.surfaceElevated)
+                        .border(
+                            1.dp,
+                            if (recording) colors.danger else colors.border,
+                            RoundedCornerShape(9999.dp),
+                        )
+                        .clickable {
+                            if (recording) stopVoiceRecording(send = true) else startVoiceRecording()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (recording) "🛑" else "🎤",
+                        color = if (recording) colors.danger else colors.textSecondary,
+                        fontSize = 15.sp,
+                    )
+                }
+                if (recording) {
+                    Text(
+                        text = formatDuration(elapsedMs),
+                        color = colors.primary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
                 Spacer(Modifier.width(8.dp))
 
                 // Circular Send Button
@@ -926,7 +1283,9 @@ fun PrivateChatScreen(
                         .clip(CircleShape)
                         .background(if (draft.isNotBlank()) colors.primary else colors.surfaceElevated)
                         .clickable(enabled = draft.isNotBlank()) {
-                            onSend(draft.trim())
+                            val parent = replyTarget
+                            replyTarget = null
+                            onSend(draft.trim(), parent?.messageIdHex)
                             draft = ""
                         },
                     contentAlignment = Alignment.Center,
@@ -940,6 +1299,83 @@ fun PrivateChatScreen(
             }
         }
     }
+}
+
+/**
+ * Feature 6: search the private chat history by text (case-insensitive).
+ * Returns (message, snippet) pairs, newest last, capped at [SEARCH_RESULT_MAX].
+ */
+fun searchPrivateMessages(
+    messages: List<PrivateChatMessage>,
+    query: String,
+): List<Pair<PrivateChatMessage, String>> {
+    if (query.isBlank()) return emptyList()
+    val q = query.trim()
+    return messages
+        .filter { m -> m.text.contains(q, ignoreCase = true) }
+        .sortedBy { it.createdAtMs }
+        .takeLast(SEARCH_RESULT_MAX)
+        .map { m -> m to searchSnippet(m) }
+}
+
+private fun searchSnippet(m: PrivateChatMessage): String {
+    val text = m.text
+    if (text.isNotBlank()) return text.take(80)
+    val mime = m.mediaType ?: return "Message"
+    return when {
+        mime.startsWith("audio") -> "🎙️ Voice message"
+        mime.startsWith("image") -> "🖼️ Photo"
+        else -> "Media"
+    }
+}
+
+/** Quote shown above a bubble whose message has a reply target (Feature 5). */
+private fun replyQuoteText(parent: PrivateChatMessage?): String {
+    if (parent == null) return "message"
+    val mime = parent.mediaType
+    return if (mime != null) {
+        when {
+            mime.startsWith("audio") -> "🎙️ Voice message"
+            mime.startsWith("image") -> "🖼️ Photo"
+            else -> "Media"
+        }
+    } else {
+        parent.text.take(60)
+    }
+}
+
+/** Formats elapsed milliseconds as "MM:SS" (voice note timer). */
+private fun formatDuration(ms: Long): String {
+    val total = (ms / 1000).coerceAtLeast(0)
+    return "${total / 60}:${String.format("%02d", total % 60)}"
+}
+
+private const val SEARCH_RESULT_MAX = 24
+
+/** Max voice note length (30 s) and the JPEG quality for picked images. */
+private const val MAX_VOICE_SECONDS: Int = 30
+
+/** Compresses a picked image to JPEG, shrinking until it fits the private-message budget. */
+private fun compressToJpeg(src: Bitmap): ByteArray {
+    fun encode(b: Bitmap, quality: Int): ByteArray {
+        val baos = java.io.ByteArrayOutputStream()
+        b.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+        return baos.toByteArray()
+    }
+    var bmp = src
+    var quality = 85
+    var bytes = encode(bmp, quality)
+    while (bytes.size > PrivateEnvelope.MAX_MEDIA_BYTES && quality > 40) {
+        quality -= 15
+        bytes = encode(bmp, quality)
+    }
+    if (bytes.size > PrivateEnvelope.MAX_MEDIA_BYTES && bmp.width >= 240) {
+        val nw = (bmp.width * 0.8).toInt().coerceAtLeast(80)
+        val nh = (bmp.height * 0.8).toInt().coerceAtLeast(80)
+        bmp = Bitmap.createScaledBitmap(bmp, nw, nh, true)
+        bytes = encode(bmp, 60)
+    }
+    return bytes.copyOf(minOf(bytes.size, PrivateEnvelope.MAX_MEDIA_BYTES))
 }
 
 /**

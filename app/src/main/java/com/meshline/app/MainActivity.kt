@@ -121,7 +121,10 @@ class MainActivity : ComponentActivity() {
                     },
                     onStart = { startMesh() },
                     onSendPublic = { text -> sendPublic(text) },
-                    onSendPrivate = { peer, text -> sendPrivate(peer, text) },
+                    onSendPrivate = { peerIdHex, text, parentIdHex -> sendPrivate(peerIdHex, text, parentIdHex) },
+                    onSendMediaPrivate = { peerIdHex, mediaType, data, caption, parentIdHex ->
+                        sendMediaPrivate(peerIdHex, mediaType, data, caption, parentIdHex)
+                    },
                     onOpenChat = { peer -> openChat(peer) },
                     onAcceptKey = { peer -> acceptKey(peer) },
                     onRejectKey = { peer -> rejectKey(peer) },
@@ -193,13 +196,34 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun sendPrivate(peerIdHex: String, text: String) {
+    /** Sends a private message (Feature 5: reply-to passes the parent message id). */
+    private fun sendPrivate(peerIdHex: String, text: String, parentIdHex: String? = null) {
         if (text.isBlank()) return
         startForegroundService(
             Intent(this, BleMeshService::class.java)
                 .setAction(BleMeshService.ACTION_SEND_PRIVATE)
                 .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
                 .putExtra(BleMeshService.EXTRA_TEXT, text)
+                .putExtra(BleMeshService.EXTRA_PARENT_ID, parentIdHex)
+        )
+    }
+
+    /** Sends a media message (Feature 4): voice note or small image, optional caption. */
+    private fun sendMediaPrivate(
+        peerIdHex: String,
+        mediaType: String,
+        data: ByteArray,
+        caption: String,
+        parentIdHex: String?,
+    ) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SEND_MEDIA)
+                .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
+                .putExtra(BleMeshService.EXTRA_MEDIA_MIME, mediaType)
+                .putExtra(BleMeshService.EXTRA_MEDIA_DATA, data)
+                .putExtra(BleMeshService.EXTRA_CAPTION, caption)
+                .putExtra(BleMeshService.EXTRA_PARENT_ID, parentIdHex)
         )
     }
 
@@ -376,7 +400,8 @@ private fun App(
     onSetThemeMode: (AppThemeMode) -> Unit,
     onStart: () -> Unit,
     onSendPublic: (String) -> Unit,
-    onSendPrivate: (String, String) -> Unit,
+    onSendPrivate: (String, String, String?) -> Unit,
+    onSendMediaPrivate: (String, String, ByteArray, String, String?) -> Unit,
     onOpenChat: (String) -> Unit,
     onAcceptKey: (String) -> Unit,
     onRejectKey: (String) -> Unit,
@@ -599,7 +624,10 @@ private fun App(
                 PrivateChatScreen(
                     peer = peer,
                     messages = privateMessages.filter { it.peerIdHex == peer.peerIdHex },
-                    onSend = { text -> onSendPrivate(peer.peerIdHex, text) },
+                    onSend = { text, parentId -> onSendPrivate(peer.peerIdHex, text, parentId) },
+                    onSendMedia = { mime, data, caption, parentId ->
+                        onSendMediaPrivate(peer.peerIdHex, mime, data, caption, parentId)
+                    },
                     onResend = { messageId -> onResend(messageId) },
                     onClearChat = { onClearChat(peer.peerIdHex) },
                     isTyping = typingPeers.contains(peer.peerIdHex),
@@ -749,6 +777,7 @@ private fun App(
                                 groups = groups,
                                 pendingInvites = pendingGroupInvites,
                                 contacts = contacts,
+                                privateMessages = privateMessages,
                                 onOpenPeer = { peer ->
                                     openPeerId = peer.peerIdHex
                                     onOpenChat(peer.peerIdHex)

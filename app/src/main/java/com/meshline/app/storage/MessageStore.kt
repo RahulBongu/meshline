@@ -36,6 +36,13 @@ data class MessageEntity(
     val createdAtMs: Long,
     /** QUEUED / SENT / DELIVERED / READ / NOT_DELIVERED. */
     val state: String,
+    // Feature 4: media attachment (null on text-only messages).
+    val media: ByteArray? = null,
+    /** MIME type of [media] (null on text messages). */
+    val mediaType: String? = null,
+    // Feature 5: quoted parent message (null when not a reply).
+    /** `messageIdHex` of the replied-to message, null when none. */
+    val parentIdHex: String? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -45,7 +52,10 @@ data class MessageEntity(
             outgoing == other.outgoing &&
             text.contentEquals(other.text) &&
             createdAtMs == other.createdAtMs &&
-            state == other.state
+            state == other.state &&
+            (media?.contentEquals(other.media) ?: other.media == null) &&
+            mediaType == other.mediaType &&
+            parentIdHex == other.parentIdHex
     }
 
     override fun hashCode(): Int {
@@ -55,6 +65,9 @@ data class MessageEntity(
         h = 31 * h + text.contentHashCode()
         h = 31 * h + createdAtMs.hashCode()
         h = 31 * h + state.hashCode()
+        h = 31 * h + (media?.contentHashCode() ?: 0)
+        h = 31 * h + (mediaType?.hashCode() ?: 0)
+        h = 31 * h + (parentIdHex?.hashCode() ?: 0)
         return h
     }
 }

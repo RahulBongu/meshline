@@ -118,12 +118,26 @@ class PrivateMessenger(
     /**
      * Queues a message for [peerId] and returns the envelope (with its
      * application-level id) so the caller can record it in the chat history.
+     *
+     * [mediaType]/[media] (Feature 4) turn the message into a media message
+     * (voice note or small image): [text] then carries the caption.
+     * [parentHex] (Feature 5) makes it a reply to the message with that id.
      */
-    suspend fun send(peerId: ByteArray, peerIdHex: String, text: ByteArray): PrivateEnvelope {
+    suspend fun send(
+        peerId: ByteArray,
+        peerIdHex: String,
+        text: ByteArray,
+        mediaType: String? = null,
+        media: ByteArray? = null,
+        parentHex: String? = null,
+    ): PrivateEnvelope {
         val envelope = PrivateEnvelope(
             messageId = randomBytes(PrivateEnvelope.MESSAGE_ID_BYTES),
             sentAtMs = nowProvider(),
             text = text.copyOf(),
+            mediaType = mediaType,
+            media = media,
+            parentHex = parentHex,
         )
         val id = outbox.queue(peerIdHex, envelope.encode(), nowProvider())
         retrySchedule[id] = nowProvider()

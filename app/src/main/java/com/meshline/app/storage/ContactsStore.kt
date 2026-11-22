@@ -62,7 +62,7 @@ interface ContactsDao {
         ChannelMessageRecordEntity::class,
         ReactionEntity::class,
     ],
-    version = 8,
+    version = 9,
     // The schema of every version is exported to app/schemas/ (see the KSP
     // arguments in build.gradle.kts) so the instrumented migration test can
     // build a v1 database and walk it up to the current version.
@@ -282,6 +282,19 @@ abstract class MeshlineDatabase : RoomDatabase() {
                     )
                     """.trimIndent()
                 )
+            }
+        }
+
+        /**
+         * v8 → v9 adds three nullable `messages` columns: `media` (Feature 4),
+         * `mediaType` (Feature 4) and `parentIdHex` (Feature 5). All nullable
+         * — text messages keep working unchanged; nothing is destroyed.
+         */
+        val MIGRATION_8_9 = object : androidx.room.migration.Migration(8, 9) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `media` BLOB")
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `mediaType` TEXT")
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `parentIdHex` TEXT")
             }
         }
     }
