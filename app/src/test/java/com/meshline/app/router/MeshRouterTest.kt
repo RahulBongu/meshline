@@ -3,6 +3,7 @@ package com.meshline.app.router
 import com.meshline.app.protocol.MeshPacket
 import com.meshline.app.protocol.PacketCodec
 import com.meshline.app.protocol.PacketType
+import com.meshline.app.protocol.Payloads
 import com.meshline.app.transport.SimulatorConfig
 import com.meshline.app.transport.SimulatorTransport
 import com.meshline.app.transport.VirtualNetwork
@@ -114,6 +115,78 @@ class MeshRouterTest {
         assertEquals(1, targets.size)
         assertTrue(targets.any { it.contentEquals(id(2)) })
         assertEquals(1, transport.sentTo.size)
+    }
+
+    @Test
+    fun `reaction is delivered to the recipient and relayed like public content`() = runBlocking {
+        val transport = FakeTransport(id(1), setOf(id(2)))
+        val router = MeshRouter(id(1), transport, testConfig(), neighboursProvider = { transport.snapshot() })
+        val delivered = mutableListOf<MeshPacket>()
+        val job = launch { router.delivered.collect { delivered += it } }
+        try {
+            delay(10) // let collector subscribe before emission (replay=0 flow)
+            val reaction = Payloads.ReactionPayload(Payloads.ReactionPayload.KIND_ADD, "👍", ByteArray(32) { 0x5A })
+            val decision = router.onReceive(
+                PacketCodec.encode(packet(from = 0, type = PacketType.REACTION, payload = Payloads.encodeReaction(reaction))),
+                id(0),
+            )
+            kotlinx.coroutines.delay(20)
+            assertTrue("expected Deliver, got $decision", decision is RouteDecision.Deliver)
+            assertEquals("reaction must be delivered once", 1, delivered.size)
+            assertEquals("reaction must be relayed (ttl 7)", 1, router.stats.relayedForwards)
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test
+    fun `typing directed to self is delivered but never relayed`() = runBlocking {
+        val transport = FakeTransport(id(1), setOf(id(2)))
+        val router = MeshRouter(id(1), transport, testConfig(), neighboursProvider = { transport.snapshot() })
+        val delivered = mutableListOf<MeshPacket>()
+        val job = launch { router.delivered.collect { delivered += it } }
+        try {
+            delay(10)
+            val decision = router.onReceive(
+                PacketCodec.encode(packet(from = 0, to = 1, type = PacketType.TYPING, ttl = 1)),
+                id(0),
+            )
+            kotlinx.coroutines.delay(20)
+            assertTrue("expected Deliver, got $decision", decision is RouteDecision.Deliver)
+            assertEquals("typing to self must be delivered once", 1, delivered.size)
+            assertEquals("ttl=1 typing must never relay", 0, router.stats.relayedForwards)
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test
+    fun `typing directed to another peer is not delivered here and not relayed`() = runBlocking {
+        val transport = FakeTransport(id(1), setOf(id(2)))
+        val router = MeshRouter(id(1), transport, testConfig(), neighboursProvider = { transport.snapshot() })
+        val delivered = mutableListOf<MeshPacket>()
+        val job = launch { router.delivered.collect { delivered += it } }
+        try {
+            delay(10)
+            val decision = router.onReceive(
+                PacketCodec.encode(packet(from = 0, to = 2, type = PacketType.TYPING, ttl = 1)),
+                id(0),
+            )
+            kotlinx.coroutines.delay(20)
+            assertEquals("typing for another peer must be dropped here, got $decision", 0, delivered.size)
+            assertEquals("typing for another peer must not be relayed", 0, router.stats.relayedForwards)
+        } finally { job.cancelAndJoin() }
+    }
+
+    @Test
+    fun `geo ping is broadcast and relayed with its TTL`() = runBlocking {
+        val transport = FakeTransport(id(1), setOf(id(2), id(3)))
+        val router = MeshRouter(id(1), transport, testConfig(), neighboursProvider = { transport.snapshot() })
+        val geo = Payloads.GeoPingPayload("9q8yy", "RH")
+        val decision = router.onReceive(
+            PacketCodec.encode(
+                packet(from = 0, type = PacketType.GEO_PING, ttl = 2, payload = Payloads.encodeGeoPing(geo))
+            ),
+            id(0),
+        )
+        assertTrue("geo ping must be delivered, got $decision", decision is RouteDecision.Deliver)
+        assertEquals("geo ping with ttl 2 must relay once", 1, router.stats.relayedForwards)
     }
 
     @Test

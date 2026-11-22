@@ -28,6 +28,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -277,6 +278,71 @@ class SecureChannelTest {
                 afterSend == "SENT" || afterSend == "DELIVERED",
             )
             assertNotNull("B must have received it", b.channel.messages.value.firstOrNull { !it.outgoing })
+        } finally {
+            peers.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
+        }
+    }
+
+    @Test
+    fun `a media message round trips with mediaType, media bytes and caption`() = runBlocking {
+        val now = { 1_700_000_100_000L }
+        val peers = build(this, mapOf(0 to setOf(1), 1 to setOf(0)), now)
+        try {
+            val a = peers[0]
+            val b = peers[1]
+
+            a.channel.ensureSession(hex(b.id))
+            delay(300)
+
+            val media = ByteArray(2_000) { (it % 251).toByte() }
+            assertTrue("media message must be accepted", a.channel.sendMedia(hex(b.id), "image/jpeg", media, "a caption"))
+            a.channel.tick()
+            delay(300)
+
+            val received = b.channel.messages.value.firstOrNull { !it.outgoing }
+            assertNotNull("B must have received the media message", received)
+            assertEquals("image/jpeg", received!!.mediaType)
+            assertArrayEquals(media, received.media)
+            assertEquals("a caption", received.text)
+
+            val sent = a.channel.messages.value.firstOrNull { it.outgoing }
+            assertEquals("the sender's row must carry mediaType", "image/jpeg", sent?.mediaType)
+            assertArrayEquals(media, sent?.media)
+        } finally {
+            peers.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
+        }
+    }
+
+    @Test
+    fun `a reply-to stores the parent id on the sender and receiver rows`() = runBlocking {
+        val now = { 1_700_000_100_000L }
+        val peers = build(this, mapOf(0 to setOf(1), 1 to setOf(0)), now)
+        try {
+            val a = peers[0]
+            val b = peers[1]
+
+            a.channel.ensureSession(hex(b.id))
+            delay(300)
+
+            assertTrue("original message must be accepted", a.channel.send(hex(b.id), "the original message"))
+            a.channel.tick()
+            delay(200)
+            val originalId = a.channel.messages.value
+                .first { it.outgoing && it.text == "the original message" }.messageIdHex
+
+            assertTrue("reply must be accepted", a.channel.send(hex(b.id), "a reply", originalId))
+            a.channel.tick()
+            delay(300)
+            assertEquals(
+                "the sender's reply row must carry the parent id",
+                originalId,
+                a.channel.messages.value.first { it.text == "a reply" }.parentIdHex,
+            )
+            assertEquals(
+                "the receiver's row must carry the parent id",
+                originalId,
+                b.channel.messages.value.firstOrNull { !it.outgoing && it.text == "a reply" }?.parentIdHex,
+            )
         } finally {
             peers.forEach { it.jobs.forEach { j -> j.cancelAndJoin() } }
         }

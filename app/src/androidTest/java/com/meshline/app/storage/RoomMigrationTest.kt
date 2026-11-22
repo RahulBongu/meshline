@@ -144,6 +144,66 @@ class RoomMigrationTest {
         }
     }
 
+    @Test
+    fun migrateFromV7ToV8CreatesTheReactionTable() {
+        // A v7 database (the pre-Feature-1 schema).
+        val v7 = helper.createDatabase(TEST_DB, 7)
+        v7.close()
+
+        // Walk it up: 7 -> 8.
+        val migrated = helper.runMigrationsAndValidate(TEST_DB, 8, false, MeshlineDatabase.MIGRATION_7_8)
+        try {
+            // The new table exists and is empty.
+            migrated.query("SELECT name FROM sqlite_master WHERE type='table' AND name='message_reactions'").use { c ->
+                assertTrue("message_reactions must exist after v7->v8", c.moveToFirst())
+            }
+            // The pre-existing tables survive the migration.
+            migrated.query("SELECT COUNT(*) FROM `contacts`").use { c ->
+                c.moveToFirst()
+                assertEquals(0, c.getInt(0))
+            }
+            migrated.query("SELECT COUNT(*) FROM `groups`").use { c ->
+                c.moveToFirst()
+                assertEquals(0, c.getInt(0))
+            }
+        } finally {
+            migrated.close()
+        }
+    }
+
+    @Test
+    fun migrateFromV8ToV9AddsMediaColumns() {
+        val v8 = helper.createDatabase(TEST_DB, 8)
+        v8.execSQL(
+            """
+            INSERT INTO `messages`
+                (`messageIdHex`, `peerIdHex`, `outgoing`, `text`, `createdAtMs`, `state`)
+            VALUES ('m1', 'peer1', 0, X'68656c6c6f', 1700000000, 'DELIVERED')
+            """.trimIndent()
+        )
+        v8.close()
+
+        val migrated = helper.runMigrationsAndValidate(TEST_DB, 9, false, MeshlineDatabase.MIGRATION_8_9)
+        try {
+            // The migrated history survives.
+            migrated.query("SELECT COUNT(*) FROM `messages`").use { c ->
+                c.moveToFirst()
+                assertEquals(1, c.getInt(0))
+            }
+            // The new columns exist, are nullable, and are usable on old rows.
+            migrated.query(
+                "SELECT `media`, `mediaType`, `parentIdHex` FROM `messages` WHERE `messageIdHex` = 'm1'"
+            ).use { c ->
+                assertTrue("the row must be found", c.moveToFirst())
+                assertTrue(c.isNull(c.getColumnIndexOrThrow("media")))
+                assertTrue(c.isNull(c.getColumnIndexOrThrow("mediaType")))
+                assertTrue(c.isNull(c.getColumnIndexOrThrow("parentIdHex")))
+            }
+        } finally {
+            migrated.close()
+        }
+    }
+
     private companion object {
         const val TEST_DB = "migration-test.db"
     }

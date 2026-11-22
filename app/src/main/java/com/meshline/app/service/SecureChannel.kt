@@ -36,6 +36,11 @@ data class PrivateChatMessage(
     val createdAtMs: Long,
     /** True when the user can send it again (it was never delivered). */
     val resendable: Boolean = false,
+    // Feature 4: media attachment (null on text messages; `text` holds the caption).
+    val mediaType: String? = null,
+    val media: ByteArray? = null,
+    // Feature 5: quoted parent message (null when not a reply).
+    val parentIdHex: String? = null,
 )
 
 /** A peer we can open a private chat with. */
@@ -195,6 +200,9 @@ class SecureChannel(
                         text = result.envelope.text.copyOf(),
                         createdAtMs = result.envelope.sentAtMs,
                         state = OutboxState.DELIVERED.name,
+                        media = result.envelope.media,
+                        mediaType = result.envelope.mediaType,
+                        parentIdHex = result.envelope.parentHex,
                     )
                 )
                 refresh()
@@ -246,12 +254,15 @@ class SecureChannel(
      * Queues a private message. It stays **Queued** until a session exists;
      * the tick loop encrypts and sends it (with a fresh nonce) and keeps
      * retrying until the peer acknowledges it.
+     *
+     * [parentMessageIdHex] (Feature 5) marks the message as a reply to that
+     * message id: the stored rows carry it and the chat UI renders a quote.
      */
-    suspend fun send(peerIdHex: String, text: String): Boolean {
+    suspend fun send(peerIdHex: String, text: String, parentMessageIdHex: String? = null): Boolean {
         val peerId = peerIdHex.hexToBytes()
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return false
-        val envelope = messenger.send(peerId, peerIdHex, trimmed.toByteArray())
+        val envelope = messenger.send(peerId, peerIdHex, trimmed.toByteArray(), parentHex = parentMessageIdHex)
         // The chat history keeps the message; the outbox only tracks delivery.
         messageStore.upsert(
             MessageEntity(
@@ -261,6 +272,43 @@ class SecureChannel(
                 text = envelope.text.copyOf(),
                 createdAtMs = envelope.sentAtMs,
                 state = OutboxState.QUEUED.name,
+                media = envelope.media,
+                mediaType = envelope.mediaType,
+                parentIdHex = envelope.parentHex,
+            )
+        )
+        refresh()
+        return true
+    }
+
+    /**
+     * Queues a media message (Feature 4): a voice note (`audio/aac`) or a
+     * small image (`image/jpeg`). [text] is the optional caption.
+     * Stored/sent through the same outbox as text messages.
+     */
+    suspend fun sendMedia(
+        peerIdHex: String,
+        mediaType: String,
+        media: ByteArray,
+        text: String = "",
+        parentMessageIdHex: String? = null,
+    ): Boolean {
+        if (media.isEmpty() || media.size > PrivateEnvelope.MAX_MEDIA_BYTES) return false
+        val captionBytes = text.toByteArray(Charsets.UTF_8)
+        if (captionBytes.size > PrivateEnvelope.MAX_CAPTION_BYTES) return false
+        val peerId = peerIdHex.hexToBytes()
+        val envelope = messenger.send(peerId, peerIdHex, captionBytes, mediaType, media, parentMessageIdHex)
+        messageStore.upsert(
+            MessageEntity(
+                messageIdHex = hex(envelope.messageId),
+                peerIdHex = peerIdHex,
+                outgoing = true,
+                text = envelope.text.copyOf(),
+                createdAtMs = envelope.sentAtMs,
+                state = OutboxState.QUEUED.name,
+                media = envelope.media,
+                mediaType = envelope.mediaType,
+                parentIdHex = envelope.parentHex,
             )
         )
         refresh()
@@ -288,6 +336,9 @@ class SecureChannel(
             messageId = messageIdHex.hexToBytes(),
             sentAtMs = message.createdAtMs,
             text = message.text.copyOf(),
+            mediaType = message.mediaType,
+            media = message.media,
+            parentHex = message.parentIdHex,
         )
         outbox.queue(message.peerIdHex, envelope.encode(), nowProvider())
         messageStore.setState(messageIdHex, OutboxState.QUEUED.name)
@@ -486,6 +537,9 @@ class SecureChannel(
                 state = row.state,
                 createdAtMs = row.createdAtMs,
                 resendable = row.outgoing && row.state == NOT_DELIVERED,
+                mediaType = row.mediaType,
+                media = row.media,
+                parentIdHex = row.parentIdHex,
             )
         }
         _messages.value = list.sortedBy { it.createdAtMs }

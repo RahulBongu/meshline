@@ -45,6 +45,8 @@ object DatabaseFactory {
                 MeshlineDatabase.MIGRATION_4_5,
                 MeshlineDatabase.MIGRATION_5_6,
                 MeshlineDatabase.MIGRATION_6_7,
+                MeshlineDatabase.MIGRATION_7_8,
+                MeshlineDatabase.MIGRATION_8_9,
             )
             .fallbackToDestructiveMigration()
             .build()

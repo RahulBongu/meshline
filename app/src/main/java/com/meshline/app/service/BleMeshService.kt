@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -22,6 +23,7 @@ import com.meshline.app.groups.GroupManager
 import com.meshline.app.groups.GroupMessageUi
 import com.meshline.app.groups.PendingGroupInvite
 import com.meshline.app.profile.ProfileStore
+import com.meshline.app.protocol.Geohash
 import com.meshline.app.protocol.GroupPayloads
 import com.meshline.app.protocol.MeshPacket
 import com.meshline.app.protocol.PacketCodec
@@ -37,6 +39,7 @@ import com.meshline.app.security.KeyCache
 import com.meshline.app.security.SecureStorageStatus
 import com.meshline.app.storage.ContactsRepository
 import com.meshline.app.storage.MessageRetention
+import com.meshline.app.storage.ReactionEntity
 import com.meshline.app.storage.RetentionStore
 import com.meshline.app.transport.BleTransport
 import com.meshline.app.transport.InternetRelayTransport
@@ -87,6 +90,23 @@ data class PublicChatMessage(
     val hops: Int = 0,
 )
 
+/** A public reaction on a broadcast message (Feature 1). */
+data class ReactionUi(
+    val emoji: String,
+    val count: Int,
+    /** True when the local identity already reacted with this emoji. */
+    val own: Boolean = false,
+)
+
+/** A recent geo ping (Feature 3): broadcast with a privacy-safe geohash. */
+data class GeoPingUi(
+    val senderIdHex: String,
+    val nickname: String,
+    val geohash: String,
+    val timestampMs: Long,
+    val hops: Int = 0,
+)
+
 /**
  * Meshline background mesh service.
  *
@@ -125,6 +145,9 @@ class BleMeshService : Service() {
     @Volatile private var channelManager: ChannelManager? = null
     @Volatile private var relayTransport: InternetRelayTransport? = null
     private val peerProfiles = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Int>>()
+
+    /** Typing indicator expiries: peerIdHex -> absolute time after which it lapses. */
+    private val typingExpiryAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private fun connectedPeersHex(): Set<String> =
         connectedPeers.map { it.joinToString("") { b -> "%02x".format(b) } }.toSet()
@@ -317,6 +340,43 @@ class BleMeshService : Service() {
                                 )
                             )
                         }
+                        PacketType.REACTION -> {
+                            runCatching {
+                                val rc = Payloads.decodeReaction(pkt.payload)
+                                val targetHex = rc.targetId.joinToString("") { "%02x".format(it) }
+                                val senderHex = pkt.senderId.joinToString("") { "%02x".format(it) }
+                                val dao = contacts.reactionsDao()
+                                if (rc.kind == Payloads.ReactionPayload.KIND_ADD) {
+                                    dao?.insertReaction(
+                                        ReactionEntity(
+                                            targetIdHex = targetHex,
+                                            senderIdHex = senderHex,
+                                            emoji = rc.emoji,
+                                            createdAtMs = System.currentTimeMillis(),
+                                        )
+                                    )
+                                } else {
+                                    dao?.deleteReaction(targetHex, senderHex, rc.emoji)
+                                }
+                                refreshReactions()
+                            }
+                        }
+                        PacketType.TYPING -> {
+                            runCatching {
+                                Payloads.decodeTyping(pkt.payload)
+                                markTyping(pkt.senderId.joinToString("") { "%02x".format(it) })
+                            }
+                        }
+                        PacketType.GEO_PING -> {
+                            runCatching {
+                                val gp = Payloads.decodeGeoPing(pkt.payload)
+                                addGeoPing(
+                                    senderHex = pkt.senderId.joinToString("") { "%02x".format(it) },
+                                    geohash = gp.geohash,
+                                    name = gp.name,
+                                )
+                            }
+                        }
                         else -> {
                             channel.onPacket(pkt, from)
                         }
@@ -331,6 +391,7 @@ class BleMeshService : Service() {
                 try {
                     channel.tick()
                     t.sweepUnannouncedLinks()
+                    pruneTyping()
                     if (t.unprovenLinkCount > 0 &&
                         System.currentTimeMillis() - lastAnnounceAtMs > RE_ANNOUNCE_INTERVAL_MS
                     ) {
@@ -461,6 +522,137 @@ class BleMeshService : Service() {
         )
     }
 
+    // ------------------------------------------------------------------
+    // Feature 1: reactions on public broadcasts (signed, broadcast, ADD/REMOVE)
+    // ------------------------------------------------------------------
+
+    /**
+     * Toggles the local identity's reaction on the public broadcast message
+     * [targetIdHex]: sends an ADD (or REMOVE when we already react with
+     * [emoji]) and updates the local reaction map immediately.
+     */
+    suspend fun toggleReaction(targetIdHex: String, emoji: String) {
+        val dao = contacts.reactionsDao() ?: return
+        val senderHex = identity.senderId.joinToString("") { "%02x".format(it) }
+        val targetBytes = targetIdHex.hexToBytes()
+        val reaction = Payloads.ReactionPayload(
+            if (runCatching { dao.hasReaction(targetIdHex, senderHex, emoji) }.getOrDefault(false)) {
+                Payloads.ReactionPayload.KIND_REMOVE
+            } else {
+                Payloads.ReactionPayload.KIND_ADD
+            },
+            emoji,
+            targetBytes,
+        )
+        runCatching { router?.onLocalBroadcast(signed(PacketType.REACTION, Payloads.encodeReaction(reaction))) }
+        if (reaction.kind == Payloads.ReactionPayload.KIND_ADD) {
+            runCatching { dao.insertReaction(ReactionEntity(targetIdHex, senderHex, emoji, System.currentTimeMillis())) }
+        } else {
+            runCatching { dao.deleteReaction(targetIdHex, senderHex, emoji) }
+        }
+        refreshReactions()
+    }
+
+    /** Re-reads the reaction table and publishes the per-message reaction map. */
+    private suspend fun refreshReactions() {
+        val dao = contacts.reactionsDao() ?: return
+        val ownHex = runCatching { identity.senderId.joinToString("") { "%02x".format(it) } }.getOrDefault("")
+        val map = runCatching {
+            dao.allOnce()
+                .groupBy { it.targetIdHex }
+                .mapValues { (_, rows) ->
+                    rows.groupBy { it.emoji }
+                        .map { (emoji, rs) -> ReactionUi(emoji, rs.size, own = rs.any { it.senderIdHex == ownHex }) }
+                        .sortedByDescending { it.count }
+                }
+        }.getOrDefault(emptyMap())
+        setReactions(map)
+    }
+
+    private fun setReactions(m: Map<String, List<ReactionUi>>) {
+        _reactions.value = m
+    }
+
+    // ------------------------------------------------------------------
+    // Feature 2: typing indicators (directed, TTL=1, expires on its own)
+    // ------------------------------------------------------------------
+
+    /** Sends a signed TYPING packet to [peerIdHex] ("I am typing to you"). */
+    suspend fun sendTyping(peerIdHex: String) {
+        val r = router ?: return
+        val id = identity
+        val unsigned = MeshPacket(
+            PacketCodec.PROTOCOL_VERSION,
+            PacketType.TYPING,
+            TYPING_TTL,
+            0x01, // HAS_RECIPIENT (directed), not signed yet
+            System.currentTimeMillis(),
+            Payloads.encodeTyping(),
+            id.senderId,
+            peerIdHex.hexToBytes(),
+        )
+        val pkt = unsigned.copy(
+            flags = 0x03, // HAS_RECIPIENT | HAS_SIGNATURE
+            signature = id.signEd25519(PacketCodec.signingInput(unsigned)),
+        )
+        r.onLocalSend(pkt)
+    }
+
+    private fun markTyping(senderHex: String) {
+        typingExpiryAtMs[senderHex] = System.currentTimeMillis() + TYPING_DISPLAY_MS
+        setTypingPeers(typingExpiryAtMs.keys.toSet())
+    }
+
+    private fun pruneTyping(nowMs: Long = System.currentTimeMillis()) {
+        val it = typingExpiryAtMs.entries.iterator()
+        while (it.hasNext()) {
+            if (it.next().value <= nowMs) it.remove()
+        }
+        setTypingPeers(typingExpiryAtMs.keys.toSet())
+    }
+
+    private fun setTypingPeers(v: Set<String>) {
+        _typingPeers.value = v
+    }
+
+    // ------------------------------------------------------------------
+    // Feature 3: geo pings (signed broadcast, TTL=2, privacy-safe geohash)
+    // ------------------------------------------------------------------
+
+    /**
+     * Broadcasts a signed geo ping for this device's last-known location.
+     * No location or location permission → nothing is sent.
+     */
+    suspend fun sendGeoPing() {
+        val r = router ?: return
+        val location = currentGeoLocation() ?: return
+        val geohash = Geohash.encode(location.latitude, location.longitude, GEO_PRECISION)
+        val name = profileStore.load().nickname
+        val pkt = signed(
+            PacketType.GEO_PING,
+            Payloads.encodeGeoPing(Payloads.GeoPingPayload(geohash, name)),
+            ttl = GEO_PING_TTL,
+        )
+        r.onLocalBroadcast(pkt)
+        addGeoPing(identity.senderId.joinToString("") { "%02x".format(it) }, geohash, name)
+    }
+
+    private fun addGeoPing(senderHex: String, geohash: String, name: String) {
+        val nickname = peerProfiles[senderHex]?.first ?: name.ifBlank { senderHex.take(4) }
+        _geoPings.value = (_geoPings.value + GeoPingUi(senderHex, nickname, geohash, System.currentTimeMillis(), 0))
+            .takeLast(GEO_PING_MAX_RECENT)
+    }
+
+    private fun currentGeoLocation(): android.location.Location? {
+        val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+        val providers: List<String> =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) lm.allProviders
+            else listOf("gps", "network", "passive")
+        return runCatching {
+            providers.mapNotNull { lm.getLastKnownLocation(it) }.maxByOrNull { it.time }
+        }.getOrNull()
+    }
+
     /** Broadcasts a channel message across the BLE mesh and optionally Nostr relays. */
     suspend fun sendChannelMessage(channel: String, text: String) {
         val r = router ?: return
@@ -586,10 +778,10 @@ class BleMeshService : Service() {
         }
     }
 
-    private fun signed(type: PacketType, payload: ByteArray): MeshPacket {
+    private fun signed(type: PacketType, payload: ByteArray, ttl: Int = PacketCodec.MAX_TTL): MeshPacket {
         val id = identity
         val unsigned = MeshPacket(
-            PacketCodec.PROTOCOL_VERSION, type, PacketCodec.MAX_TTL, 0,
+            PacketCodec.PROTOCOL_VERSION, type, ttl, 0,
             System.currentTimeMillis(), payload, id.senderId, PacketCodec.BROADCAST_ID,
         )
         return unsigned.copy(
@@ -670,8 +862,19 @@ class BleMeshService : Service() {
             ACTION_SEND_PRIVATE -> {
                 val peer = intent.getStringExtra(EXTRA_PEER_ID)
                 val text = intent.getStringExtra(EXTRA_TEXT)
+                val parentId = intent.getStringExtra(EXTRA_PARENT_ID)
                 if (peer != null && text != null) {
-                    scope.launch { secureChannel?.send(peer, text) }
+                    scope.launch { secureChannel?.send(peer, text, parentId) }
+                }
+            }
+            ACTION_SEND_MEDIA -> {
+                val peer = intent.getStringExtra(EXTRA_PEER_ID)
+                val mime = intent.getStringExtra(EXTRA_MEDIA_MIME)
+                val data = intent.getByteArrayExtra(EXTRA_MEDIA_DATA)
+                val caption = intent.getStringExtra(EXTRA_CAPTION) ?: ""
+                val parentId = intent.getStringExtra(EXTRA_PARENT_ID)
+                if (peer != null && mime != null && data != null) {
+                    scope.launch { secureChannel?.sendMedia(peer, mime, data, caption, parentId) }
                 }
             }
             ACTION_MARK_READ -> {
@@ -778,6 +981,18 @@ class BleMeshService : Service() {
                     scope.launch { executeCommand(cmdText, ch) }
                 }
             }
+            ACTION_TOGGLE_REACTION -> {
+                val target = intent.getStringExtra(EXTRA_TARGET_ID)
+                val emoji = intent.getStringExtra(EXTRA_EMOJI)
+                if (target != null && emoji != null) {
+                    scope.launch { toggleReaction(target, emoji) }
+                }
+            }
+            ACTION_SEND_TYPING -> {
+                val peer = intent.getStringExtra(EXTRA_PEER_ID)
+                if (peer != null) scope.launch { sendTyping(peer) }
+            }
+            ACTION_SEND_GEO_PING -> scope.launch { sendGeoPing() }
         }
         return START_STICKY
     }
@@ -796,6 +1011,7 @@ class BleMeshService : Service() {
         setGroupMessages(emptyMap())
         setPendingGroupInvites(emptyList())
         setPublicMessages(emptyList())
+        setReactions(emptyMap())
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -879,6 +1095,10 @@ class BleMeshService : Service() {
         const val ACTION_SET_ACTIVE_CHANNEL = "com.meshline.app.action.SET_ACTIVE_CHANNEL"
         const val ACTION_SET_INTERNET_RELAY = "com.meshline.app.action.SET_INTERNET_RELAY"
         const val ACTION_EXECUTE_COMMAND = "com.meshline.app.action.EXECUTE_COMMAND"
+        const val ACTION_SEND_MEDIA = "com.meshline.app.action.SEND_MEDIA"
+        const val ACTION_SEND_TYPING = "com.meshline.app.action.SEND_TYPING"
+        const val ACTION_TOGGLE_REACTION = "com.meshline.app.action.TOGGLE_REACTION"
+        const val ACTION_SEND_GEO_PING = "com.meshline.app.action.SEND_GEO_PING"
 
         const val EXTRA_TEXT = "text"
         const val EXTRA_PEER_ID = "peerIdHex"
@@ -891,12 +1111,26 @@ class BleMeshService : Service() {
         const val EXTRA_CHANNEL = "channel"
         const val EXTRA_ENABLED = "enabled"
         const val EXTRA_COMMAND_TEXT = "commandText"
+        const val EXTRA_TARGET_ID = "targetIdHex"
+        const val EXTRA_EMOJI = "emoji"
+        const val EXTRA_MEDIA_MIME = "mediaMime"
+        const val EXTRA_MEDIA_DATA = "mediaData"
+        const val EXTRA_CAPTION = "caption"
+        const val EXTRA_PARENT_ID = "parentIdHex"
 
         private const val CHANNEL_ID = "meshline_mesh"
         private const val NOTIFICATION_ID = 1
         private const val INTERVAL_UNITS: Byte = 3
 
         private const val RE_ANNOUNCE_INTERVAL_MS: Long = 5_000L
+        // Feature 2: typing indicator wire TTL (delivered but not relayed) and
+        // how long a received typing hint stays visible locally.
+        private const val TYPING_TTL: Int = 1
+        private const val TYPING_DISPLAY_MS: Long = 5_000L
+        // Feature 3: geo ping wire TTL and the geohash precision used (privacy).
+        private const val GEO_PRECISION: Int = 6
+        private const val GEO_PING_TTL: Int = 2
+        private const val GEO_PING_MAX_RECENT: Int = 20
         private const val TAG = "BleMeshService"
 
         private val _peers = MutableStateFlow<List<PeerInfo>>(emptyList())
@@ -924,6 +1158,18 @@ class BleMeshService : Service() {
         // Public Nearby Chat
         private val _publicChatMessages = MutableStateFlow<List<PublicChatMessage>>(emptyList())
         val publicChatMessages: StateFlow<List<PublicChatMessage>> = _publicChatMessages.asStateFlow()
+
+        // Feature 1: reactions by target message id -> per-emoji reactions
+        private val _reactions = MutableStateFlow<Map<String, List<ReactionUi>>>(emptyMap())
+        val reactions: StateFlow<Map<String, List<ReactionUi>>> = _reactions.asStateFlow()
+
+        // Feature 2: peers currently typing (as seen by this node)
+        private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
+        val typingPeers: StateFlow<Set<String>> = _typingPeers.asStateFlow()
+
+        // Feature 3: recent geo pings
+        private val _geoPings = MutableStateFlow<List<GeoPingUi>>(emptyList())
+        val geoPings: StateFlow<List<GeoPingUi>> = _geoPings.asStateFlow()
 
         // Groups
         private val _groups = MutableStateFlow<List<GroupItem>>(emptyList())

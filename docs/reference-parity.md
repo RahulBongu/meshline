@@ -23,6 +23,12 @@ This document details the complete technical architecture, security guarantees, 
 | **Emergency Data Wipe** | Account deletion request | 3-Tap Armed Panic Wipe (`PanicWiper.kt`): Database shredded with random bytes, keys wiped, process killed | Immediate, irrevocable data destruction under physical distress |
 | **Database Encryption** | Plaintext SQLite or standard filesystem | SQLCipher v4 encrypted Room v7 (`MeshlineDatabase.kt`) with hardware-wrapped passphrase | Full AES-256 at-rest encryption for all messages, contacts, and group keys |
 | **Wide-Area Relay** | Monolithic server architecture | Optional Nostr Relay Transport (`InternetRelayTransport.kt`) with explicit toggle | Optional global reach over decentralized relays; defaults to 100% offline BLE radio |
+| **Private Media (Voice Notes, Images)** | None in plain messengers | Voice notes (AAC) and small images (JPEG) in private chats (Features 4) | Sent over Noise XX AEAD like private messages; stored in the encrypted `messages` table (`media`, `mediaType` columns) |
+| **Reply-to Quoting** | None in plain messengers | Quoted replies in private chats (Feature 5) | Quote stored on the message row (`parentIdHex`) |
+| **Local Message Search** | None in plain messengers | Search the private chat history by text (Feature 6) | In-memory, case-insensitive, over encrypted message rows |
+| **Message Reactions** | None in plain messengers | Emoji reactions on public broadcasts (`REACTION` packet: signed, broadcast, TTL 7) | Reactions ride the existing broadcast path; per-sender rows stored in the SQLCipher DB (`message_reactions`) |
+| **Typing Indicators** | Rare in offline messengers | Directed, signed, TTL-1 "typing" packets (`TYPING`) for private DMs | Privacy-safe: addressed to one peer, never relayed, expires in seconds |
+| **Geo Pings** | None in offline messengers | Signed, broadcast, TTL-2 geo beacons (`GEO_PING`) carrying a privacy-safe geohash | Disclosure boundary is the geohash cell (a few km); opt-in by location |
 | **UI Design System** | Standard OS styles | Material 3 Charcoal & Mint Emerald theme (`#121417`, `#00E599`), 4 main tabs, unread badges | Optimized for high contrast, low cognitive load, and battery efficiency on OLED displays |
 
 ---

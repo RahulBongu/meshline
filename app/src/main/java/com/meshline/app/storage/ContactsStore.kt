@@ -60,8 +60,9 @@ interface ContactsDao {
         GroupRecordEntity::class,
         GroupMessageRecordEntity::class,
         ChannelMessageRecordEntity::class,
+        ReactionEntity::class,
     ],
-    version = 7,
+    version = 9,
     // The schema of every version is exported to app/schemas/ (see the KSP
     // arguments in build.gradle.kts) so the instrumented migration test can
     // build a v1 database and walk it up to the current version.
@@ -76,6 +77,7 @@ abstract class MeshlineDatabase : RoomDatabase() {
     abstract fun groupsDao(): GroupsDao
     abstract fun groupMessagesDao(): GroupMessagesDao
     abstract fun channelMessagesDao(): ChannelMessagesDao
+    abstract fun reactionsDao(): ReactionsDao
 
     companion object {
         /**
@@ -259,6 +261,40 @@ abstract class MeshlineDatabase : RoomDatabase() {
                     )
                     """.trimIndent()
                 )
+            }
+        }
+
+        /**
+         * v7 → v8 adds `message_reactions` (Feature 1: emoji reactions on
+         * public broadcasts). Plain CREATE TABLE: contacts, messages and
+         * groups survive untouched.
+         */
+        val MIGRATION_7_8 = object : androidx.room.migration.Migration(7, 8) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `message_reactions` (
+                        `targetIdHex` TEXT NOT NULL,
+                        `senderIdHex` TEXT NOT NULL,
+                        `emoji` TEXT NOT NULL,
+                        `createdAtMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`targetIdHex`, `senderIdHex`, `emoji`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v8 → v9 adds three nullable `messages` columns: `media` (Feature 4),
+         * `mediaType` (Feature 4) and `parentIdHex` (Feature 5). All nullable
+         * — text messages keep working unchanged; nothing is destroyed.
+         */
+        val MIGRATION_8_9 = object : androidx.room.migration.Migration(8, 9) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `media` BLOB")
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `mediaType` TEXT")
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `parentIdHex` TEXT")
             }
         }
     }
