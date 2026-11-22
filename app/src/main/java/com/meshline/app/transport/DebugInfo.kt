@@ -13,6 +13,10 @@ data class PeerInfo(
     val mtu: Int?,
     /** CENTRAL if we initiated via GATT client, PERIPHERAL if the peer connected to our server. */
     val role: String, // "central" | "peripheral"
+    /** Nickname from the peer's ANNOUNCE (Feature 8 roster display). */
+    val nickname: String? = null,
+    /** Hops of the last content packet observed from this peer; null if never seen. */
+    val lastHops: Int? = null,
 )
 
 data class ReceivedMessageInfo(

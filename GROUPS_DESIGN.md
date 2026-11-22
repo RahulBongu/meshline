@@ -81,11 +81,17 @@ in v1.
   (see PROTOCOL §6.7.1). The ciphertext covers the group text (500-char
   limit); the sender is resolved locally from the header `senderId` +
   roster, never from the plaintext.
-- **GROUP_CONTROL (`0x0A`), outer:** `recipientId` = group tag, `HAS_SIGNATURE`
-  set (§3.1 TTL-invariant). Payload is **not encrypted**:
-  `epoch(2) | kind(1) | nameLen(1) | name | roster`. `kind`: 1=leave, 2=rename,
-  3=roster-update. The signature's key must be the admin's (§5) or the packet
-  is dropped.
+- **GROUP_CONTROL (`0x0A`), outer:** `recipientId` = group tag (v1+: receivers
+  identify the group by the `groupId` field since the tag rotates per
+  epoch), `HAS_SIGNATURE` set (§3.1 TTL-invariant). Payload is **not
+  encrypted**: `epoch(2) | kind(1) | groupId(16) | nameLen(1) | name |
+  roster`. `kind`: 1=leave, 2=rename, 3=roster-update, 4=remove-member,
+  5=transfer-admin (the payload of a kind-5 control ends with `newAdmin(32)`,
+  the new admin's Ed25519 public key). The signature's key must be the
+  admin's (§5) or the packet is dropped. Removal (kind 4) and transfer
+  (kind 5) rotate the epoch (§2): the admin starts a new epoch + key,
+  broadcasts the control to the roster and hands the new key to the new
+  roster members via Noise invites (§3).
 - **Epoch/tag derivation:** the recipient's router checks the tag **first**,
   before any decryption. Only a matching tag reaches the group decrypt path;
   a non-member has no tag in its local set and drops the packet as ordinary
@@ -124,16 +130,28 @@ in v1.
 
 ## 6. Membership control (admin authority)
 
-- **Only the admin may change membership** (add/remove/rename). Every
+- **Only the admin may change membership** (add/remove/rename/transfer). Every
   `GROUP_CONTROL` signature and the signer's identity (derived senderId from
   the signed packet key) are verified against the roster's pinned admin key
   before any state changes.
 - If a control arrives signed by a non-admin, it is dropped and counted as a
   protocol violation on that connection (surfaced in mesh status at verbose).
+- **Admin removal (kind 4, Feature 6):** the admin broadcasts a `REMOVE_MEMBER`
+  control carrying the new roster (member minus the removed one) and starts a
+  new epoch + key. The removed member is addressed in the control too, so it
+  learns the new roster and drops the group; other members apply the new
+  roster immediately. The admin cannot remove themselves — they use Leave
+  instead.
+- **Admin transfer (kind 5, Feature 6):** the admin broadcasts a
+  `TRANSFER_ADMIN` control carrying the new admin's Ed25519 public key and
+  starts a new epoch + key. The old admin's rights end immediately (they are
+  still a roster member; design note in §8). The new admin picks up the new
+  epoch key via the invite that accompanied the transfer.
 - **Admin gone = roster frozen.** If the admin leaves or is unreachable, the
   roster cannot change until a replacement admin is chosen out-of-band (v1 has
-  no admin-transfer command). Members should be told in the group info screen
-  that the roster looks stale.
+  no admin-transfer out-of-band path — a successor can be made by re-inviting
+  a trusted member as a fresh group). Members should be told in the group info
+  screen that the roster looks stale.
 - **Leaver reads until rotation.** A departing member keeps the current epoch
   key, so it can keep reading the trailing traffic in that epoch; only the
   next epoch (new key) cuts them off. This is inherent to shared-key groups

@@ -86,7 +86,7 @@ offset  size  field          notes
 | `0x07` | `LEAVE`         | Graceful "I'm going offline". Best-effort; peers also time out announcements. |
 | `0x08` | `HANDSHAKE`     | Noise handshake message carried over the mesh. Payload: one Noise handshake message (§6.5). |
 | `0x09` | `GROUP_MESSAGE` | *(draft E)* Signed + encrypted group ciphertext. Payload: §6.7. `recipientId` = 8-byte group tag. `HAS_SIGNATURE` set; signature must be a current roster member. |
-| `0x0A` | `GROUP_CONTROL` | *(draft E)* Signed group control (leave/rename/roster). Payload: §6.7. `recipientId` = group tag. |
+| `0x0A` | `GROUP_CONTROL` | *(draft E)* Signed group control (leave/rename/roster/remove-member/transfer-admin). Payload: §6.7. `recipientId` = group tag (v1+) or the group id. |
 | `0x0B` | `REACTION`      | Broadcast emoji reaction on a public broadcast message. Signed, broadcast, TTL 7. Payload: §6.8. |
 | `0x0C` | `TYPING`        | Directed "peer is typing…" indicator. Signed, directed to the peer, TTL 1. Payload: §6.9 (empty). |
 | `0x0D` | `GEO_PING`      | Broadcast privacy-safe geo beacon. Signed, broadcast, TTL 2. Payload: §6.10. |
@@ -481,12 +481,17 @@ semantics are in `GROUPS_DESIGN.md`.
   associated data is **`groupTag(8) ‖ epoch(2 BE) ‖ senderId(8)`** — both sides
   MUST compute it identically (see §6.7.1). Only members holding the epoch
   key can decrypt; everyone else drops at the tag check.
-- `GROUP_CONTROL (0x0A)`: `recipientId` = group tag, **signed** (§3.1, TTL-
-  invariant). Payload (NOT encrypted — roster is semi-public, signature is the
-  authority): `epoch(2) | kind(1) | nameLen(1) | name | roster(…)` where
-  `kind` = 1 leave, 2 rename, 3 roster-update. Roster entries list member
+- `GROUP_CONTROL (0x0A)`: `recipientId` = 8-byte group tag (v1; receivers
+  identify the group by `groupId` from the payload since the tag rotates per
+  epoch), **signed** (§3.1, TTL-invariant). Payload (NOT encrypted — roster is
+  semi-public, signature is the authority):
+  `epoch(2) | kind(1) | groupId(16) | nameLen(1) | name | roster(…)` where
+  `kind` = 1 leave, 2 rename, 3 roster-update, 4 remove-member,
+  5 transfer-admin; for kind 5 the payload is followed by `newAdmin(32)`
+  (the new admin's Ed25519 public key). Roster entries list member
   Ed25519 pubkeys (≤20). Only the admin may change membership; control
-  signature + admin identity are verified before any action.
+  signature + admin identity are verified before any action. Removal
+  (kind 4) and transfer (kind 5) start a new epoch (§6.7, GROUPS_DESIGN §6).
 - **Group tag:** `HKDF(epochKey, info="meshline-group-tag", len=8)` (HKDF-SHA256
   per RFC 5869). Relays see only the tag, so cross-group traffic cannot be
   linked; the tag **changes every epoch**, so epochs cannot be linked either.

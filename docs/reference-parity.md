@@ -29,6 +29,10 @@ This document details the complete technical architecture, security guarantees, 
 | **Message Reactions** | None in plain messengers | Emoji reactions on public broadcasts (`REACTION` packet: signed, broadcast, TTL 7) | Reactions ride the existing broadcast path; per-sender rows stored in the SQLCipher DB (`message_reactions`) |
 | **Typing Indicators** | Rare in offline messengers | Directed, signed, TTL-1 "typing" packets (`TYPING`) for private DMs | Privacy-safe: addressed to one peer, never relayed, expires in seconds |
 | **Geo Pings** | None in offline messengers | Signed, broadcast, TTL-2 geo beacons (`GEO_PING`) carrying a privacy-safe geohash | Disclosure boundary is the geohash cell (a few km); opt-in by location |
+| **Group Member Management** | None in plain messengers | Admins remove members and transfer admin rights (`GROUP_CONTROL` kinds 4/5, Feature 6); every roster change rotates the epoch + key | Removed members and transferred-away admins are notified via the broadcast control; out-of-admin cannot touch membership |
+| **Group Roster Display** | None in plain messengers | MEMBERS panel in the group chat header (nicknames, "You" marker, 👑 admin badge, Transfer/Remove for admins, Feature 7) | Admin actions broadcast the control to all members |
+| **Nearby Peer Roster** | None in plain messengers | Tapable NEARBY PEERS roster on the Nearby screen (nickname, signal strength, hops, 💬 chat button, Feature 8) | Data from the ANNOUNCE nicknames + router telemetry (RSSI/hops) |
+| **Background Notifications** | None in offline messengers | "New message from …" notifications for private and group messages (Feature 9) | Posts to the "New Messages" channel; previews are single-line, messages are never read back |
 | **UI Design System** | Standard OS styles | Material 3 Charcoal & Mint Emerald theme (`#121417`, `#00E599`), 4 main tabs, unread badges | Optimized for high contrast, low cognitive load, and battery efficiency on OLED displays |
 
 ---
