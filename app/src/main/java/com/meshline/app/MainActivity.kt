@@ -685,6 +685,7 @@ private fun App(
                     selfIdHex = id.senderId.joinToString("") { "%02x".format(it) },
                     onSend = { text -> onSendGroupMessage(group.groupIdHex, text) },
                     onSendControl = { messageId, delete, newText -> onSendControl(messageId, delete, newText) },
+                    memberLastSeen = peers.associate { it.peerIdHex to (it.lastSeenMs ?: 0L) }.filterValues { it > 0 },
                     onRemoveMember = { memberIdHex -> onRemoveMember(group.groupIdHex, memberIdHex) },
                     onTransferAdmin = { memberIdHex -> onTransferAdmin(group.groupIdHex, memberIdHex) },
                     onLeaveGroup = {

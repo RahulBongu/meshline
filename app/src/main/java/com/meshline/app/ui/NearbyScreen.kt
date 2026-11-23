@@ -1,6 +1,11 @@
 package com.meshline.app.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -41,7 +46,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.Canvas
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -211,10 +220,19 @@ fun NearbyScreen(
                             .border(1.dp, colors.border, RoundedCornerShape(12.dp)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
+                        val sweepAngle by rememberInfiniteTransition().animateFloat(
+                            initialValue = 0f,
+                            targetValue = 360f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(4000),
+                                repeatMode = RepeatMode.Restart,
+                            ),
+                        )
+                        val textMeasurer = rememberTextMeasurer()
+                    Canvas(modifier = Modifier.fillMaxSize()) {
                             val center = Offset(size.width / 2, size.height / 2)
                             val maxRadius = (size.minDimension / 2) * 0.85f
-                            // Concentric rings
+                            // Concentric range rings
                             for (i in 1..3) {
                                 val radius = maxRadius * (i / 3f)
                                 drawCircle(
@@ -223,6 +241,33 @@ fun NearbyScreen(
                                     center = center,
                                     style = Stroke(width = 1.dp.toPx()),
                                 )
+                            }
+                            // Animated radar sweep beam
+                            val sweepRad = Math.toRadians(sweepAngle.toDouble()).toFloat()
+                            drawLine(
+                                color = colors.primary.copy(alpha = 0.45f),
+                                start = center,
+                                end = Offset(
+                                    center.x + kotlin.math.cos(sweepRad) * maxRadius,
+                                    center.y + kotlin.math.sin(sweepRad) * maxRadius,
+                                ),
+                                strokeWidth = 2.dp.toPx(),
+                            )
+                            // Connecting lines from local node to peers (mesh links)
+                            peers.take(8).forEachIndexed { idx, peer ->
+                                val angle = (idx * 45f) * (Math.PI / 180f).toFloat()
+                                val dist = (peer.lastHops ?: 1).coerceIn(1, 3)
+                                val radius = maxRadius * (dist / 3f)
+                                val x = center.x + radius * kotlin.math.cos(angle)
+                                val y = center.y + radius * kotlin.math.sin(angle)
+                                if ((peer.lastHops ?: 0) > 0) {
+                                    drawLine(
+                                        color = colors.border,
+                                        start = center,
+                                        end = Offset(x, y),
+                                        strokeWidth = 1.dp.toPx(),
+                                    )
+                                }
                             }
                             // Local node
                             drawCircle(
@@ -247,6 +292,17 @@ fun NearbyScreen(
                                     color = dotColor,
                                     radius = 5.dp.toPx(),
                                     center = Offset(x, y),
+                                )
+                                // Peer label
+                                val label = peer.nickname?.take(8) ?: peer.peerIdHex.take(4).uppercase()
+                                drawText(
+                                    textMeasurer = textMeasurer,
+                                    text = label,
+                                    topLeft = Offset(x + 7.dp.toPx(), y - 6.dp.toPx()),
+                                    style = androidx.compose.ui.text.TextStyle(
+                                        color = colors.textSecondary,
+                                        fontSize = 9.sp,
+                                    ),
                                 )
                             }
                         }

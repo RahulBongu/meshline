@@ -3,6 +3,7 @@ package com.meshline.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +28,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -73,6 +77,71 @@ fun ChannelsScreen(
     var showJoinDialog by remember { mutableStateOf(false) }
     var draft by remember { mutableStateOf("") }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+
+    // Edit/Delete dialog state
+    var editTarget by remember { mutableStateOf<ChannelMessageUi?>(null) }
+    var editText by remember { mutableStateOf("") }
+    var actionTarget by remember { mutableStateOf<ChannelMessageUi?>(null) }
+
+    if (actionTarget != null) {
+        AlertDialog(
+            onDismissRequest = { actionTarget = null },
+            title = { Text("Message options", color = colors.textPrimary) },
+            text = {
+                Column {
+                    TextButton(onClick = {
+                        actionTarget?.let { m ->
+                            editText = m.text
+                            editTarget = m
+                        }
+                        actionTarget = null
+                    }) { Text("Edit", color = colors.primary) }
+                    TextButton(onClick = {
+                        actionTarget?.let { m ->
+                            onSendControl(m.messageIdHex, true, null)
+                        }
+                        actionTarget = null
+                    }) { Text("Delete", color = colors.danger) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { actionTarget = null }) { Text("Cancel", color = colors.textSecondary) }
+            }
+        )
+    }
+
+    if (editTarget != null) {
+        AlertDialog(
+            onDismissRequest = { editTarget = null },
+            title = { Text("Edit message", color = colors.textPrimary) },
+            text = {
+                OutlinedTextField(
+                    value = editText,
+                    onValueChange = { editText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = colors.primary,
+                        unfocusedBorderColor = colors.border,
+                        cursorColor = colors.primary,
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    editTarget?.let { m ->
+                        if (editText.isNotBlank()) {
+                            onSendControl(m.messageIdHex, false, editText.trim())
+                        }
+                    }
+                    editTarget = null
+                }) { Text("Save", color = colors.primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { editTarget = null }) { Text("Cancel", color = colors.textSecondary) }
+            }
+        )
+    }
 
     val currentChannel = channels.firstOrNull { it.name.equals(activeChannel, ignoreCase = true) }
         ?: ChannelItem(name = activeChannel, description = "Topic Channel")
@@ -247,6 +316,13 @@ fun ChannelsScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp)
+                                .pointerInput(m.messageIdHex) {
+                                    detectTapGestures(
+                                        onLongPress = {
+                                            if (m.isSelf && !m.deleted) actionTarget = m
+                                        }
+                                    )
+                                }
                                 .clip(RoundedCornerShape(14.dp))
                                 .background(colors.surface)
                                 .border(1.dp, colors.border, RoundedCornerShape(14.dp))
@@ -277,12 +353,40 @@ fun ChannelsScreen(
 
                                 Spacer(Modifier.height(6.dp))
 
-                                Text(
-                                    text = m.text,
-                                    color = colors.textPrimary,
-                                    fontSize = 14.sp,
-                                    lineHeight = 20.sp,
-                                )
+                                if (m.deleted) {
+                                    Text(
+                                        text = "🚫 This message was deleted",
+                                        color = colors.textMuted,
+                                        fontSize = 13.sp,
+                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                    )
+                                } else {
+                                    Text(
+                                        text = buildAnnotatedGroupText(m.text, colors.primary),
+                                        color = colors.textPrimary,
+                                        fontSize = 14.sp,
+                                        lineHeight = 20.sp,
+                                    )
+                                    if (m.editedAtMs != null) {
+                                        Text(
+                                            text = "(edited)",
+                                            color = colors.textMuted,
+                                            fontSize = 10.sp,
+                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                        )
+                                    }
+                                    // Quoted reply line
+                                    m.parentIdHex?.let { parent ->
+                                        val quoted = messages.firstOrNull { it.messageIdHex == parent }
+                                        Text(
+                                            text = "⤷ ${quoted?.senderNickname ?: "..."}: ${quoted?.text?.take(60) ?: parent.take(8)}",
+                                            color = colors.textMuted,
+                                            fontSize = 11.sp,
+                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                            modifier = Modifier.padding(top = 2.dp),
+                                        )
+                                    }
+                                }
 
                                 // Feature 12: reactions on channel broadcasts.
                                 // Relay-only messages carry synthetic ids (not a
@@ -387,6 +491,29 @@ fun ChannelsScreen(
             },
         )
     }
+}
+
+private fun buildAnnotatedGroupText(
+    text: String,
+    mentionColor: androidx.compose.ui.graphics.Color,
+): androidx.compose.ui.text.AnnotatedString {
+    val builder = androidx.compose.ui.text.AnnotatedString.Builder()
+    val regex = Regex("@(\\w+)")
+    var lastEnd = 0
+    for (match in regex.findAll(text)) {
+        if (match.range.first > lastEnd) builder.append(text.substring(lastEnd, match.range.first))
+        builder.pushStyle(
+            androidx.compose.ui.text.SpanStyle(
+                color = mentionColor,
+                fontWeight = FontWeight.Bold,
+            )
+        )
+        builder.append(match.value)
+        builder.pop()
+        lastEnd = match.range.last + 1
+    }
+    if (lastEnd < text.length) builder.append(text.substring(lastEnd))
+    return builder.toAnnotatedString()
 }
 
 @Composable

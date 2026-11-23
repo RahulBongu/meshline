@@ -3,6 +3,7 @@ package com.meshline.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,8 @@ import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -42,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -257,6 +261,7 @@ fun GroupChatScreen(
     selfIdHex: String,
     onSend: (String) -> Unit,
     onSendControl: (messageIdHex: String, delete: Boolean, newText: String?) -> Unit = { _, _, _ -> },
+    memberLastSeen: Map<String, Long> = emptyMap(),
     onRemoveMember: (memberIdHex: String) -> Unit,
     onTransferAdmin: (memberIdHex: String) -> Unit,
     onLeaveGroup: () -> Unit,
@@ -266,6 +271,71 @@ fun GroupChatScreen(
     var draft by remember { mutableStateOf("") }
     var membersOpen by remember { mutableStateOf(false) }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+
+    // Edit dialog state
+    var editTarget by remember { mutableStateOf<GroupMessageUi?>(null) }
+    var editText by remember { mutableStateOf("") }
+    var actionTarget by remember { mutableStateOf<GroupMessageUi?>(null) }
+
+    if (actionTarget != null) {
+        AlertDialog(
+            onDismissRequest = { actionTarget = null },
+            title = { Text("Message options", color = colors.textPrimary) },
+            text = {
+                Column {
+                    TextButton(onClick = {
+                        actionTarget?.let { m ->
+                            editText = m.text
+                            editTarget = m
+                        }
+                        actionTarget = null
+                    }) { Text("Edit", color = colors.primary) }
+                    TextButton(onClick = {
+                        actionTarget?.let { m ->
+                            onSendControl(m.messageIdHex, true, null)
+                        }
+                        actionTarget = null
+                    }) { Text("Delete", color = colors.danger) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { actionTarget = null }) { Text("Cancel", color = colors.textSecondary) }
+            }
+        )
+    }
+
+    if (editTarget != null) {
+        AlertDialog(
+            onDismissRequest = { editTarget = null },
+            title = { Text("Edit message", color = colors.textPrimary) },
+            text = {
+                OutlinedTextField(
+                    value = editText,
+                    onValueChange = { editText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = colors.primary,
+                        unfocusedBorderColor = colors.border,
+                        cursorColor = colors.primary,
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    editTarget?.let { m ->
+                        if (editText.isNotBlank()) {
+                            onSendControl(m.messageIdHex, false, editText.trim())
+                        }
+                    }
+                    editTarget = null
+                }) { Text("Save", color = colors.primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { editTarget = null }) { Text("Cancel", color = colors.textSecondary) }
+            }
+        )
+    }
 
     // Feature 7: roster identities (admin badge + "You" markers).
     val adminIdHex = MessageIds.idFromPublicKey(group.adminEd25519Pk)
@@ -377,6 +447,32 @@ fun GroupChatScreen(
                                     if (isSelf) {
                                         Spacer(Modifier.width(6.dp))
                                         Text("(You)", color = colors.textMuted, fontSize = 10.sp)
+                                    } else {
+                                        val lastSeen = memberLastSeen[idHex]
+                                        Spacer(Modifier.width(6.dp))
+                                        Box(
+                                            Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    if (lastSeen != null && System.currentTimeMillis() - lastSeen < 60_000) {
+                                                        colors.statusConnected
+                                                    } else {
+                                                        colors.textMuted
+                                                    }
+                                                )
+                                        )
+                                        if (lastSeen != null) {
+                                            val ago = (System.currentTimeMillis() - lastSeen) / 1000
+                                            if (ago > 60) {
+                                                Spacer(Modifier.width(4.dp))
+                                                Text(
+                                                    text = "seen ${if (ago < 3600) "${ago / 60}m ago" else "${ago / 3600}h ago"}",
+                                                    color = colors.textMuted,
+                                                    fontSize = 9.sp,
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -434,6 +530,13 @@ fun GroupChatScreen(
                         // Asymmetric Group Bubble
                         Box(
                             modifier = Modifier
+                                .pointerInput(m.messageIdHex) {
+                                    detectTapGestures(
+                                        onLongPress = {
+                                            if (isSelf && !m.deleted) actionTarget = m
+                                        }
+                                    )
+                                }
                                 .clip(
                                     if (isSelf) {
                                         RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
@@ -466,12 +569,39 @@ fun GroupChatScreen(
                                     }
                                 }
 
-                                Text(
-                                    text = m.text,
-                                    color = if (isSelf) colors.bubbleOutgoingText else colors.bubbleIncomingText,
-                                    fontSize = 14.sp,
-                                    lineHeight = 20.sp,
-                                )
+                                if (m.deleted) {
+                                    Text(
+                                        text = "🚫 This message was deleted",
+                                        color = colors.textMuted,
+                                        fontSize = 13.sp,
+                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                    )
+                                } else {
+                                    Text(
+                                        text = buildAnnotatedGroupText(m.text, colors.primary),
+                                        color = if (isSelf) colors.bubbleOutgoingText else colors.bubbleIncomingText,
+                                        fontSize = 14.sp,
+                                        lineHeight = 20.sp,
+                                    )
+                                    if (m.editedAtMs != null) {
+                                        Text(
+                                            text = "(edited)",
+                                            color = colors.textMuted,
+                                            fontSize = 10.sp,
+                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                        )
+                                    }
+                                    if (m.expiresAtMs != null) {
+                                        val remaining = (m.expiresAtMs - System.currentTimeMillis()) / 1000
+                                        if (remaining > 0) {
+                                            Text(
+                                                text = "⏱ ${remaining / 60}:${String.format("%02d", remaining % 60)}",
+                                                color = colors.textMuted,
+                                                fontSize = 10.sp,
+                                            )
+                                        }
+                                    }
+                                }
 
                                 Spacer(Modifier.height(4.dp))
 
@@ -552,4 +682,27 @@ fun GroupChatScreen(
             }
         }
     }
+}
+
+private fun buildAnnotatedGroupText(
+    text: String,
+    mentionColor: androidx.compose.ui.graphics.Color,
+): androidx.compose.ui.text.AnnotatedString {
+    val builder = androidx.compose.ui.text.AnnotatedString.Builder()
+    val regex = Regex("@(\\w+)")
+    var lastEnd = 0
+    for (match in regex.findAll(text)) {
+        if (match.range.first > lastEnd) builder.append(text.substring(lastEnd, match.range.first))
+        builder.pushStyle(
+            androidx.compose.ui.text.SpanStyle(
+                color = mentionColor,
+                fontWeight = FontWeight.Bold,
+            )
+        )
+        builder.append(match.value)
+        builder.pop()
+        lastEnd = match.range.last + 1
+    }
+    if (lastEnd < text.length) builder.append(text.substring(lastEnd))
+    return builder.toAnnotatedString()
 }
