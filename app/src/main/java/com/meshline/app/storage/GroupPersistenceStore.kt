@@ -81,6 +81,10 @@ class RoomGroupPersistence(
             epoch = row.epoch,
             timestampMs = row.timestampMs,
             isSelf = row.isSelf,
+            parentIdHex = row.parentIdHex,
+            expiresAtMs = row.expiresAtMs,
+            deleted = row.deleted,
+            editedAtMs = row.editedAtMs,
         )
     }
 
@@ -96,6 +100,10 @@ class RoomGroupPersistence(
                 epoch = message.epoch,
                 timestampMs = message.timestampMs,
                 isSelf = message.isSelf,
+                parentIdHex = message.parentIdHex,
+                expiresAtMs = message.expiresAtMs,
+                deleted = message.deleted,
+                editedAtMs = message.editedAtMs,
             )
         )
     }
@@ -104,8 +112,20 @@ class RoomGroupPersistence(
         messages.deleteForGroup(groupIdHex)
     }
 
+    override suspend fun markMessageDeleted(messageIdHex: String) {
+        messages.markDeleted(messageIdHex)
+    }
+
+    override suspend fun editMessage(messageIdHex: String, newText: String, editedAtMs: Long) {
+        messages.editText(messageIdHex, newText, editedAtMs)
+    }
+
     override suspend fun deleteMessagesOlderThan(thresholdMs: Long) {
         messages.deleteOlderThan(thresholdMs)
+    }
+
+    override suspend fun deleteExpiredMessages(nowMs: Long) {
+        messages.deleteExpired(nowMs)
     }
 }
 
@@ -129,6 +149,9 @@ class RoomChannelPersistence(
             text = row.text,
             timestampMs = row.timestampMs,
             isSelf = row.isSelf,
+            parentIdHex = row.parentIdHex,
+            deleted = row.deleted,
+            editedAtMs = row.editedAtMs,
         )
     }
 
@@ -143,8 +166,19 @@ class RoomChannelPersistence(
                 text = message.text,
                 timestampMs = message.timestampMs,
                 isSelf = message.isSelf,
+                parentIdHex = message.parentIdHex,
+                deleted = message.deleted,
+                editedAtMs = message.editedAtMs,
             )
         )
+    }
+
+    override suspend fun markMessageDeleted(messageIdHex: String) {
+        messages.markDeleted(messageIdHex)
+    }
+
+    override suspend fun editMessage(messageIdHex: String, newText: String, editedAtMs: Long) {
+        messages.editText(messageIdHex, newText, editedAtMs)
     }
 
     override suspend fun deleteChannel(channel: String) {

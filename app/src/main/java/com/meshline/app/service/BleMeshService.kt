@@ -149,6 +149,8 @@ class BleMeshService : Service() {
     private val peerProfiles = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Int>>()
     /** Feature 8: last observed content-packet hop count per peer hex (from the router telemetry). */
     private val lastHopsByPeer = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** Presence: epoch millis of the last ANNOUNCE received from each peer. */
+    private val lastSeenByPeer = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** Typing indicator expiries: peerIdHex -> absolute time after which it lapses. */
     private val typingExpiryAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
@@ -376,6 +378,26 @@ class BleMeshService : Service() {
                                 refreshReactions()
                             }
                         }
+                        PacketType.MESSAGE_CONTROL -> {
+                            runCatching {
+                                val mc = Payloads.decodeMessageControl(pkt.payload)
+                                val targetHex = mc.targetId.joinToString("") { "%02x".format(it) }
+                                val senderHex = pkt.senderId.joinToString("") { "%02x".format(it) }
+                                // Private DMs
+                                runCatching { secureChannel?.applyMessageControl(
+                                    targetHex, senderHex, mc.kind == Payloads.MessageControlPayload.KIND_DELETE, mc.newText
+                                ) }
+                                // Group messages
+                                groupManager?.applyMessageControl(
+                                    targetHex, senderHex, mc.kind == Payloads.MessageControlPayload.KIND_DELETE, mc.newText
+                                )
+                                // Channel messages
+                                channelManager?.applyMessageControl(
+                                    targetHex, senderHex, mc.kind == Payloads.MessageControlPayload.KIND_DELETE, mc.newText
+                                )
+                                runCatching { secureChannel?.refresh() }
+                            }
+                        }
                         PacketType.TYPING -> {
                             runCatching {
                                 Payloads.decodeTyping(pkt.payload)
@@ -433,6 +455,7 @@ class BleMeshService : Service() {
                 setPeers(v.map { it.copy(
                     nickname = peerProfiles[it.peerIdHex]?.first ?: it.nickname,
                     lastHops = lastHopsByPeer[it.peerIdHex] ?: it.lastHops,
+                    lastSeenMs = lastSeenByPeer[it.peerIdHex],
                 ) })
             }
         }
@@ -450,6 +473,8 @@ class BleMeshService : Service() {
                     if (announce != null) {
                         peerProfiles[pkt.senderId.joinToString("") { "%02x".format(it) }] =
                             announce.nickname to announce.avatarIndex.toInt()
+                        lastSeenByPeer[pkt.senderId.joinToString("") { "%02x".format(it) }] =
+                            System.currentTimeMillis()
                     }
                     val isNew = runCatching { t.confirmPeerIdentity(pkt.senderId) }.getOrDefault(false)
                     if (isNew && t.isDirectPeer(pkt.senderId)) {
@@ -699,7 +724,7 @@ class BleMeshService : Service() {
     }
 
     /** Broadcasts a channel message across the BLE mesh and optionally Nostr relays. */
-    suspend fun sendChannelMessage(channel: String, text: String) {
+    suspend fun sendChannelMessage(channel: String, text: String, parentHex: String? = null) {
         val r = router ?: return
         val id = identity
         val clean = text.trim()
@@ -726,6 +751,7 @@ class BleMeshService : Service() {
                 text = clean,
                 timestampMs = signedPkt.timestampMs,
                 isSelf = true,
+                parentIdHex = parentHex,
             )
         )
 
@@ -733,12 +759,12 @@ class BleMeshService : Service() {
     }
 
     /** Sends an encrypted group message. */
-    suspend fun sendGroupMessage(groupIdHex: String, text: String) {
+    suspend fun sendGroupMessage(groupIdHex: String, text: String, parentHex: String? = null, ttlSeconds: Int? = null) {
         val r = router ?: return
         val gm = groupManager ?: return
         val clean = text.trim()
         if (clean.isEmpty()) return
-        val pkt = gm.createOutgoingGroupPacket(groupIdHex, clean) ?: return
+        val pkt = gm.createOutgoingGroupPacket(groupIdHex, clean, parentHex, ttlSeconds) ?: return
         r.onLocalBroadcast(pkt)
     }
 
@@ -849,6 +875,15 @@ class BleMeshService : Service() {
         }
     }
 
+    suspend fun sendMessageControl(targetIdHex: String, delete: Boolean, newText: String? = null) {
+        if (!MessageIds.isValidMessageIdHex(targetIdHex)) return
+        secureChannel?.sendMessageControl(targetIdHex, delete, newText)
+        val selfHex = identity.senderId.joinToString("") { "%02x".format(it) }
+        secureChannel?.applyMessageControl(targetIdHex, selfHex, delete, newText)
+        groupManager?.applyMessageControl(targetIdHex, selfHex, delete, newText)
+        channelManager?.applyMessageControl(targetIdHex, selfHex, delete, newText)
+    }
+
     private fun signed(type: PacketType, payload: ByteArray, ttl: Int = PacketCodec.MAX_TTL): MeshPacket {
         val id = identity
         val unsigned = MeshPacket(
@@ -934,8 +969,9 @@ class BleMeshService : Service() {
                 val peer = intent.getStringExtra(EXTRA_PEER_ID)
                 val text = intent.getStringExtra(EXTRA_TEXT)
                 val parentId = intent.getStringExtra(EXTRA_PARENT_ID)
+                val ttlSeconds = intent.getStringExtra(EXTRA_TTL_SECONDS)?.toIntOrNull()
                 if (peer != null && text != null) {
-                    scope.launch { secureChannel?.send(peer, text, parentId) }
+                    scope.launch { secureChannel?.send(peer, text, parentId, ttlSeconds) }
                 }
             }
             ACTION_SEND_MEDIA -> {
@@ -946,6 +982,15 @@ class BleMeshService : Service() {
                 val parentId = intent.getStringExtra(EXTRA_PARENT_ID)
                 if (peer != null && mime != null && data != null) {
                     scope.launch { secureChannel?.sendMedia(peer, mime, data, caption, parentId) }
+                }
+            }
+            ACTION_SEND_CONTROL -> {
+                val targetId = EXTRA_TARGET_ID
+                val target = intent.getStringExtra(targetId)
+                val delete = intent.getBooleanExtra(EXTRA_DELETE, false)
+                val newText = intent.getStringExtra(EXTRA_NEW_TEXT)
+                if (target != null) {
+                    scope.launch { sendMessageControl(target, delete, newText) }
                 }
             }
             ACTION_MARK_READ -> {
@@ -1063,7 +1108,8 @@ class BleMeshService : Service() {
                 }
             }
             ACTION_TOGGLE_REACTION -> {
-                val target = intent.getStringExtra(EXTRA_TARGET_ID)
+                val targetId = EXTRA_TARGET_ID
+                val target = intent.getStringExtra(targetId)
                 val emoji = intent.getStringExtra(EXTRA_EMOJI)
                 if (target != null && emoji != null) {
                     scope.launch { toggleReaction(target, emoji) }
@@ -1220,6 +1266,10 @@ class BleMeshService : Service() {
         const val ACTION_SET_INTERNET_RELAY = "com.meshline.app.action.SET_INTERNET_RELAY"
         const val ACTION_EXECUTE_COMMAND = "com.meshline.app.action.EXECUTE_COMMAND"
         const val ACTION_SEND_MEDIA = "com.meshline.app.action.SEND_MEDIA"
+        const val ACTION_SEND_CONTROL = "com.meshline.app.action.SEND_CONTROL"
+        const val EXTRA_TARGET_ID = "targetIdHex"
+        const val EXTRA_DELETE = "delete"
+        const val EXTRA_NEW_TEXT = "newText"
         const val ACTION_SEND_TYPING = "com.meshline.app.action.SEND_TYPING"
         const val ACTION_TOGGLE_REACTION = "com.meshline.app.action.TOGGLE_REACTION"
         const val ACTION_SEND_GEO_PING = "com.meshline.app.action.SEND_GEO_PING"
@@ -1238,12 +1288,12 @@ class BleMeshService : Service() {
         const val EXTRA_CHANNEL = "channel"
         const val EXTRA_ENABLED = "enabled"
         const val EXTRA_COMMAND_TEXT = "commandText"
-        const val EXTRA_TARGET_ID = "targetIdHex"
         const val EXTRA_EMOJI = "emoji"
         const val EXTRA_MEDIA_MIME = "mediaMime"
         const val EXTRA_MEDIA_DATA = "mediaData"
         const val EXTRA_CAPTION = "caption"
         const val EXTRA_PARENT_ID = "parentIdHex"
+        const val EXTRA_TTL_SECONDS = "ttlSeconds"
         const val EXTRA_MEMBER_ID = "memberIdHex"
 
         private const val CHANNEL_ID = "meshline_mesh"

@@ -62,7 +62,7 @@ interface ContactsDao {
         ChannelMessageRecordEntity::class,
         ReactionEntity::class,
     ],
-    version = 10,
+    version = 11,
     // The schema of every version is exported to app/schemas/ (see the KSP
     // arguments in build.gradle.kts) so the instrumented migration test can
     // build a v1 database and walk it up to the current version.
@@ -366,6 +366,29 @@ abstract class MeshlineDatabase : RoomDatabase() {
                     )
                     """.trimIndent()
                 )
+            }
+        }
+
+        /**
+         * v10 → v11 adds the message-lifecycle columns:
+         *  - `expiresAtMs` (disappearing messages) on `messages` + `group_messages`;
+         *  - `deleted` + `editedAtMs` (MESSAGE_CONTROL edit/delete) on all three
+         *    history tables;
+         *  - `parentIdHex` (group reply-to quoting) on `group_messages`.
+         * All additive; existing rows keep working (`deleted` defaults to 0).
+         */
+        val MIGRATION_10_11 = object : androidx.room.migration.Migration(10, 11) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `expiresAtMs` INTEGER")
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `deleted` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `editedAtMs` INTEGER")
+                db.execSQL("ALTER TABLE `group_messages` ADD COLUMN `parentIdHex` TEXT")
+                db.execSQL("ALTER TABLE `group_messages` ADD COLUMN `expiresAtMs` INTEGER")
+                db.execSQL("ALTER TABLE `group_messages` ADD COLUMN `deleted` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `group_messages` ADD COLUMN `editedAtMs` INTEGER")
+                db.execSQL("ALTER TABLE `channel_messages` ADD COLUMN `parentIdHex` TEXT")
+                db.execSQL("ALTER TABLE `channel_messages` ADD COLUMN `deleted` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `channel_messages` ADD COLUMN `editedAtMs` INTEGER")
             }
         }
     }

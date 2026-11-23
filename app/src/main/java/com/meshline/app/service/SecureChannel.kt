@@ -41,6 +41,12 @@ data class PrivateChatMessage(
     val media: ByteArray? = null,
     // Feature 5: quoted parent message (null when not a reply).
     val parentIdHex: String? = null,
+    /** Disappearing messages: epoch millis at which the message must be dropped. */
+    val expiresAtMs: Long? = null,
+    /** True once the author deleted it (shown as a tombstone). */
+    val deleted: Boolean = false,
+    /** When the author last edited it (null = never edited). */
+    val editedAtMs: Long? = null,
 )
 
 /** A peer we can open a private chat with. */
@@ -206,6 +212,7 @@ class SecureChannel(
                         media = result.envelope.media,
                         mediaType = result.envelope.mediaType,
                         parentIdHex = result.envelope.parentHex,
+                        expiresAtMs = result.envelope.ttlSeconds?.let { result.envelope.sentAtMs + it * 1_000L },
                     )
                 )
                 refresh()
@@ -261,11 +268,16 @@ class SecureChannel(
      * [parentMessageIdHex] (Feature 5) marks the message as a reply to that
      * message id: the stored rows carry it and the chat UI renders a quote.
      */
-    suspend fun send(peerIdHex: String, text: String, parentMessageIdHex: String? = null): Boolean {
+    suspend fun send(
+        peerIdHex: String,
+        text: String,
+        parentMessageIdHex: String? = null,
+        ttlSeconds: Int? = null,
+    ): Boolean {
         val peerId = peerIdHex.hexToBytes()
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return false
-        val envelope = messenger.send(peerId, peerIdHex, trimmed.toByteArray(), parentHex = parentMessageIdHex)
+        val envelope = messenger.send(peerId, peerIdHex, trimmed.toByteArray(), parentHex = parentMessageIdHex, ttlSeconds = ttlSeconds)
         // The chat history keeps the message; the outbox only tracks delivery.
         messageStore.upsert(
             MessageEntity(
@@ -278,6 +290,7 @@ class SecureChannel(
                 media = envelope.media,
                 mediaType = envelope.mediaType,
                 parentIdHex = envelope.parentHex,
+                expiresAtMs = envelope.ttlSeconds?.let { envelope.sentAtMs + it * 1_000L },
             )
         )
         refresh()
@@ -295,12 +308,13 @@ class SecureChannel(
         media: ByteArray,
         text: String = "",
         parentMessageIdHex: String? = null,
+        ttlSeconds: Int? = null,
     ): Boolean {
         if (media.isEmpty() || media.size > PrivateEnvelope.MAX_MEDIA_BYTES) return false
         val captionBytes = text.toByteArray(Charsets.UTF_8)
         if (captionBytes.size > PrivateEnvelope.MAX_CAPTION_BYTES) return false
         val peerId = peerIdHex.hexToBytes()
-        val envelope = messenger.send(peerId, peerIdHex, captionBytes, mediaType, media, parentMessageIdHex)
+        val envelope = messenger.send(peerId, peerIdHex, captionBytes, mediaType, media, parentMessageIdHex, ttlSeconds)
         messageStore.upsert(
             MessageEntity(
                 messageIdHex = hex(envelope.messageId),
@@ -312,6 +326,7 @@ class SecureChannel(
                 media = envelope.media,
                 mediaType = envelope.mediaType,
                 parentIdHex = envelope.parentHex,
+                expiresAtMs = envelope.ttlSeconds?.let { envelope.sentAtMs + it * 1_000L },
             )
         )
         refresh()
@@ -342,6 +357,7 @@ class SecureChannel(
             mediaType = message.mediaType,
             media = message.media,
             parentHex = message.parentIdHex,
+            ttlSeconds = message.expiresAtMs?.let { ((it - message.createdAtMs) / 1_000L).toInt().coerceIn(1, PrivateEnvelope.MAX_TTL_SECONDS) },
         )
         outbox.queue(message.peerIdHex, envelope.encode(), nowProvider())
         messageStore.setState(messageIdHex, OutboxState.QUEUED.name)
@@ -402,6 +418,8 @@ class SecureChannel(
         if (days > 0) {
             messageStore.deleteOlderThan(nowProvider() - days * 24L * 60 * 60 * 1_000)
         }
+        // 6. Disappearing messages: drop rows whose expiry has passed.
+        messageStore.deleteExpired(nowProvider())
         refresh()
     }
 
@@ -433,6 +451,57 @@ class SecureChannel(
             }
         }
         refresh()
+    }
+
+    /**
+     * Applies an incoming MESSAGE_CONTROL (delete / edit) to a private message.
+     * Only the original author may mutate their own message: for a received
+     * row that is the peer, for an outgoing row it is us. Returns true when applied.
+     */
+    suspend fun applyMessageControl(targetIdHex: String, senderIdHex: String, delete: Boolean, newText: String?): Boolean {
+        val row = messageStore.find(targetIdHex) ?: return false
+        val author = if (row.outgoing) hex(identity.senderId) else row.peerIdHex
+        if (author != senderIdHex) return false
+        if (delete) {
+            messageStore.markDeleted(targetIdHex)
+        } else {
+            val text = newText ?: return false
+            if (text.isEmpty() || text.length > Payloads.MessageControlPayload.MAX_EDIT_TEXT_CHARS) return false
+            messageStore.editText(targetIdHex, text.toByteArray(Charsets.UTF_8), nowProvider())
+        }
+        refresh()
+        return true
+    }
+
+    /**
+     * Broadcasts a signed MESSAGE_CONTROL so the author can delete or edit a
+     * message they sent (private, group or channel — the target id is uniform).
+     */
+    suspend fun sendMessageControl(targetIdHex: String, delete: Boolean, newText: String? = null): Boolean {
+        val targetId = runCatching { targetIdHex.hexToBytes() }.getOrNull() ?: return false
+        if (targetId.size != 32) return false
+        val ctrl = Payloads.MessageControlPayload(
+            kind = if (delete) Payloads.MessageControlPayload.KIND_DELETE else Payloads.MessageControlPayload.KIND_EDIT,
+            targetId = targetId,
+            newText = if (delete) null else newText,
+        )
+        val payload = runCatching { Payloads.encodeMessageControl(ctrl) }.getOrNull() ?: return false
+        val unsigned = MeshPacket(
+            version = PacketCodec.PROTOCOL_VERSION,
+            type = PacketType.MESSAGE_CONTROL,
+            ttl = PacketCodec.MAX_TTL,
+            flags = 0x00,
+            timestampMs = nowProvider(),
+            payload = payload,
+            senderId = identity.senderId,
+            recipientId = PacketCodec.BROADCAST_ID,
+            signature = null,
+        )
+        val signed = unsigned.copy(
+            flags = 0x02,
+            signature = identity.signEd25519(PacketCodec.signingInput(unsigned)),
+        )
+        return runCatching { router.onLocalBroadcast(signed) }.isSuccess
     }
 
     /** The user accepts a new key for a peer (§7.2). */
@@ -543,6 +612,9 @@ class SecureChannel(
                 mediaType = row.mediaType,
                 media = row.media,
                 parentIdHex = row.parentIdHex,
+                expiresAtMs = row.expiresAtMs,
+                deleted = row.deleted,
+                editedAtMs = row.editedAtMs,
             )
         }
         _messages.value = list.sortedBy { it.createdAtMs }

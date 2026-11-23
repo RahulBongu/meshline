@@ -30,6 +30,12 @@ data class ChannelMessageUi(
     val text: String,
     val timestampMs: Long,
     val isSelf: Boolean,
+    /** Reply-to quoting: the quoted message's id (null when not a reply). */
+    val parentIdHex: String? = null,
+    /** True once the author deleted it (shown as a tombstone). */
+    val deleted: Boolean = false,
+    /** When the author last edited it (null = never edited). */
+    val editedAtMs: Long? = null,
 )
 
 class ChannelManager(
@@ -109,6 +115,28 @@ class ChannelManager(
         val norm = normalizeChannel(channel)
         _messages.value = _messages.value + (norm to emptyList())
         persist { it.deleteChannel(norm) }
+    }
+
+    /**
+     * Applies a MESSAGE_CONTROL (delete / edit) to a channel message.
+     * Only the original author may mutate their own message. Returns true
+     * when applied.
+     */
+    fun applyMessageControl(targetIdHex: String, senderIdHex: String, delete: Boolean, newText: String?): Boolean {
+        for ((channel, list) in _messages.value) {
+            val msg = list.firstOrNull { it.messageIdHex == targetIdHex } ?: continue
+            if (msg.senderIdHex != senderIdHex) return false
+            val updatedList = list.map {
+                if (it.messageIdHex != targetIdHex) it
+                else if (delete) it.copy(deleted = true, text = "")
+                else it.copy(text = newText ?: it.text, editedAtMs = System.currentTimeMillis())
+            }
+            _messages.value = _messages.value + (channel to updatedList)
+            if (delete) persist { it.markMessageDeleted(targetIdHex) }
+            else persist { it.editMessage(targetIdHex, newText ?: "", System.currentTimeMillis()) }
+            return true
+        }
+        return false
     }
 
     private suspend fun hydrate(store: ChannelPersistence) {

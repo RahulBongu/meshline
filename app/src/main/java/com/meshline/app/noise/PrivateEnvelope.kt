@@ -18,9 +18,10 @@ import java.nio.ByteOrder
  * messageId(32)   the application-level message id
  * sentAtMs(8)     when the sender composed it, big-endian
  * version(1)      = 2
- * flags(1)        bit0 = hasParent, bit1 = hasMedia (other bits must be 0)
+ * flags(1)        bit0 = hasParent, bit1 = hasMedia, bit2 = hasTtl (other bits must be 0)
  * [parentLen(1) + parent]  if hasParent   parentHexLen: 1..64
  * [mediaTypeLen(1) + mediaType]  if hasMedia   1..16
+ * [ttlSeconds(4 BE)]  if hasTtl   1..MAX_TTL_SECONDS (disappearing messages)
  * captionLen(2 BE) + caption   the message body: text for text messages,
  *                              the caption (often empty) for media messages
  * [mediaLen(2 BE) + media]  if hasMedia, 0..MAX_MEDIA_BYTES
@@ -53,6 +54,11 @@ data class PrivateEnvelope(
     val media: ByteArray? = null,
     /** `messageIdHex` of the replied-to message (Feature 5: reply-to quoting). Null when none. */
     val parentHex: String? = null,
+    /**
+     * Disappearing messages: seconds after [sentAtMs] at which every device
+     * must drop the message. Null = keep (subject to retention). 1..[MAX_TTL_SECONDS].
+     */
+    val ttlSeconds: Int? = null,
 ) {
     /** Raised when an envelope does not match the expected shape. */
     class MalformedEnvelope(message: String) : Exception(message)
@@ -75,10 +81,16 @@ data class PrivateEnvelope(
         if (media != null && media.size > MAX_MEDIA_BYTES) {
             throw MalformedEnvelope("media ${media.size} bytes exceeds max $MAX_MEDIA_BYTES")
         }
-        val flags = ((if (parentHex != null) FLAG_HAS_PARENT else 0) or (if (media != null) FLAG_HAS_MEDIA else 0)).toByte()
+        if (ttlSeconds != null && ttlSeconds !in 1..MAX_TTL_SECONDS) {
+            throw MalformedEnvelope("ttlSeconds must be 1..$MAX_TTL_SECONDS (got $ttlSeconds)")
+        }
+        val flags = ((if (parentHex != null) FLAG_HAS_PARENT else 0) or
+            (if (media != null) FLAG_HAS_MEDIA else 0) or
+            (if (ttlSeconds != null) FLAG_HAS_TTL else 0)).toByte()
         val total = HEADER_BYTES + 2 +                                  // id + sentAtMs + version + flags
             (if (parentHex != null) 1 + (parentBytes?.size ?: 0) else 0) +  // parentLen + parent
             (if (mediaType != null) 1 + (mediaTypeBytes?.size ?: 0) else 0) + // mediaTypeLen + mediaType
+            (if (ttlSeconds != null) 4 else 0) +                        // ttlSeconds
             2 + text.size +                                             // captionLen + caption
             (media?.let { 2 + it.size } ?: 0)                            // mediaLen + media
         val buf = ByteBuffer.allocate(total).order(ByteOrder.BIG_ENDIAN)
@@ -93,6 +105,9 @@ data class PrivateEnvelope(
         if (mediaType != null && mediaTypeBytes != null) {
             buf.put(mediaTypeBytes.size.toByte())
             buf.put(mediaTypeBytes)
+        }
+        if (ttlSeconds != null) {
+            buf.putInt(ttlSeconds)
         }
         buf.putShort(text.size.toShort())
         buf.put(text)
@@ -114,7 +129,8 @@ data class PrivateEnvelope(
             text.contentEquals(other.text) &&
             mediaType == other.mediaType &&
             media.eq(other.media) &&
-            parentHex == other.parentHex
+            parentHex == other.parentHex &&
+            ttlSeconds == other.ttlSeconds
     }
 
     override fun hashCode(): Int {
@@ -124,6 +140,7 @@ data class PrivateEnvelope(
         h = 31 * h + (mediaType?.hashCode() ?: 0)
         h = 31 * h + (media?.contentHashCode() ?: 0)
         h = 31 * h + (parentHex?.hashCode() ?: 0)
+        h = 31 * h + (ttlSeconds?.hashCode() ?: 0)
         return h
     }
 
@@ -134,10 +151,13 @@ data class PrivateEnvelope(
         private const val V2_VERSION = 2
         private const val FLAG_HAS_PARENT = 0x01
         private const val FLAG_HAS_MEDIA = 0x02
-        private const val RESERVED_FLAGS_MASK = 0xFC
+        private const val FLAG_HAS_TTL = 0x04
+        private const val RESERVED_FLAGS_MASK = 0xF8
         /** Max media payload bytes (voice notes, compressed images). */
         const val MAX_MEDIA_BYTES = 55_000
         const val MAX_CAPTION_BYTES: Int = 4_000
+        /** Disappearing-message upper bound: 7 days. */
+        const val MAX_TTL_SECONDS: Int = 7 * 24 * 60 * 60
 
         fun decode(bytes: ByteArray): PrivateEnvelope {
             if (bytes.size < HEADER_BYTES + 2) throw MalformedEnvelope("envelope too short (${bytes.size})")
@@ -158,6 +178,7 @@ data class PrivateEnvelope(
             }
             val hasParent = flags and FLAG_HAS_PARENT != 0
             val hasMedia = flags and FLAG_HAS_MEDIA != 0
+            val hasTtl = flags and FLAG_HAS_TTL != 0
             var pos = HEADER_BYTES + 2
             var parentHex: String? = null
             if (hasParent) {
@@ -174,6 +195,14 @@ data class PrivateEnvelope(
                 pos++
                 mediaType = bytes.copyOfRange(pos, pos + len).toString(Charsets.UTF_8)
                 pos += len
+            }
+            var ttlSeconds: Int? = null
+            if (hasTtl) {
+                if (pos + 4 > bytes.size) throw MalformedEnvelope("truncated ttlSeconds")
+                val ttl = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getInt(pos)
+                pos += 4
+                if (ttl !in 1..MAX_TTL_SECONDS) throw MalformedEnvelope("ttlSeconds out of range: $ttl")
+                ttlSeconds = ttl
             }
             if (pos + 2 > bytes.size) throw MalformedEnvelope("truncated caption length")
             val captionLen = readShortAt(bytes, pos).toInt() and 0xFFFF
@@ -199,6 +228,7 @@ data class PrivateEnvelope(
                 mediaType = mediaType,
                 media = media,
                 parentHex = parentHex,
+                ttlSeconds = ttlSeconds,
             )
         }
 

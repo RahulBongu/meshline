@@ -17,6 +17,8 @@ data class PeerInfo(
     val nickname: String? = null,
     /** Hops of the last content packet observed from this peer; null if never seen. */
     val lastHops: Int? = null,
+    /** Epoch millis of the last ANNOUNCE received from this peer (presence). */
+    val lastSeenMs: Long? = null,
 )
 
 data class ReceivedMessageInfo(

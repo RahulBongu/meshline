@@ -17,6 +17,14 @@ class ChannelPersistenceTest {
         val messages = mutableListOf<ChannelMessageUi>()
         override suspend fun loadMessages(): List<ChannelMessageUi> = messages.toList()
         override suspend fun insertMessage(message: ChannelMessageUi) { messages.add(message) }
+        override suspend fun markMessageDeleted(messageIdHex: String) {
+            val idx = messages.indexOfFirst { it.messageIdHex == messageIdHex }
+            if (idx >= 0) messages[idx] = messages[idx].copy(deleted = true, text = "")
+        }
+        override suspend fun editMessage(messageIdHex: String, newText: String, editedAtMs: Long) {
+            val idx = messages.indexOfFirst { it.messageIdHex == messageIdHex }
+            if (idx >= 0) messages[idx] = messages[idx].copy(text = newText, editedAtMs = editedAtMs)
+        }
         override suspend fun deleteChannel(channel: String) { messages.removeAll { it.channel == channel } }
         override suspend fun deleteAll() { messages.clear() }
         override suspend fun deleteMessagesOlderThan(thresholdMs: Long) {

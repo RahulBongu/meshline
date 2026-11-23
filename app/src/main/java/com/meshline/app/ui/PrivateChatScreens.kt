@@ -32,6 +32,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -705,11 +707,12 @@ private fun EmptyInboxState(message: String) {
 fun PrivateChatScreen(
     peer: PrivatePeer,
     messages: List<PrivateChatMessage>,
-    onSend: (text: String, parentMessageIdHex: String?) -> Unit,
+    onSend: (text: String, parentMessageIdHex: String?, ttlSeconds: Int?) -> Unit,
     onSendMedia: (mediaType: String, media: ByteArray, caption: String, parentMessageIdHex: String?) -> Unit,
     onResend: (String) -> Unit,
     onClearChat: () -> Unit,
     onBack: () -> Unit,
+    onSendControl: (messageIdHex: String, delete: Boolean, newText: String?) -> Unit = { _, _, _ -> },
     isTyping: Boolean = false,
     onTyping: () -> Unit = {},
 ) {
@@ -1022,6 +1025,15 @@ fun PrivateChatScreen(
                         // Asymmetric Message Bubble
                         Box(
                             modifier = Modifier
+                                .pointerInput(m.messageIdHex) {
+                                    detectTapGestures(
+                                        onLongPress = {
+                                            if (m.outgoing && !m.deleted) {
+                                                onSendControl(m.messageIdHex, true, null)
+                                            }
+                                        }
+                                    )
+                                }
                                 .clip(
                                     if (isOutgoing) {
                                         RoundedCornerShape(
@@ -1095,7 +1107,23 @@ fun PrivateChatScreen(
                                             }
                                         }
                                     }
-                                    if (m.text.isNotBlank()) {
+                                    if (m.deleted) {
+                                        Text(
+                                            text = "🚫 This message was deleted",
+                                            color = colors.textMuted,
+                                            fontSize = 13.sp,
+                                            lineHeight = 18.sp,
+                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                        )
+                                    } else if (m.deleted) {
+                                        Text(
+                                            text = "🚫 This message was deleted",
+                                            color = colors.textMuted,
+                                            fontSize = 13.sp,
+                                            lineHeight = 18.sp,
+                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                        )
+                                    } else if (m.text.isNotBlank()) {
                                         Spacer(Modifier.height(4.dp))
                                         Text(
                                             text = m.text,
@@ -1103,6 +1131,14 @@ fun PrivateChatScreen(
                                             fontSize = 14.sp,
                                             lineHeight = 20.sp,
                                         )
+                                        if (m.editedAtMs != null) {
+                                            Text(
+                                                text = "(edited)",
+                                                color = colors.textMuted,
+                                                fontSize = 10.sp,
+                                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                            )
+                                        }
                                     }
                                 } else {
                                     Text(
@@ -1285,7 +1321,7 @@ fun PrivateChatScreen(
                         .clickable(enabled = draft.isNotBlank()) {
                             val parent = replyTarget
                             replyTarget = null
-                            onSend(draft.trim(), parent?.messageIdHex)
+                            onSend(draft.trim(), parent?.messageIdHex, null)
                             draft = ""
                         },
                     contentAlignment = Alignment.Center,

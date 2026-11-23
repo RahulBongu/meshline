@@ -441,4 +441,99 @@ object GroupPayloads {
         }
         return roster
     }
+
+    // ---- Group message plaintext: reply-to + disappearing ----
+    //
+    // Legacy plaintext is raw UTF-8 text and stays byte-identical: a message
+    // with neither a parent nor a TTL is encoded as plain text. When either is
+    // present the plaintext uses a versioned form:
+    //
+    //   0x02 | flags(1) | [parentLen(1) + parentHex] | [ttlSeconds(4 BE)] | textLen(2 BE) + text
+    //
+    // flags: bit0 = hasParent, bit1 = hasTtl (other bits must be 0).
+    // Detection on decode: leading byte 0x02 **and** the structure parses
+    // cleanly; anything else is legacy raw text (so old messages keep working
+    // and a stray 0x02 in text can never lose a message).
+
+    /** The decrypted body of a group message, with optional reply-to / TTL. */
+    data class GroupText(
+        val text: String,
+        val parentHex: String? = null,
+        val ttlSeconds: Int? = null,
+    )
+
+    const val GROUP_TEXT_VERSION: Byte = 0x02
+    const val MAX_GROUP_TEXT_BYTES: Int = 4_000
+    const val MAX_GROUP_TTL_SECONDS: Int = 7 * 24 * 60 * 60
+    private const val GT_FLAG_HAS_PARENT = 0x01
+    private const val GT_FLAG_HAS_TTL = 0x02
+
+    fun encodeGroupText(gt: GroupText): ByteArray {
+        val textBytes = gt.text.toByteArray(Charsets.UTF_8)
+        if (textBytes.isEmpty() || textBytes.size > MAX_GROUP_TEXT_BYTES) {
+            throw PacketException.InvalidPacket("group text must be 1..$MAX_GROUP_TEXT_BYTES bytes")
+        }
+        if (gt.parentHex == null && gt.ttlSeconds == null) return textBytes
+        val parentBytes = gt.parentHex?.toByteArray(Charsets.UTF_8)
+        if (gt.parentHex != null && (parentBytes == null || parentBytes.isEmpty() || parentBytes.size > 64)) {
+            throw PacketException.InvalidPacket("group parentHex must be 1..64 bytes")
+        }
+        if (gt.ttlSeconds != null && gt.ttlSeconds !in 1..MAX_GROUP_TTL_SECONDS) {
+            throw PacketException.InvalidPacket("group ttlSeconds must be 1..$MAX_GROUP_TTL_SECONDS")
+        }
+        val flags = ((if (gt.parentHex != null) GT_FLAG_HAS_PARENT else 0) or
+            (if (gt.ttlSeconds != null) GT_FLAG_HAS_TTL else 0))
+        val total = 2 +
+            (if (parentBytes != null) 1 + parentBytes.size else 0) +
+            (if (gt.ttlSeconds != null) 4 else 0) +
+            2 + textBytes.size
+        val buf = ByteBuffer.allocate(total).order(ByteOrder.BIG_ENDIAN)
+        buf.put(GROUP_TEXT_VERSION)
+        buf.put(flags.toByte())
+        if (parentBytes != null) {
+            buf.put(parentBytes.size.toByte())
+            buf.put(parentBytes)
+        }
+        gt.ttlSeconds?.let { buf.putInt(it) }
+        buf.putShort(textBytes.size.toShort())
+        buf.put(textBytes)
+        return buf.array()
+    }
+
+    fun decodeGroupText(payload: ByteArray): GroupText {
+        if (payload.isNotEmpty() && payload[0] == GROUP_TEXT_VERSION) {
+            parseStructuredGroupText(payload)?.let { return it }
+        }
+        // Legacy raw text (also the fallback for a malformed versioned form).
+        return GroupText(payload.toString(Charsets.UTF_8))
+    }
+
+    private fun parseStructuredGroupText(payload: ByteArray): GroupText? {
+        if (payload.size < 4) return null
+        val flags = payload[1].toInt() and 0xFF
+        if (flags and (GT_FLAG_HAS_PARENT or GT_FLAG_HAS_TTL).inv() != 0) return null
+        var pos = 2
+        var parentHex: String? = null
+        if (flags and GT_FLAG_HAS_PARENT != 0) {
+            if (pos >= payload.size) return null
+            val len = payload[pos].toInt() and 0xFF
+            if (len !in 1..64 || pos + 1 + len > payload.size) return null
+            parentHex = payload.copyOfRange(pos + 1, pos + 1 + len).toString(Charsets.UTF_8)
+            pos += 1 + len
+        }
+        var ttlSeconds: Int? = null
+        if (flags and GT_FLAG_HAS_TTL != 0) {
+            if (pos + 4 > payload.size) return null
+            val ttl = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).getInt(pos)
+            if (ttl !in 1..MAX_GROUP_TTL_SECONDS) return null
+            ttlSeconds = ttl
+            pos += 4
+        }
+        if (pos + 2 > payload.size) return null
+        val textLen = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).getShort(pos).toInt() and 0xFFFF
+        pos += 2
+        if (textLen < 1 || textLen > MAX_GROUP_TEXT_BYTES || pos + textLen != payload.size) return null
+        val text = payload.copyOfRange(pos, pos + textLen).toString(Charsets.UTF_8)
+        return GroupText(text, parentHex, ttlSeconds)
+    }
 }

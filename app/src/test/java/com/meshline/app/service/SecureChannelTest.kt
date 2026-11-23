@@ -79,10 +79,17 @@ class SecureChannelTest {
         private val rows = LinkedHashMap<String, MessageEntity>()
         override suspend fun upsert(entity: MessageEntity) { rows[entity.messageIdHex] = entity }
         override suspend fun all(): List<MessageEntity> = rows.values.toList()
+        override suspend fun find(messageIdHex: String): MessageEntity? = rows[messageIdHex]
         override suspend fun forPeer(peerIdHex: String): List<MessageEntity> =
             rows.values.filter { it.peerIdHex == peerIdHex }
         override suspend fun setState(messageIdHex: String, state: String) {
             rows[messageIdHex]?.let { rows[messageIdHex] = it.copy(state = state) }
+        }
+        override suspend fun markDeleted(messageIdHex: String) {
+            rows[messageIdHex]?.let { rows[messageIdHex] = it.copy(deleted = true, text = byteArrayOf()) }
+        }
+        override suspend fun editText(messageIdHex: String, text: ByteArray, editedAtMs: Long) {
+            rows[messageIdHex]?.let { rows[messageIdHex] = it.copy(text = text, editedAtMs = editedAtMs) }
         }
         override suspend fun clearPeer(peerIdHex: String) {
             rows.values.filter { it.peerIdHex == peerIdHex }.forEach { rows.remove(it.messageIdHex) }
@@ -90,6 +97,11 @@ class SecureChannelTest {
         override suspend fun deleteAll() = rows.clear()
         override suspend fun deleteOlderThan(cutoffMs: Long): Int {
             val hit = rows.values.filter { it.createdAtMs < cutoffMs }
+            hit.forEach { rows.remove(it.messageIdHex) }
+            return hit.size
+        }
+        override suspend fun deleteExpired(nowMs: Long): Int {
+            val hit = rows.values.filter { it.expiresAtMs != null && it.expiresAtMs <= nowMs }
             hit.forEach { rows.remove(it.messageIdHex) }
             return hit.size
         }

@@ -361,7 +361,7 @@ class MeshRouter(
     private fun mustBeSigned(type: PacketType): Boolean = when (type) {
         PacketType.ANNOUNCE, PacketType.PUBLIC_MESSAGE, PacketType.RECEIPT, PacketType.LEAVE,
         PacketType.CHANNEL_MESSAGE, PacketType.GROUP_MESSAGE, PacketType.GROUP_CONTROL,
-        PacketType.REACTION, PacketType.GEO_PING -> true
+        PacketType.REACTION, PacketType.GEO_PING, PacketType.MESSAGE_CONTROL -> true
         // TYPING is signed too, but only ever directed to the recipient.
         PacketType.TYPING -> true
         else -> false
@@ -588,7 +588,8 @@ class MeshRouter(
     private fun isContentType(type: PacketType): Boolean = when (type) {
         PacketType.PUBLIC_MESSAGE, PacketType.PRIVATE_MESSAGE, PacketType.RECEIPT,
         PacketType.FRAGMENT, PacketType.CHANNEL_MESSAGE, PacketType.GROUP_MESSAGE,
-        PacketType.GROUP_CONTROL, PacketType.REACTION, PacketType.GEO_PING -> true
+        PacketType.GROUP_CONTROL, PacketType.REACTION, PacketType.GEO_PING,
+        PacketType.MESSAGE_CONTROL -> true
         else -> false
     }
 

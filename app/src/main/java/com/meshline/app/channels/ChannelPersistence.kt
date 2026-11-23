@@ -15,6 +15,12 @@ interface ChannelPersistence {
 
     suspend fun insertMessage(message: ChannelMessageUi)
 
+    /** MESSAGE_CONTROL: tombstone one message (author-checked by the caller). */
+    suspend fun markMessageDeleted(messageIdHex: String)
+
+    /** MESSAGE_CONTROL: replace one message's body and stamp the edit time. */
+    suspend fun editMessage(messageIdHex: String, newText: String, editedAtMs: Long)
+
     /** Clears one channel's history ("clear channel"). */
     suspend fun deleteChannel(channel: String)
 
