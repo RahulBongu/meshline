@@ -1,4 +1,4 @@
-package com.meshline.app
+﻿package com.meshline.app
 
 import android.Manifest
 import android.content.Intent
@@ -525,7 +525,7 @@ private fun App(
             scanError = null
             screen = Screen.SCAN
         } else {
-            scanError = "Camera permission denied — allow it in Settings to scan a QR."
+            scanError = "Camera permission denied â€” allow it in Settings to scan a QR."
         }
     }
 
@@ -583,7 +583,7 @@ private fun App(
             modifier = Modifier.fillMaxSize().background(colors.background),
             contentAlignment = Alignment.Center,
         ) {
-            Text("Initializing Meshline cryptographic identity…", color = colors.textSecondary)
+            Text("Initializing Meshline cryptographic identityâ€¦", color = colors.textSecondary)
         }
         return
     }
@@ -684,6 +684,7 @@ private fun App(
                     messages = groupMsgList,
                     selfIdHex = id.senderId.joinToString("") { "%02x".format(it) },
                     onSend = { text -> onSendGroupMessage(group.groupIdHex, text) },
+                    onSendControl = { messageId, delete, newText -> onSendControl(messageId, delete, newText) },
                     onRemoveMember = { memberIdHex -> onRemoveMember(group.groupIdHex, memberIdHex) },
                     onTransferAdmin = { memberIdHex -> onTransferAdmin(group.groupIdHex, memberIdHex) },
                     onLeaveGroup = {
@@ -718,7 +719,7 @@ private fun App(
                             onClick = { currentTab = MainTab.CHATS },
                             icon = {
                                 Box {
-                                    Text("💬", fontSize = 18.sp)
+                                    Text("ðŸ’¬", fontSize = 18.sp)
                                     if (totalGroupBadge > 0) {
                                         Box(
                                             modifier = Modifier
@@ -744,7 +745,7 @@ private fun App(
                             onClick = { currentTab = MainTab.NEARBY },
                             icon = {
                                 Box {
-                                    Text("📡", fontSize = 18.sp)
+                                    Text("ðŸ“¡", fontSize = 18.sp)
                                     if (peers.isNotEmpty()) {
                                         Box(
                                             modifier = Modifier
@@ -795,7 +796,7 @@ private fun App(
                         NavigationBarItem(
                             selected = currentTab == MainTab.SETTINGS,
                             onClick = { currentTab = MainTab.SETTINGS },
-                            icon = { Text("⚙", fontSize = 18.sp) },
+                            icon = { Text("âš™", fontSize = 18.sp) },
                             label = { Text("Settings", fontSize = 11.sp) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = colors.primary,
@@ -867,6 +868,7 @@ private fun App(
                                 onSelectChannel = { ch -> onSetActiveChannel(ch) },
                                 onJoinChannel = { ch -> onSetActiveChannel(ch) },
                                 onSendMessage = { ch, text -> onSendChannelMessage(ch, text) },
+                                 onSendControl = { messageId, delete, newText -> onSendControl(messageId, delete, newText) },
                                 onExecuteCommand = { cmd, ch -> onExecuteCommand(cmd, ch) },
                                 reactions = reactions,
                                 onToggleReaction = onSendReaction,

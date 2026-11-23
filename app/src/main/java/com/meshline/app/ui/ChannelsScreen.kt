@@ -64,6 +64,7 @@ fun ChannelsScreen(
     onSelectChannel: (String) -> Unit,
     onJoinChannel: (String) -> Unit,
     onSendMessage: (channel: String, text: String) -> Unit,
+    onSendControl: (messageIdHex: String, delete: Boolean, newText: String?) -> Unit = { _, _, _ -> },
     onExecuteCommand: (commandText: String, activeChannel: String) -> Unit,
     reactions: Map<String, List<ReactionUi>> = emptyMap(),
     onToggleReaction: (targetIdHex: String, emoji: String) -> Unit = { _, _ -> },

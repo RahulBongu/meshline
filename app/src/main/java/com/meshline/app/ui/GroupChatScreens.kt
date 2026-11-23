@@ -256,6 +256,7 @@ fun GroupChatScreen(
     messages: List<GroupMessageUi>,
     selfIdHex: String,
     onSend: (String) -> Unit,
+    onSendControl: (messageIdHex: String, delete: Boolean, newText: String?) -> Unit = { _, _, _ -> },
     onRemoveMember: (memberIdHex: String) -> Unit,
     onTransferAdmin: (memberIdHex: String) -> Unit,
     onLeaveGroup: () -> Unit,
