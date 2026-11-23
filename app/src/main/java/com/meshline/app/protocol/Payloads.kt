@@ -276,6 +276,72 @@ object Payloads {
         return GeoPingPayload(geohash, name)
     }
 
+    // ---- MESSAGE_CONTROL (§6.11) ----
+    // kind(1) | targetId(32) | [textLen(2 BE) + text]  (text only for EDIT)
+    // Signed, broadcast. Lets the **author** of a message delete or edit it
+    // across the mesh. The handler re-checks that the sender is the original
+    // author before applying anything.
+    data class MessageControlPayload(val kind: Byte, val targetId: ByteArray, val newText: String? = null) {
+        companion object {
+            const val KIND_DELETE: Byte = 1
+            const val KIND_EDIT: Byte = 2
+            const val MAX_EDIT_TEXT_CHARS: Int = MAX_PUBLIC_TEXT_CHARS
+        }
+
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is MessageControlPayload) return false
+            return kind == other.kind && targetId.contentEquals(other.targetId) && newText == other.newText
+        }
+
+        override fun hashCode(): Int = 31 * (31 * kind.toInt() + targetId.contentHashCode()) + (newText?.hashCode() ?: 0)
+    }
+
+    fun encodeMessageControl(ctrl: MessageControlPayload): ByteArray {
+        require(ctrl.targetId.size == 32) { "message control targetId must be 32 bytes" }
+        if (ctrl.kind != MessageControlPayload.KIND_DELETE && ctrl.kind != MessageControlPayload.KIND_EDIT) {
+            throw PacketException.InvalidPacket("message control kind must be DELETE(1) or EDIT(2)")
+        }
+        if (ctrl.kind == MessageControlPayload.KIND_EDIT) {
+            val text = ctrl.newText ?: throw PacketException.InvalidPacket("EDIT requires newText")
+            if (text.isEmpty() || text.length > MessageControlPayload.MAX_EDIT_TEXT_CHARS) {
+                throw PacketException.InvalidPacket("edit text must be 1..${MessageControlPayload.MAX_EDIT_TEXT_CHARS} chars")
+            }
+            val textBytes = text.toByteArray(Charsets.UTF_8)
+            val buf = ByteBuffer.allocate(1 + 32 + 2 + textBytes.size).order(ByteOrder.BIG_ENDIAN)
+            buf.put(ctrl.kind)
+            buf.put(ctrl.targetId)
+            buf.putShort(textBytes.size.toShort())
+            buf.put(textBytes)
+            return buf.array()
+        }
+        if (ctrl.newText != null) throw PacketException.InvalidPacket("DELETE must not carry newText")
+        return byteArrayOf(ctrl.kind) + ctrl.targetId
+    }
+
+    fun decodeMessageControl(payload: ByteArray): MessageControlPayload {
+        if (payload.size < 1 + 32) throw PacketException.InvalidPacket("message control too short")
+        val kind = payload[0]
+        val targetId = payload.copyOfRange(1, 33)
+        return when (kind) {
+            MessageControlPayload.KIND_DELETE -> {
+                if (payload.size != 33) throw PacketException.InvalidPacket("DELETE payload must be 33 bytes")
+                MessageControlPayload(kind, targetId, null)
+            }
+            MessageControlPayload.KIND_EDIT -> {
+                if (payload.size < 35) throw PacketException.InvalidPacket("EDIT payload truncated")
+                val textLen = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).getShort(33).toInt() and 0xFFFF
+                if (payload.size != 35 + textLen) throw PacketException.InvalidPacket("EDIT length mismatch")
+                val text = payload.copyOfRange(35, 35 + textLen).toString(Charsets.UTF_8)
+                if (text.isEmpty() || text.length > MessageControlPayload.MAX_EDIT_TEXT_CHARS) {
+                    throw PacketException.InvalidPacket("edit text length invalid")
+                }
+                MessageControlPayload(kind, targetId, text)
+            }
+            else -> throw PacketException.InvalidPacket("unknown message control kind: $kind")
+        }
+    }
+
     // ---- LEAVE (§6.5) ----
 
     fun encodeLeave(senderId: ByteArray): ByteArray {

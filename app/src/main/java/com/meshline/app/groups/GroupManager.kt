@@ -83,6 +83,14 @@ data class GroupMessageUi(
     val epoch: Int,
     val timestampMs: Long,
     val isSelf: Boolean,
+    /** Reply-to quoting: the quoted message's id (null when not a reply). */
+    val parentIdHex: String? = null,
+    /** Disappearing messages: epoch millis at which the message must be dropped. */
+    val expiresAtMs: Long? = null,
+    /** True once the author deleted it (shown as a tombstone). */
+    val deleted: Boolean = false,
+    /** When the author last edited it (null = never edited). */
+    val editedAtMs: Long? = null,
 )
 
 data class PendingGroupInvite(
@@ -503,11 +511,28 @@ class GroupManager(
 
     /**
      * Encrypts and encodes an outgoing group message.
+     *
+     * [parentMessageIdHex] quotes another message (group reply-to);
+     * [ttlSeconds] makes it a disappearing message. Both ride the versioned
+     * group plaintext ([GroupPayloads.encodeGroupText]); plain messages stay
+     * byte-identical to the legacy raw-text form.
      */
-    fun createOutgoingGroupPacket(groupIdHex: String, text: String): MeshPacket? {
+    fun createOutgoingGroupPacket(
+        groupIdHex: String,
+        text: String,
+        parentMessageIdHex: String? = null,
+        ttlSeconds: Int? = null,
+    ): MeshPacket? {
         val group = _groups.value[groupIdHex] ?: return null
         val cleanText = text.trim()
         if (cleanText.isEmpty()) return null
+        val plaintext = try {
+            GroupPayloads.encodeGroupText(
+                GroupPayloads.GroupText(cleanText, parentMessageIdHex, ttlSeconds)
+            )
+        } catch (_: Exception) {
+            return null
+        }
 
         val nonce = GroupCipher.generateNonce()
         val ad = GroupPayloads.computeAssociatedData(
@@ -517,7 +542,7 @@ class GroupManager(
         )
 
         val ciphertext = GroupCipher.encrypt(
-            plaintext = cleanText.toByteArray(Charsets.UTF_8),
+            plaintext = plaintext,
             epochKey = group.epochKey,
             nonce = nonce,
             ad = ad,
@@ -561,6 +586,8 @@ class GroupManager(
             epoch = group.epoch,
             timestampMs = signedPacket.timestampMs,
             isSelf = true,
+            parentIdHex = parentMessageIdHex,
+            expiresAtMs = ttlSeconds?.let { signedPacket.timestampMs + it * 1_000L },
         )
         recordMessage(msgUi)
 
@@ -607,17 +634,19 @@ class GroupManager(
             return false
         }
 
-        val text = plaintext.toString(Charsets.UTF_8)
+        val body = GroupPayloads.decodeGroupText(plaintext)
         val msgUi = GroupMessageUi(
             messageIdHex = hex(packet.messageId),
             groupIdHex = group.groupIdHex,
             senderIdHex = hex(packet.senderId),
             senderNickname = member.nickname,
             senderAvatarIndex = member.avatarIndex.toInt() and 0xFF,
-            text = text,
+            text = body.text,
             epoch = groupMsg.epoch,
             timestampMs = packet.timestampMs,
             isSelf = packet.senderId.contentEquals(localIdentity.senderId),
+            parentIdHex = body.parentHex,
+            expiresAtMs = body.ttlSeconds?.let { packet.timestampMs + it * 1_000L },
         )
         recordMessage(msgUi)
         return true
@@ -647,6 +676,40 @@ class GroupManager(
         val updated = group.copy(unreadCount = 0)
         _groups.value = _groups.value + (groupIdHex to updated)
         persist { it.upsertGroup(updated) }
+    }
+
+    /**
+     * Applies a MESSAGE_CONTROL (delete / edit) to a group message.
+     * Only the **original author** may mutate their own message; the router
+     * has already verified the packet signature. Returns true when applied.
+     */
+    fun applyMessageControl(targetIdHex: String, senderIdHex: String, delete: Boolean, newText: String?): Boolean {
+        for ((groupIdHex, list) in _messages.value) {
+            val msg = list.firstOrNull { it.messageIdHex == targetIdHex } ?: continue
+            if (msg.senderIdHex != senderIdHex) return false
+            val updatedList = list.map {
+                if (it.messageIdHex != targetIdHex) it
+                else if (delete) it.copy(deleted = true, text = "")
+                else it.copy(text = newText ?: it.text, editedAtMs = System.currentTimeMillis())
+            }
+            _messages.value = _messages.value + (groupIdHex to updatedList)
+            if (delete) persist { it.markMessageDeleted(targetIdHex) }
+            else persist { it.editMessage(targetIdHex, newText ?: "", System.currentTimeMillis()) }
+            return true
+        }
+        return false
+    }
+
+    /** Disappearing messages: drop expired rows from memory and storage. */
+    fun sweepExpired(nowMs: Long = System.currentTimeMillis()) {
+        var changed = false
+        val next = _messages.value.mapValues { (_, list) ->
+            val kept = list.filter { it.expiresAtMs == null || it.expiresAtMs > nowMs }
+            if (kept.size != list.size) changed = true
+            kept
+        }
+        if (changed) _messages.value = next
+        persist { it.deleteExpiredMessages(nowMs) }
     }
 
     private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }

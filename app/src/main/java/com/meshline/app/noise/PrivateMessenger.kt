@@ -130,6 +130,7 @@ class PrivateMessenger(
         mediaType: String? = null,
         media: ByteArray? = null,
         parentHex: String? = null,
+        ttlSeconds: Int? = null,
     ): PrivateEnvelope {
         val envelope = PrivateEnvelope(
             messageId = randomBytes(PrivateEnvelope.MESSAGE_ID_BYTES),
@@ -138,6 +139,7 @@ class PrivateMessenger(
             mediaType = mediaType,
             media = media,
             parentHex = parentHex,
+            ttlSeconds = ttlSeconds,
         )
         val id = outbox.queue(peerIdHex, envelope.encode(), nowProvider())
         retrySchedule[id] = nowProvider()

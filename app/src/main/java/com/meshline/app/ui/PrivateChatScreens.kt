@@ -32,12 +32,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -705,11 +708,12 @@ private fun EmptyInboxState(message: String) {
 fun PrivateChatScreen(
     peer: PrivatePeer,
     messages: List<PrivateChatMessage>,
-    onSend: (text: String, parentMessageIdHex: String?) -> Unit,
+    onSend: (text: String, parentMessageIdHex: String?, ttlSeconds: Int?) -> Unit,
     onSendMedia: (mediaType: String, media: ByteArray, caption: String, parentMessageIdHex: String?) -> Unit,
     onResend: (String) -> Unit,
     onClearChat: () -> Unit,
     onBack: () -> Unit,
+    onSendControl: (messageIdHex: String, delete: Boolean, newText: String?) -> Unit = { _, _, _ -> },
     isTyping: Boolean = false,
     onTyping: () -> Unit = {},
 ) {
@@ -730,6 +734,71 @@ fun PrivateChatScreen(
 
     // Feature 5: the message being replied to (the parent of the next send).
     var replyTarget by remember { mutableStateOf<PrivateChatMessage?>(null) }
+
+    // Edit dialog state
+    var editTarget by remember { mutableStateOf<PrivateChatMessage?>(null) }
+    var editText by remember { mutableStateOf("") }
+    var actionTarget by remember { mutableStateOf<PrivateChatMessage?>(null) }
+
+    if (actionTarget != null) {
+        AlertDialog(
+            onDismissRequest = { actionTarget = null },
+            title = { Text("Message options", color = colors.textPrimary) },
+            text = {
+                Column {
+                    TextButton(onClick = {
+                        actionTarget?.let { m ->
+                            editText = m.text
+                            editTarget = m
+                        }
+                        actionTarget = null
+                    }) { Text("Edit", color = colors.primary) }
+                    TextButton(onClick = {
+                        actionTarget?.let { m ->
+                            onSendControl(m.messageIdHex, true, null)
+                        }
+                        actionTarget = null
+                    }) { Text("Delete", color = colors.danger) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { actionTarget = null }) { Text("Cancel", color = colors.textSecondary) }
+            }
+        )
+    }
+
+    if (editTarget != null) {
+        AlertDialog(
+            onDismissRequest = { editTarget = null },
+            title = { Text("Edit message", color = colors.textPrimary) },
+            text = {
+                OutlinedTextField(
+                    value = editText,
+                    onValueChange = { editText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = colors.primary,
+                        unfocusedBorderColor = colors.border,
+                        cursorColor = colors.primary,
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    editTarget?.let { m ->
+                        if (editText.isNotBlank()) {
+                            onSendControl(m.messageIdHex, false, editText.trim())
+                        }
+                    }
+                    editTarget = null
+                }) { Text("Save", color = colors.primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { editTarget = null }) { Text("Cancel", color = colors.textSecondary) }
+            }
+        )
+    }
 
     // Feature 4: voice note recording (MediaRecorder over MPEG_4/AAC).
     var recording by remember { mutableStateOf(false) }
@@ -1022,6 +1091,15 @@ fun PrivateChatScreen(
                         // Asymmetric Message Bubble
                         Box(
                             modifier = Modifier
+                                .pointerInput(m.messageIdHex) {
+                                    detectTapGestures(
+                                        onLongPress = {
+                                            if (m.outgoing && !m.deleted) {
+                                                actionTarget = m
+                                            }
+                                        }
+                                    )
+                                }
                                 .clip(
                                     if (isOutgoing) {
                                         RoundedCornerShape(
@@ -1095,14 +1173,40 @@ fun PrivateChatScreen(
                                             }
                                         }
                                     }
-                                    if (m.text.isNotBlank()) {
+                                    if (m.deleted) {
+                                        Text(
+                                            text = "🚫 This message was deleted",
+                                            color = colors.textMuted,
+                                            fontSize = 13.sp,
+                                            lineHeight = 18.sp,
+                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                        )
+                                    } else if (m.text.isNotBlank()) {
                                         Spacer(Modifier.height(4.dp))
                                         Text(
-                                            text = m.text,
+                                            text = buildAnnotatedMessage(m.text, colors.primary),
                                             color = if (isOutgoing) colors.bubbleOutgoingText else colors.bubbleIncomingText,
                                             fontSize = 14.sp,
                                             lineHeight = 20.sp,
                                         )
+                                        if (m.editedAtMs != null) {
+                                            Text(
+                                                text = "(edited)",
+                                                color = colors.textMuted,
+                                                fontSize = 10.sp,
+                                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                            )
+                                        }
+                                        if (m.expiresAtMs != null) {
+                                            val remaining = (m.expiresAtMs - System.currentTimeMillis()) / 1000
+                                            if (remaining > 0) {
+                                                Text(
+                                                    text = "⏱ ${remaining / 60}:${String.format("%02d", remaining % 60)}",
+                                                    color = colors.textMuted,
+                                                    fontSize = 10.sp,
+                                                )
+                                            }
+                                        }
                                     }
                                 } else {
                                     Text(
@@ -1285,7 +1389,7 @@ fun PrivateChatScreen(
                         .clickable(enabled = draft.isNotBlank()) {
                             val parent = replyTarget
                             replyTarget = null
-                            onSend(draft.trim(), parent?.messageIdHex)
+                            onSend(draft.trim(), parent?.messageIdHex, null)
                             draft = ""
                         },
                     contentAlignment = Alignment.Center,
@@ -1351,6 +1455,25 @@ private fun formatDuration(ms: Long): String {
 }
 
 private const val SEARCH_RESULT_MAX = 24
+
+private fun buildAnnotatedMessage(text: String, mentionColor: androidx.compose.ui.graphics.Color): androidx.compose.ui.text.AnnotatedString {
+    val builder = androidx.compose.ui.text.AnnotatedString.Builder()
+    val regex = Regex("@(\\w+)")
+    var lastEnd = 0
+    for (match in regex.findAll(text)) {
+        if (match.range.first > lastEnd) {
+            builder.append(text.substring(lastEnd, match.range.first))
+        }
+        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = mentionColor, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold))
+        builder.append(match.value)
+        builder.pop()
+        lastEnd = match.range.last + 1
+    }
+    if (lastEnd < text.length) {
+        builder.append(text.substring(lastEnd))
+    }
+    return builder.toAnnotatedString()
+}
 
 /** Max voice note length (30 s) and the JPEG quality for picked images. */
 private const val MAX_VOICE_SECONDS: Int = 30

@@ -90,6 +90,15 @@ data class GroupMessageRecordEntity(
     val epoch: Int,
     val timestampMs: Long,
     val isSelf: Boolean,
+    /** Reply-to quoting: the quoted message's id (null when not a reply). */
+    val parentIdHex: String? = null,
+    /** Disappearing messages: epoch millis at which the row must be dropped. */
+    val expiresAtMs: Long? = null,
+    /** True once the author deleted the message (MESSAGE_CONTROL). */
+    @androidx.room.ColumnInfo(defaultValue = "0")
+    val deleted: Boolean = false,
+    /** When the author last edited the message (null = never edited). */
+    val editedAtMs: Long? = null,
 )
 
 @Dao
@@ -103,14 +112,26 @@ interface GroupMessagesDao {
     @Query("SELECT * FROM group_messages ORDER BY timestampMs ASC")
     suspend fun allOnce(): List<GroupMessageRecordEntity>
 
+    @Query("SELECT * FROM group_messages WHERE messageIdHex = :hex")
+    suspend fun find(hex: String): GroupMessageRecordEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(message: GroupMessageRecordEntity)
+
+    @Query("UPDATE group_messages SET deleted = 1 WHERE messageIdHex = :hex")
+    suspend fun markDeleted(hex: String)
+
+    @Query("UPDATE group_messages SET text = :text, editedAtMs = :editedAtMs WHERE messageIdHex = :hex")
+    suspend fun editText(hex: String, text: String, editedAtMs: Long)
 
     @Query("DELETE FROM group_messages WHERE groupIdHex = :groupIdHex")
     suspend fun deleteForGroup(groupIdHex: String)
 
     @Query("DELETE FROM group_messages WHERE timestampMs < :thresholdMs")
     suspend fun deleteOlderThan(thresholdMs: Long)
+
+    @Query("DELETE FROM group_messages WHERE expiresAtMs IS NOT NULL AND expiresAtMs <= :nowMs")
+    suspend fun deleteExpired(nowMs: Long): Int
 
     @Query("DELETE FROM group_messages")
     suspend fun deleteAll()
@@ -126,6 +147,13 @@ data class ChannelMessageRecordEntity(
     val text: String,
     val timestampMs: Long,
     val isSelf: Boolean,
+    /** Reply-to quoting: the quoted message's id (null when not a reply). */
+    val parentIdHex: String? = null,
+    /** True once the author deleted the message (MESSAGE_CONTROL). */
+    @androidx.room.ColumnInfo(defaultValue = "0")
+    val deleted: Boolean = false,
+    /** When the author last edited the message (null = never edited). */
+    val editedAtMs: Long? = null,
 )
 
 @Dao
@@ -139,8 +167,17 @@ interface ChannelMessagesDao {
     @Query("SELECT * FROM channel_messages ORDER BY timestampMs ASC")
     suspend fun allOnce(): List<ChannelMessageRecordEntity>
 
+    @Query("SELECT * FROM channel_messages WHERE messageIdHex = :hex")
+    suspend fun find(hex: String): ChannelMessageRecordEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(message: ChannelMessageRecordEntity)
+
+    @Query("UPDATE channel_messages SET deleted = 1 WHERE messageIdHex = :hex")
+    suspend fun markDeleted(hex: String)
+
+    @Query("UPDATE channel_messages SET text = :text, editedAtMs = :editedAtMs WHERE messageIdHex = :hex")
+    suspend fun editText(hex: String, text: String, editedAtMs: Long)
 
     @Query("DELETE FROM channel_messages WHERE channel = :channel")
     suspend fun deleteForChannel(channel: String)

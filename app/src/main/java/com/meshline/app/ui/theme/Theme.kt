@@ -68,57 +68,59 @@ data class MeshlineColors(
 
 /**
  * Refined Dark Theme Palette
- * Target: Deep cool night charcoal, slate containers, soft periwinkle brand accent,
+ * Target: Warm charcoal surfaces, amber gold brand accent,
  * and restrained emerald green strictly for online presence.
+ * (Coral-DeepLavender Rx dark variant)
  */
 val DarkMeshlineColors = MeshlineColors(
-    background = Color(0xFF11141A),
-    surface = Color(0xFF1A1F28),
-    surfaceElevated = Color(0xFF222834),
-    surfaceContainerLow = Color(0xFF181C24),
-    border = Color(0xFF303746),
-    primary = Color(0xFFA4B2FF), // Refined Soft Indigo Periwinkle
-    onPrimary = Color(0xFF11141A),
-    primarySoft = Color(0xFF282F49), // Subdued indigo tint container
-    secondary = Color(0xFFA0A8B7),
-    textPrimary = Color(0xFFF1F3F8),
-    textSecondary = Color(0xFFA0A8B7),
-    textMuted = Color(0xFF6E788B),
-    statusConnected = Color(0xFF34D399), // Semantic emerald green for peer presence
-    statusWarning = Color(0xFFFBBF24), // Semantic amber
-    danger = Color(0xFFF87171), // Semantic red
-    bubbleOutgoing = Color(0xFF282F49),
-    bubbleOutgoingText = Color(0xFFF1F3F8),
-    bubbleIncoming = Color(0xFF1A1F28),
-    bubbleIncomingText = Color(0xFFF1F3F8),
+    background = Color(0xFF1C1917), // Warm charcoal
+    surface = Color(0xFF292524), // Charcoal card
+    surfaceElevated = Color(0xFF292524),
+    surfaceContainerLow = Color(0xFF231F1D),
+    border = Color(0xFF44403C), // Charcoal border
+    primary = Color(0xFFFF5733), // Warm coral accent
+    onPrimary = Color(0xFFFFFFFF),
+    primarySoft = Color(0xFF3D2A24), // Dark coral tint
+    secondary = Color(0xFFA8A29E), // Muted stone
+    textPrimary = Color(0xFFFAFAF9), // Warm white
+    textSecondary = Color(0xFFA8A29E),
+    textMuted = Color(0xFF78716C),
+    statusConnected = Color(0xFF22C55E), // Success green
+    statusWarning = Color(0xFFF59E0B), // Amber
+    danger = Color(0xFFEF4444), // Danger red
+    bubbleOutgoing = Color(0xFFFF5733), // Coral
+    bubbleOutgoingText = Color(0xFFFFFFFF), // White
+    bubbleIncoming = Color(0xFF292524), // Charcoal card (dark mode)
+    bubbleIncomingText = Color(0xFFFAFAF9), // Warm white
     isDark = true,
 )
 
 /**
  * Refined Light Theme Palette
- * Target: Clean cool light gray, crisp white surfaces, royal indigo brand accent,
- * soft indigo tints, and natural emerald green strictly for online presence.
+ * Target: Warm cream surfaces, warm coral brand accent,
+ * deep lavender incoming bubbles, and natural emerald green for online presence.
+ * (Coral-DeepLavender Rx design)
  */
 val LightMeshlineColors = MeshlineColors(
-    background = Color(0xFFF6F7FB),
-    surface = Color(0xFFFFFFFF),
-    surfaceElevated = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFF0F2F8),
-    border = Color(0xFFE3E7EF),
-    primary = Color(0xFF5368C8), // Refined Royal Indigo
+    background = Color(0xFFFAF7F2), // Warm cream
+    surface = Color(0xFFF5F0E8), // Cream card
+    surfaceElevated = Color(0xFFF5F0E8),
+    surfaceContainerLow = Color(0xFFF0E8DC), // Slightly darker cream
+    border = Color(0xFFE8E0D5), // Warm border
+    primary = Color(0xFFFF5733), // Warm coral accent
     onPrimary = Color(0xFFFFFFFF),
-    primarySoft = Color(0xFFE9EDFF), // Pale indigo wash container
-    secondary = Color(0xFF687386),
-    textPrimary = Color(0xFF1B2028),
-    textSecondary = Color(0xFF687386),
-    textMuted = Color(0xFF9AA4B2),
-    statusConnected = Color(0xFF10B981), // Semantic emerald green for peer presence
-    statusWarning = Color(0xFFF59E0B), // Semantic amber
-    danger = Color(0xFFEF4444), // Semantic red
-    bubbleOutgoing = Color(0xFF5368C8),
-    bubbleOutgoingText = Color(0xFFFFFFFF),
-    bubbleIncoming = Color(0xFFFFFFFF),
-    bubbleIncomingText = Color(0xFF1B2028),
+    primarySoft = Color(0xFFFFE0D6), // Light coral tint
+    secondary = Color(0xFF8B7E74), // Muted brown
+    textPrimary = Color(0xFF2D2420), // Deep ink
+    textSecondary = Color(0xFF8B7E74), // Muted brown
+    textMuted = Color(0xFFA89888), // Lighter muted
+    statusConnected = Color(0xFF28A745), // Success green
+    statusWarning = Color(0xFFF59E0B), // Amber
+    danger = Color(0xFFDC3545), // Danger red
+    bubbleOutgoing = Color(0xFFFF5733), // Coral
+    bubbleOutgoingText = Color(0xFFFFFFFF), // White
+    bubbleIncoming = Color(0xFFC4B5E0), // Deep lavender
+    bubbleIncomingText = Color(0xFF1E1B2E), // Deep purple-ink
     isDark = false,
 )
 

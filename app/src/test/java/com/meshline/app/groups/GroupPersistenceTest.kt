@@ -54,9 +54,26 @@ class GroupPersistenceTest {
             messages.getOrPut(message.groupIdHex) { mutableListOf() }.add(message)
         }
         override suspend fun deleteMessages(groupIdHex: String) { messages.remove(groupIdHex) }
+        override suspend fun markMessageDeleted(messageIdHex: String) {
+            for (g in messages.keys.toList()) {
+                val idx = messages[g]?.indexOfFirst { it.messageIdHex == messageIdHex } ?: -1
+                if (idx >= 0) messages[g]!![idx] = messages[g]!![idx].copy(deleted = true, text = "")
+            }
+        }
+        override suspend fun editMessage(messageIdHex: String, newText: String, editedAtMs: Long) {
+            for (g in messages.keys.toList()) {
+                val idx = messages[g]?.indexOfFirst { it.messageIdHex == messageIdHex } ?: -1
+                if (idx >= 0) messages[g]!![idx] = messages[g]!![idx].copy(text = newText, editedAtMs = editedAtMs)
+            }
+        }
         override suspend fun deleteMessagesOlderThan(thresholdMs: Long) {
             for (g in messages.keys.toList()) {
                 messages[g]?.removeAll { it.timestampMs < thresholdMs }
+            }
+        }
+        override suspend fun deleteExpiredMessages(nowMs: Long) {
+            for (g in messages.keys.toList()) {
+                messages[g]?.removeAll { it.expiresAtMs != null && it.expiresAtMs <= nowMs }
             }
         }
         override suspend fun deleteAll() { groups.clear(); messages.clear() }

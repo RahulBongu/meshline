@@ -36,6 +36,15 @@ interface GroupPersistence {
 
     suspend fun deleteMessages(groupIdHex: String)
 
+    /** MESSAGE_CONTROL: tombstone one message (author-checked by the caller). */
+    suspend fun markMessageDeleted(messageIdHex: String)
+
+    /** MESSAGE_CONTROL: replace one message's body and stamp the edit time. */
+    suspend fun editMessage(messageIdHex: String, newText: String, editedAtMs: Long)
+
     /** Retention sweep: drops history older than [thresholdMs] (epoch millis). */
     suspend fun deleteMessagesOlderThan(thresholdMs: Long)
+
+    /** Disappearing messages: drop rows whose expiry has passed. */
+    suspend fun deleteExpiredMessages(nowMs: Long)
 }

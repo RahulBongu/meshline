@@ -1,4 +1,4 @@
-package com.meshline.app
+﻿package com.meshline.app
 
 import android.Manifest
 import android.content.Intent
@@ -121,7 +121,8 @@ class MainActivity : ComponentActivity() {
                     },
                     onStart = { startMesh() },
                     onSendPublic = { text -> sendPublic(text) },
-                    onSendPrivate = { peerIdHex, text, parentIdHex -> sendPrivate(peerIdHex, text, parentIdHex) },
+                    onSendPrivate = { peerIdHex, text, parentIdHex, ttlSeconds -> sendPrivate(peerIdHex, text, parentIdHex, ttlSeconds) },
+                    onSendControl = { targetIdHex, delete, newText -> sendControl(targetIdHex, delete, newText) },
                     onSendMediaPrivate = { peerIdHex, mediaType, data, caption, parentIdHex ->
                         sendMediaPrivate(peerIdHex, mediaType, data, caption, parentIdHex)
                     },
@@ -199,7 +200,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Sends a private message (Feature 5: reply-to passes the parent message id). */
-    private fun sendPrivate(peerIdHex: String, text: String, parentIdHex: String? = null) {
+    private fun sendPrivate(peerIdHex: String, text: String, parentIdHex: String? = null, ttlSeconds: Int? = null) {
         if (text.isBlank()) return
         startForegroundService(
             Intent(this, BleMeshService::class.java)
@@ -207,6 +208,17 @@ class MainActivity : ComponentActivity() {
                 .putExtra(BleMeshService.EXTRA_PEER_ID, peerIdHex)
                 .putExtra(BleMeshService.EXTRA_TEXT, text)
                 .putExtra(BleMeshService.EXTRA_PARENT_ID, parentIdHex)
+                .putExtra(BleMeshService.EXTRA_TTL_SECONDS, ttlSeconds?.toString())
+        )
+    }
+
+    private fun sendControl(targetIdHex: String, delete: Boolean, newText: String?) {
+        startForegroundService(
+            Intent(this, BleMeshService::class.java)
+                .setAction(BleMeshService.ACTION_SEND_CONTROL)
+                .putExtra(BleMeshService.EXTRA_TARGET_ID, targetIdHex)
+                .putExtra(BleMeshService.EXTRA_DELETE, delete)
+                .putExtra(BleMeshService.EXTRA_NEW_TEXT, newText)
         )
     }
 
@@ -420,13 +432,14 @@ private fun App(
     onSetThemeMode: (AppThemeMode) -> Unit,
     onStart: () -> Unit,
     onSendPublic: (String) -> Unit,
-    onSendPrivate: (String, String, String?) -> Unit,
+    onSendPrivate: (String, String, String?, Int?) -> Unit,
     onSendMediaPrivate: (String, String, ByteArray, String, String?) -> Unit,
     onOpenChat: (String) -> Unit,
     onAcceptKey: (String) -> Unit,
     onRejectKey: (String) -> Unit,
     onPanicWipe: () -> Unit,
     onResend: (String) -> Unit,
+    onSendControl: (String, Boolean, String?) -> Unit,
     onClearChat: (String) -> Unit,
     onGrantPermissions: () -> Unit,
     retention: MessageRetention,
@@ -512,7 +525,7 @@ private fun App(
             scanError = null
             screen = Screen.SCAN
         } else {
-            scanError = "Camera permission denied — allow it in Settings to scan a QR."
+            scanError = "Camera permission denied â€” allow it in Settings to scan a QR."
         }
     }
 
@@ -570,7 +583,7 @@ private fun App(
             modifier = Modifier.fillMaxSize().background(colors.background),
             contentAlignment = Alignment.Center,
         ) {
-            Text("Initializing Meshline cryptographic identity…", color = colors.textSecondary)
+            Text("Initializing Meshline cryptographic identityâ€¦", color = colors.textSecondary)
         }
         return
     }
@@ -646,12 +659,13 @@ private fun App(
                 PrivateChatScreen(
                     peer = peer,
                     messages = privateMessages.filter { it.peerIdHex == peer.peerIdHex },
-                    onSend = { text, parentId -> onSendPrivate(peer.peerIdHex, text, parentId) },
+                    onSend = { text, parentId, ttlSeconds -> onSendPrivate(peer.peerIdHex, text, parentId, ttlSeconds) },
                     onSendMedia = { mime, data, caption, parentId ->
                         onSendMediaPrivate(peer.peerIdHex, mime, data, caption, parentId)
                     },
                     onResend = { messageId -> onResend(messageId) },
                     onClearChat = { onClearChat(peer.peerIdHex) },
+                    onSendControl = { messageId, delete, newText -> onSendControl(messageId, delete, newText) },
                     isTyping = typingPeers.contains(peer.peerIdHex),
                     onTyping = { onSendTyping(peer.peerIdHex) },
                     onBack = { screen = Screen.MAIN },
@@ -670,6 +684,8 @@ private fun App(
                     messages = groupMsgList,
                     selfIdHex = id.senderId.joinToString("") { "%02x".format(it) },
                     onSend = { text -> onSendGroupMessage(group.groupIdHex, text) },
+                    onSendControl = { messageId, delete, newText -> onSendControl(messageId, delete, newText) },
+                    memberLastSeen = peers.associate { it.peerIdHex to (it.lastSeenMs ?: 0L) }.filterValues { it > 0 },
                     onRemoveMember = { memberIdHex -> onRemoveMember(group.groupIdHex, memberIdHex) },
                     onTransferAdmin = { memberIdHex -> onTransferAdmin(group.groupIdHex, memberIdHex) },
                     onLeaveGroup = {
@@ -704,7 +720,7 @@ private fun App(
                             onClick = { currentTab = MainTab.CHATS },
                             icon = {
                                 Box {
-                                    Text("💬", fontSize = 18.sp)
+                                    Text("ðŸ’¬", fontSize = 18.sp)
                                     if (totalGroupBadge > 0) {
                                         Box(
                                             modifier = Modifier
@@ -730,7 +746,7 @@ private fun App(
                             onClick = { currentTab = MainTab.NEARBY },
                             icon = {
                                 Box {
-                                    Text("📡", fontSize = 18.sp)
+                                    Text("ðŸ“¡", fontSize = 18.sp)
                                     if (peers.isNotEmpty()) {
                                         Box(
                                             modifier = Modifier
@@ -781,7 +797,7 @@ private fun App(
                         NavigationBarItem(
                             selected = currentTab == MainTab.SETTINGS,
                             onClick = { currentTab = MainTab.SETTINGS },
-                            icon = { Text("⚙", fontSize = 18.sp) },
+                            icon = { Text("âš™", fontSize = 18.sp) },
                             label = { Text("Settings", fontSize = 11.sp) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = colors.primary,
@@ -853,6 +869,7 @@ private fun App(
                                 onSelectChannel = { ch -> onSetActiveChannel(ch) },
                                 onJoinChannel = { ch -> onSetActiveChannel(ch) },
                                 onSendMessage = { ch, text -> onSendChannelMessage(ch, text) },
+                                 onSendControl = { messageId, delete, newText -> onSendControl(messageId, delete, newText) },
                                 onExecuteCommand = { cmd, ch -> onExecuteCommand(cmd, ch) },
                                 reactions = reactions,
                                 onToggleReaction = onSendReaction,
