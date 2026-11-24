@@ -124,7 +124,8 @@ fun ChannelsScreen(
                         focusedBorderColor = colors.primary,
                         unfocusedBorderColor = colors.border,
                         cursorColor = colors.primary,
-                    )
+                    ),
+                    supportingText = { Text("${editText.length}/500", color = colors.textMuted, fontSize = 10.sp) },
                 )
             },
             confirmButton = {
