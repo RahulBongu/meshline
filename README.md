@@ -40,7 +40,7 @@ Private 1-on-1 messages are end-to-end encrypted using the **Noise XX** protocol
   - Securely shreds SQLCipher database files with random bytes before filesystem deletion.
   - Clears encrypted preferences, wipes Keystore keys, and terminates the application process.
 - **Material 3 Design System**:
-  - Modern Charcoal & Mint Emerald visual theme (`#121417`, `#00E599`).
+  - **Coral-DeepLavender Rx** theme: warm cream surfaces (`#FAF7F2`), warm coral accent (`#FF5733`), deep lavender incoming bubbles (`#C4B5E0`) and deep ink text (`#2D2420`). A warm charcoal + coral dark variant is included.
   - 4 primary navigation tabs: `Chats` (Unified Direct & Groups), `Nearby` (Live mesh & diagnostics), `Channels`, and `Settings`.
 - **Message Reactions, Typing Indicators & Geo Pings**:
   - Emoji reactions on public broadcasts and topic channel messages (`REACTION` — signed, broadcast, TTL 7; stored in the encrypted DB).
@@ -54,6 +54,8 @@ Private 1-on-1 messages are end-to-end encrypted using the **Noise XX** protocol
 - **Reply-to quoting (Feature 5)**: Tap the "↩" on any private message; the next message quotes it (or carries a caption with media).
 - **Local message search (Feature 6)**: Type in the Chats search bar to find messages — matches open the conversation.
 - **Persistent groups & channels (DB v10)**: Groups (including their epoch key), group messages and topic-channel history now survive a restart. Before v10 they were in-memory only.
+- **Message lifecycle (DB v11)**: Disappearing messages with a visible countdown, edit/delete of your own sent messages across the mesh (`MESSAGE_CONTROL` `0x0E` — signed, author-checked), and `@mention` highlighting in DMs, groups and channels.
+- **Mesh topology radar**: The Nearby screen renders an animated radar with range rings, mesh links, signal-coloured peer dots, nickname labels and live presence (online dot / last-seen).
 
 ---
 

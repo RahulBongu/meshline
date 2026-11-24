@@ -34,7 +34,7 @@ This document details the complete technical architecture, security guarantees, 
 | **Nearby Peer Roster** | None in plain messengers | Tapable NEARBY PEERS roster on the Nearby screen (nickname, signal strength, hops, 💬 chat button, Feature 8) | Data from the ANNOUNCE nicknames + router telemetry (RSSI/hops) |
 | **Background Notifications** | None in offline messengers | "New message from …" notifications for private and group messages (Feature 9) | Posts to the "New Messages" channel; previews are single-line, messages are never read back |
 | **Persistent Groups & Channels** | None in plain messengers | Groups (epoch key, roster, unread), group messages and channel history survive a restart (DB v10) | Write-through to the encrypted `groups` / `group_messages` / `channel_messages` tables; single-consumer ordered queue; retention sweep; panic-wipe clears all three |
-| **UI Design System** | Standard OS styles | Material 3 Charcoal & Mint Emerald theme (`#121417`, `#00E599`), 4 main tabs, unread badges | Optimized for high contrast, low cognitive load, and battery efficiency on OLED displays |
+| **UI Design System** | Standard OS styles | Coral-DeepLavender Rx theme (`#FAF7F2` cream, `#FF5733` coral accent, `#C4B5E0` incoming bubbles), 4 main tabs, unread badges | Optimized for high contrast, low cognitive load, and a distinctive warm identity |
 
 ---
 
