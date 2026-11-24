@@ -216,6 +216,53 @@ class GroupProtocolTest {
         }
     }
 
+    // ---- GROUP TEXT (reply-to + disappearing TTL inside group messages) ----
+
+    @Test
+    fun groupTextPlainTextStaysLegacyBytes() {
+        val text = "hello mesh"
+        val encoded = GroupPayloads.encodeGroupText(GroupPayloads.GroupText(text))
+        assertEquals(text, String(encoded, Charsets.UTF_8))
+        val decoded = GroupPayloads.decodeGroupText(encoded)
+        assertEquals(text, decoded.text)
+        assertEquals(null, decoded.parentHex)
+        assertEquals(null, decoded.ttlSeconds)
+    }
+
+    @Test
+    fun groupTextWithParentAndTtlRoundtrips() {
+        val parent = "a".repeat(64)
+        val original = GroupPayloads.GroupText("reply body", parent, 3600)
+        val encoded = GroupPayloads.encodeGroupText(original)
+        val decoded = GroupPayloads.decodeGroupText(encoded)
+        assertEquals("reply body", decoded.text)
+        assertEquals(parent, decoded.parentHex)
+        assertEquals(3600, decoded.ttlSeconds)
+    }
+
+    @Test
+    fun groupTextRejectsOverlongTextAndTtl() {
+        org.junit.Assert.assertThrows(PacketException.InvalidPacket::class.java) {
+            GroupPayloads.encodeGroupText(
+                GroupPayloads.GroupText("x".repeat(GroupPayloads.MAX_GROUP_TEXT_BYTES + 1))
+            )
+        }
+        org.junit.Assert.assertThrows(PacketException.InvalidPacket::class.java) {
+            GroupPayloads.encodeGroupText(
+                GroupPayloads.GroupText("ok", null, GroupPayloads.MAX_GROUP_TTL_SECONDS + 1)
+            )
+        }
+    }
+
+    @Test
+    fun groupTextDecodeFallsBackToRawTextOnMalformedVersionedPayload() {
+        // Leading 0x02 but truncated structured body: must not lose the message.
+        val malformed = byteArrayOf(0x02, 0x01, 0x02, 0x03)
+        val decoded = GroupPayloads.decodeGroupText(malformed)
+        assertEquals(String(malformed, Charsets.UTF_8), decoded.text)
+        assertEquals(null, decoded.parentHex)
+    }
+
     @Test
     fun groupManagerLifecycleAndMessaging() {
         val idAlice = testIdentity()

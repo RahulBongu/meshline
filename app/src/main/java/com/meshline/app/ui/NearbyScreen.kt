@@ -313,6 +313,14 @@ fun NearbyScreen(
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.align(Alignment.Center),
                         )
+                        if (peers.isEmpty()) {
+                            Text(
+                                text = "Scanning for nearby mesh peers…",
+                                color = colors.textMuted,
+                                fontSize = 11.sp,
+                                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                            )
+                        }
                     }
                     AnimatedVisibility(visible = showDiagnostics) {
                         Column(

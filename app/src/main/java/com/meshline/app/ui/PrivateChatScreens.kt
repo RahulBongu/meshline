@@ -775,13 +775,14 @@ fun PrivateChatScreen(
             text = {
                 OutlinedTextField(
                     value = editText,
-                    onValueChange = { editText = it },
+                    onValueChange = { v -> editText = v.take(500) },
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = colors.primary,
                         unfocusedBorderColor = colors.border,
                         cursorColor = colors.primary,
-                    )
+                    ),
+                    supportingText = { Text("${editText.length}/500", color = colors.textMuted, fontSize = 10.sp) },
                 )
             },
             confirmButton = {
@@ -847,7 +848,12 @@ fun PrivateChatScreen(
 
     fun startVoiceRecording() {
         val file = File(context.filesDir, "voice_${System.currentTimeMillis()}.aac")
-        val recorder = MediaRecorder()
+        val recorder = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            MediaRecorder(context)
+        } else {
+            @Suppress("DEPRECATION")
+            MediaRecorder()
+        }
         try {
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)

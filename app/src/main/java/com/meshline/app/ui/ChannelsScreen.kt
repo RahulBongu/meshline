@@ -118,13 +118,14 @@ fun ChannelsScreen(
             text = {
                 OutlinedTextField(
                     value = editText,
-                    onValueChange = { editText = it },
+                    onValueChange = { v -> editText = v.take(500) },
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = colors.primary,
                         unfocusedBorderColor = colors.border,
                         cursorColor = colors.primary,
-                    )
+                    ),
+                    supportingText = { Text("${editText.length}/500", color = colors.textMuted, fontSize = 10.sp) },
                 )
             },
             confirmButton = {

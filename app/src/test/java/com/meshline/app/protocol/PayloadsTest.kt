@@ -175,4 +175,54 @@ class PayloadsTest {
         // Too short.
         assertThrows(PacketException.InvalidPacket::class.java) { Payloads.decodeGeoPing(ByteArray(1)) }
     }
+
+    // ---- MESSAGE_CONTROL (edit / delete) ----
+
+    @Test
+    fun `message control delete round trip`() {
+        val ctrl = Payloads.MessageControlPayload(Payloads.MessageControlPayload.KIND_DELETE, targetId, null)
+        val decoded = Payloads.decodeMessageControl(Payloads.encodeMessageControl(ctrl))
+        assertEquals(Payloads.MessageControlPayload.KIND_DELETE, decoded.kind)
+        assertArrayEquals(targetId, decoded.targetId)
+        assertEquals(null, decoded.newText)
+    }
+
+    @Test
+    fun `message control edit round trip at max length`() {
+        val text = "A".repeat(Payloads.MessageControlPayload.MAX_EDIT_TEXT_CHARS)
+        val ctrl = Payloads.MessageControlPayload(Payloads.MessageControlPayload.KIND_EDIT, targetId, text)
+        val decoded = Payloads.decodeMessageControl(Payloads.encodeMessageControl(ctrl))
+        assertEquals(Payloads.MessageControlPayload.KIND_EDIT, decoded.kind)
+        assertArrayEquals(targetId, decoded.targetId)
+        assertEquals(text, decoded.newText)
+    }
+
+    @Test
+    fun `message control edit rejects over-limit text`() {
+        assertThrows(PacketException.InvalidPacket::class.java) {
+            Payloads.encodeMessageControl(
+                Payloads.MessageControlPayload(
+                    Payloads.MessageControlPayload.KIND_EDIT,
+                    targetId,
+                    "A".repeat(Payloads.MessageControlPayload.MAX_EDIT_TEXT_CHARS + 1),
+                )
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            Payloads.encodeMessageControl(
+                Payloads.MessageControlPayload(Payloads.MessageControlPayload.KIND_DELETE, ByteArray(31), null)
+            )
+        }
+    }
+
+    @Test
+    fun `message control decode rejects malformed payloads`() {
+        assertThrows(PacketException.InvalidPacket::class.java) { Payloads.decodeMessageControl(ByteArray(10)) }
+        assertThrows(PacketException.InvalidPacket::class.java) {
+            Payloads.decodeMessageControl(ByteArray(33).also { it[0] = 99.toByte() })
+        }
+        assertThrows(PacketException.InvalidPacket::class.java) {
+            Payloads.decodeMessageControl(ByteArray(36).also { it[0] = Payloads.MessageControlPayload.KIND_EDIT })
+        }
+    }
 }
