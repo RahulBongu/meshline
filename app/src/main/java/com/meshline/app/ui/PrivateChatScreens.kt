@@ -775,7 +775,7 @@ fun PrivateChatScreen(
             text = {
                 OutlinedTextField(
                     value = editText,
-                    onValueChange = { editText = it },
+                    onValueChange = { v -> editText = v.take(500) },
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = colors.primary,
