@@ -6,6 +6,7 @@ import com.meshline.app.protocol.MeshPacket
 import com.meshline.app.protocol.PacketCodec
 import com.meshline.app.protocol.PacketType
 import com.meshline.app.security.Identity
+import kotlinx.coroutines.flow.first
 import org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator
 import org.bouncycastle.crypto.generators.X25519KeyPairGenerator
 import org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters
@@ -53,6 +54,9 @@ class GroupManagerTest {
     }
 
     private fun hex(id: Identity): String = id.senderId.joinToString("") { "%02x".format(it) }
+
+    private fun hexToBytes(hex: String): ByteArray =
+        hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
     private fun groupControlPacket(admin: Identity, ctrl: GroupPayloads.GroupControl): MeshPacket = MeshPacket(
         version = PacketCodec.PROTOCOL_VERSION,
@@ -227,5 +231,74 @@ class GroupManagerTest {
         assertArrayEquals(idB.ed25519PublicKey, bGroup.adminEd25519Pk)
         assertEquals(group.epoch + 1, bGroup.epoch)
         assertTrue(bGroup.roster.any { it.ed25519PublicKey.contentEquals(idA.ed25519PublicKey) })
+    }
+
+    // ---- message lifecycle (disappearing, edit, delete) ----
+
+    @Test
+    fun disappearingGroupMessageIsSweptAtItsExpiry() {
+        val id = testIdentity()
+        val g = GroupManager(id, { "Me" }, { 1.toByte() })
+        val (group, _) = g.createGroup("Ephemeral", 1.toByte(), emptyList())
+        fun snapshot() = kotlinx.coroutines.runBlocking { g.messages.first() }[group.groupIdHex].orEmpty()
+
+        assertNotNull(g.createOutgoingGroupPacket(group.groupIdHex, "burn after reading", ttlSeconds = 60))
+        val expiresAt = snapshot().single().expiresAtMs
+        assertNotNull(expiresAt)
+
+        // One millisecond before the deadline the message is still visible.
+        g.sweepExpired(expiresAt!! - 1)
+        assertEquals(1, snapshot().size)
+
+        // At the deadline it is dropped from memory.
+        g.sweepExpired(expiresAt)
+        assertEquals(0, snapshot().size)
+    }
+
+    @Test
+    fun staleGroupControlEpochCannotRollBackTheRoster() {
+        val idA = testIdentity()
+        val idB = testIdentity()
+        val idC = testIdentity()
+        val gA = GroupManager(idA, { "Admin" }, { 1.toByte() })
+        val roster = listOf(
+            GroupPayloads.RosterMember(idB.ed25519PublicKey, "Bob", 2),
+            GroupPayloads.RosterMember(idC.ed25519PublicKey, "Cara", 3),
+        )
+        val (group, invites) = gA.createGroup("Ops", 1.toByte(), roster)
+
+        val gB = GroupManager(idB, { "Bob" }, { 2.toByte() })
+        gB.offerInvite(invites[hex(idB)]!!)
+        assertNotNull(gB.acceptInvite(group.groupIdHex))
+
+        // The admin removes Cara: Bob moves to epoch 2 through the invite.
+        val removal = gA.removeMember(group.groupIdHex, hex(idC))
+        assertNotNull(removal)
+        gB.offerInvite(removal!!.invites[hex(idB)]!!)
+        val current = gB.getGroup(group.groupIdHex)
+        assertNotNull(current)
+        assertEquals(2, current!!.epoch)
+
+        // A replayed epoch-1 control (removing Bob) must not roll Bob back and
+        // kick him out of the group.
+        val stale = groupControlPacket(
+            idA,
+            GroupPayloads.GroupControl(
+                epoch = 1,
+                kind = GroupPayloads.ControlKind.REMOVE_MEMBER,
+                groupId = hexToBytes(group.groupIdHex),
+                name = group.name,
+                roster = listOf(
+                    GroupPayloads.RosterMember(idA.ed25519PublicKey, "Admin", 1),
+                    GroupPayloads.RosterMember(idC.ed25519PublicKey, "Cara", 3),
+                ),
+            ),
+        )
+        gB.onIncomingGroupControl(stale)
+
+        val after = gB.getGroup(group.groupIdHex)
+        assertNotNull(after)
+        assertEquals(2, after!!.epoch)
+        assertTrue(after.roster.any { it.ed25519PublicKey.contentEquals(idB.ed25519PublicKey) })
     }
 }

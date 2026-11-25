@@ -472,6 +472,9 @@ class GroupManager(
         }
         val group = _groups.value[hex(ctrl.groupId)] ?: return
         if (!packet.senderId.contentEquals(MessageIds.idFromPublicKey(group.adminEd25519Pk))) return
+        // Epochs only move forward. A replayed control from an older epoch
+        // must not roll the roster or the admin back to a superseded state.
+        if (ctrl.epoch <= group.epoch) return
 
         when (ctrl.kind) {
             GroupPayloads.ControlKind.REMOVE_MEMBER -> {
@@ -708,7 +711,11 @@ class GroupManager(
             if (kept.size != list.size) changed = true
             kept
         }
-        if (changed) _messages.value = next
+        // Nothing expired: skip the database sweep too. This runs on the
+        // service maintenance timer, so an unconditional write would be a
+        // DELETE every couple of seconds for every device.
+        if (!changed) return
+        _messages.value = next
         persist { it.deleteExpiredMessages(nowMs) }
     }
 

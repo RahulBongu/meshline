@@ -430,6 +430,9 @@ class BleMeshService : Service() {
                     channel.tick()
                     t.sweepUnannouncedLinks()
                     pruneTyping()
+                    // Disappearing group messages: drop rows whose TTL elapsed
+                    // (memory + DB). Private messages are swept by channel.tick().
+                    gm.sweepExpired()
                     if (t.unprovenLinkCount > 0 &&
                         System.currentTimeMillis() - lastAnnounceAtMs > RE_ANNOUNCE_INTERVAL_MS
                     ) {
