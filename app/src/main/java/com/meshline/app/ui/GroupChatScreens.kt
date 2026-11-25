@@ -592,15 +592,8 @@ fun GroupChatScreen(
                                             fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
                                         )
                                     }
-                                    if (m.expiresAtMs != null) {
-                                        val remaining = (m.expiresAtMs - System.currentTimeMillis()) / 1000
-                                        if (remaining > 0) {
-                                            Text(
-                                                text = "⏱ ${remaining / 60}:${String.format("%02d", remaining % 60)}",
-                                                color = colors.textMuted,
-                                                fontSize = 10.sp,
-                                            )
-                                        }
+                                    m.expiresAtMs?.let { expiresAt ->
+                                        DisappearingCountdown(expiresAtMs = expiresAt, color = colors.textMuted)
                                     }
                                 }
 

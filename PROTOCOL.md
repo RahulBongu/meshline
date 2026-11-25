@@ -90,8 +90,9 @@ offset  size  field          notes
 | `0x0B` | `REACTION`      | Broadcast emoji reaction on a public broadcast message. Signed, broadcast, TTL 7. Payload: §6.8. |
 | `0x0C` | `TYPING`        | Directed "peer is typing…" indicator. Signed, directed to the peer, TTL 1. Payload: §6.9 (empty). |
 | `0x0D` | `GEO_PING`      | Broadcast privacy-safe geo beacon. Signed, broadcast, TTL 2. Payload: §6.10. |
+| `0x0E` | `MESSAGE_CONTROL`| Author-only edit / delete of a sent message. Signed, broadcast, TTL 7. Payload: §6.11. |
 | `0x00` | *(unknown)*     | Reserved / invalid on decode. |
-| `0x0E..0xFF` | *(unknown)* | Invalid on decode → drop silently (forward-compatible: unknown types MUST NOT crash the app, only be ignored). Old nodes drop `GROUP_MESSAGE`/`GROUP_CONTROL` as unknown (§6.7). |
+| `0x0F..0xFF` | *(unknown)* | Invalid on decode → drop silently (forward-compatible: unknown types MUST NOT crash the app, only be ignored). Old nodes drop `GROUP_MESSAGE`/`GROUP_CONTROL` as unknown (§6.7). |
 
 Unknown type codes are a **soft error**: the packet is dropped, never relayed,
 never delivered, and the receiver stays alive. Version != 1 is a **hard error**:
@@ -480,8 +481,9 @@ semantics are in `GROUPS_DESIGN.md`.
   sender, so packets without a verifiable roster-member signature MUST be
   rejected (dropped, never cached) before dedupe/rate-limit/relay (§8).
   Payload (encrypted, §6.7.1): `epoch(2 BE) | nonce(8) | ciphertext(N)`.
-  Plaintext (before AEAD): the 500-char-limit group text; the sender is
-  resolved locally from the roster (never trusted from the wire). AEAD
+  Plaintext (before AEAD): the versioned group body (§6.7.3) — legacy plain
+  messages are byte-identical to the UTF-8 text; the sender is resolved
+  locally from the roster (never trusted from the wire). AEAD
   associated data is **`groupTag(8) ‖ epoch(2 BE) ‖ senderId(8)`** — both sides
   MUST compute it identically (see §6.7.1). Only members holding the epoch
   key can decrypt; everyone else drops at the tag check.
@@ -531,6 +533,27 @@ ciphertext. There is no inner MeshPacket; the plaintext is the group text
 plus the sender reference. Decryption happens exactly once per delivery
 (after tag + epoch-key lookup), and replays are caught by the per-sender
 nonce window (see `GROUPS_DESIGN.md` §5).
+
+#### 6.7.3 Versioned group plaintext (reply-to, disappearing messages)
+
+A plain group message (no reply, no TTL) is the raw UTF-8 text, exactly as
+before the versioning was added. A reply and/or a disappearing TTL uses:
+
+```
+version(1)    0x02
+flags(1)      bit0 = hasParent, bit1 = hasTtl; all other bits MUST be 0
+[parentLen(1) + parentHex]  if hasParent; parentLen 1..64
+[ttlSeconds(4 BE)]          if hasTtl; 1..604800 (7 days)
+textLen(2 BE) + text        UTF-8, 1..4000 bytes
+```
+
+- `decodeGroupText` treats any payload whose first byte is not `0x02` as
+  legacy raw text, and falls back to the raw bytes as text when a `0x02`
+  body is malformed. A message is therefore never lost to a bad versioned
+  frame; the worst case is that the reply/TTL decoration is dropped.
+- The TTL is measured from the outer packet's `timestampMs`; every member
+  drops the message locally at `timestampMs + ttlSeconds * 1000` (the
+  service sweep also deletes the stored row).
 
 ### 6.8 REACTION
 
@@ -586,6 +609,34 @@ name         UTF-8 nickname of the sender (may be empty)
 - Sent on-demand from the Nearby screen ("📍" button); receivers show the
   recent pings (last 5 minutes) on the Nearby screen, and the sender adds its
   own ping locally after sending.
+
+### 6.11 MESSAGE_CONTROL
+
+Author-only edit / delete of a message that was already sent. The target is
+the 32-byte `messageId` of a `PRIVATE_MESSAGE` (the application-level id
+inside the envelope), `GROUP_MESSAGE`, `CHANNEL_MESSAGE` or `PUBLIC_MESSAGE`.
+The same payload works on every surface because the message id is uniform.
+
+```
+kind(1)        1 = DELETE, 2 = EDIT
+targetId(32)   the 32-byte messageId being mutated
+[textLen(2 BE) + text]   EDIT only: UTF-8, 1..500 chars
+```
+
+- Signed (§3), broadcast, TTL 7.
+- DELETE is exactly **33 bytes** and MUST NOT carry text. EDIT is exactly
+  `35 + textLen` bytes. A length mismatch, an empty or over-limit text, a
+  DELETE with text, or an unknown kind is an invalid packet and is dropped.
+- **The author check is re-done at apply time.** The router verifies the
+  packet signature; the handler then requires `senderId` to be the original
+  author of `targetId` (the row's sender for a received message, the local
+  identity for a sent one). A control from anybody else is rejected, so a
+  signed packet can never mutate another peer's message.
+- Storage: DELETE marks the row deleted (the UI shows a tombstone, the text
+  is cleared); EDIT replaces the text and records `editedAtMs` (the UI shows
+  "(edited)"). Both are persisted in the encrypted database.
+- Edits are capped at 500 characters in the composer, matching the wire
+  limit, so an over-limit EDIT is never produced by the UI.
 
 ## 7. Identity & keys (summary — details in Phase D)
 

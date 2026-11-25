@@ -49,7 +49,7 @@ data class GroupItem(
             epochKey.contentEquals(other.epochKey) &&
             adminEd25519Pk.contentEquals(other.adminEd25519Pk) &&
             groupTagHex == other.groupTagHex &&
-            roster == other.roster &&
+            rosterContentEquals(roster, other.roster) &&
             isAdmin == other.isAdmin &&
             unreadCount == other.unreadCount &&
             joinedAtMs == other.joinedAtMs &&
@@ -64,11 +64,39 @@ data class GroupItem(
         h = 31 * h + epochKey.contentHashCode()
         h = 31 * h + adminEd25519Pk.contentHashCode()
         h = 31 * h + groupTagHex.hashCode()
-        h = 31 * h + roster.hashCode()
+        h = 31 * h + rosterContentHash(roster)
         h = 31 * h + isAdmin.hashCode()
         h = 31 * h + unreadCount
         h = 31 * h + joinedAtMs.hashCode()
         h = 31 * h + lastActivityMs.hashCode()
+        return h
+    }
+
+    /**
+     * Roster members hold their Ed25519 key as a `ByteArray`; the generated
+     * data-class equality would compare those arrays by reference. Two rosters
+     * decoded from the same bytes are the same roster, so compare the key
+     * material by content (and hash it the same way).
+     */
+    private fun rosterContentEquals(
+        a: List<GroupPayloads.RosterMember>,
+        b: List<GroupPayloads.RosterMember>,
+    ): Boolean {
+        if (a.size != b.size) return false
+        return a.indices.all { i ->
+            a[i].ed25519PublicKey.contentEquals(b[i].ed25519PublicKey) &&
+                a[i].nickname == b[i].nickname &&
+                a[i].avatarIndex == b[i].avatarIndex
+        }
+    }
+
+    private fun rosterContentHash(roster: List<GroupPayloads.RosterMember>): Int {
+        var h = roster.size
+        for (member in roster) {
+            h = 31 * h + member.ed25519PublicKey.contentHashCode()
+            h = 31 * h + member.nickname.hashCode()
+            h = 31 * h + member.avatarIndex.toInt()
+        }
         return h
     }
 }
@@ -472,6 +500,9 @@ class GroupManager(
         }
         val group = _groups.value[hex(ctrl.groupId)] ?: return
         if (!packet.senderId.contentEquals(MessageIds.idFromPublicKey(group.adminEd25519Pk))) return
+        // Epochs only move forward. A replayed control from an older epoch
+        // must not roll the roster or the admin back to a superseded state.
+        if (ctrl.epoch <= group.epoch) return
 
         when (ctrl.kind) {
             GroupPayloads.ControlKind.REMOVE_MEMBER -> {
@@ -708,7 +739,11 @@ class GroupManager(
             if (kept.size != list.size) changed = true
             kept
         }
-        if (changed) _messages.value = next
+        // Nothing expired: skip the database sweep too. This runs on the
+        // service maintenance timer, so an unconditional write would be a
+        // DELETE every couple of seconds for every device.
+        if (!changed) return
+        _messages.value = next
         persist { it.deleteExpiredMessages(nowMs) }
     }
 
