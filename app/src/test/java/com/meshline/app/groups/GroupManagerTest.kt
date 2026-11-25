@@ -301,4 +301,35 @@ class GroupManagerTest {
         assertEquals(2, after!!.epoch)
         assertTrue(after.roster.any { it.ed25519PublicKey.contentEquals(idB.ed25519PublicKey) })
     }
+
+    @Test
+    fun groupItemEqualityComparesRosterKeysByContent() {
+        fun item(roster: List<GroupPayloads.RosterMember>): GroupItem = GroupItem(
+            groupIdHex = "aa".repeat(16),
+            name = "Ops",
+            avatarIndex = 1,
+            epoch = 2,
+            epochKey = byteArrayOf(1, 2, 3),
+            adminEd25519Pk = byteArrayOf(4, 5, 6),
+            groupTagHex = "bb".repeat(8),
+            roster = roster,
+            isAdmin = true,
+        )
+
+        val rosterA = listOf(
+            GroupPayloads.RosterMember(ByteArray(32) { 0x01 }, "Alice", 2),
+            GroupPayloads.RosterMember(ByteArray(32) { 0x02 }, "Bob", 3),
+        )
+        // Same key bytes in fresh arrays: the items must be equal.
+        val rosterB = listOf(
+            GroupPayloads.RosterMember(ByteArray(32) { 0x01 }, "Alice", 2),
+            GroupPayloads.RosterMember(ByteArray(32) { 0x02 }, "Bob", 3),
+        )
+        assertEquals(item(rosterA), item(rosterB))
+        assertEquals(item(rosterA).hashCode(), item(rosterB).hashCode())
+
+        // A changed nickname must break equality.
+        val renamed = rosterB.toMutableList().also { it[1] = it[1].copy(nickname = "Bobby") }
+        assertFalse(item(rosterA) == item(renamed))
+    }
 }
